@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Django / database
+db.sqlite3
+*.sqlite3
+
+# Django logs & runtime files
+*.log
+*.pot
+*.pyc
+*.pyo
+*.pyd
+*.pid
+*.seed
+*.cover
+*.log
+*.pot
+*.mo
+
+# Media & static (generated files, not source)
+media/
+staticfiles/
+static/
+
+# Migrations (keep __init__.py so folder exists, but ignore generated migrations)
+*/migrations/*
+!*/migrations/__init__.py
+
+# Environment & secrets
+.env
+*.env
+.env.*
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Coverage / testing
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+pytest_cache/
+.pytest_cache/
+.cache/
