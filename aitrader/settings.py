@@ -37,6 +37,8 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'datafeed',
+    'features'
 ]
 
 MIDDLEWARE = [
@@ -74,7 +76,14 @@ WSGI_APPLICATION = 'aitrader.wsgi.application'
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
 DATABASES = {
-    'default': {
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "OPTIONS": {
+            "service": "my_service",  # points to [my_service] in .pg_service.conf
+            "passfile": str(Path.home() / ".pgpass"),
+        },
+    },
+    'sqlite': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
     }
