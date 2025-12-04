@@ -38,6 +38,7 @@ static/
 .env
 *.env
 .env.*
+credentials/
 
 # IDE / editor
 .vscode/
