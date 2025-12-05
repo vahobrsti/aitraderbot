@@ -31,7 +31,7 @@ staticfiles/
 static/
 
 # Migrations (keep __init__.py so folder exists, but ignore generated migrations)
-*/migrations/*
+
 !*/migrations/__init__.py
 
 # Environment & secrets
