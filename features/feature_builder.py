@@ -40,7 +40,13 @@ def build_features_and_labels_from_raw(
 
     # Convenience aliases
     df['mvrv_long_short'] = df['mvrv_long_short_diff_usd']
+    # normalize the sentiment
     df['sentiment_raw'] = df['sentiment_weighted_total']
+    s = df["sentiment_raw"]
+    mu = s.mean()
+    sigma = s.std()  # sample std dev (perfectly fine)
+    df["sentiment_norm"] = (s - mu) / sigma
+
     df['close'] = df['btc_close']
 
     feats = pd.DataFrame(index=df.index)
@@ -91,24 +97,53 @@ def build_features_and_labels_from_raw(
     ).astype(int)
 
     # ---------- 5) Sentiment ----------
+    # Work with normalized sentiment
+    sent = df["sentiment_norm"]
+
+    # (a) Distance from rolling minima over 1m, 6m, 1y
     for win in [30, 180, 365]:
-        mean = df['sentiment_raw'].rolling(win).mean()
-        std = df['sentiment_raw'].rolling(win).std()
-        feats[f'sentiment_z_{win}d'] = (
-            df['sentiment_raw'] - mean
-        ) / (std + 1e-9)
+        roll_min = sent.rolling(win).min()
+        feats[f"sentiment_min_{win}d"] = roll_min
+        feats[f"sentiment_dist_from_min_{win}d"] = sent - roll_min
+        # Detect a *new* low in this window:
+        # compare today's value to the previous rolling min (excluding today)
+        prev_min = sent.shift(1).rolling(win).min()
+        feats[f"sentiment_new_low_{win}d"] = (
+            (sent < prev_min)  # strictly lower than anything in last `win` days
+        ).astype(int)
 
-    feats['sentiment_trend_7d'] = df['sentiment_raw'] - df['sentiment_raw'].shift(7)
-    feats['sentiment_very_negative'] = (
-        feats['sentiment_z_180d'] < -1.0
-    ).astype(int)
-    feats['sentiment_downtrend_7d'] = (
-        feats['sentiment_trend_7d'] < 0
+    # (b) "Near bottom" flags (tunable threshold in z-score units)
+    BOTTOM_THRESH = 0.5  # you can tune this later
+
+    for win in [30, 180, 365]:
+        feats[f"sentiment_near_bottom_{win}d"] = (
+            feats[f"sentiment_dist_from_min_{win}d"] < BOTTOM_THRESH
+        ).astype(int)
+
+    # (c) 7-day trend on normalized sentiment
+    feats["sentiment_trend_7d"] = sent - sent.shift(7)
+    feats["sentiment_downtrend_7d"] = (
+        feats["sentiment_trend_7d"] < 0
     ).astype(int)
 
-    feats['contrarian_buy_flag'] = (
-        (feats['sentiment_very_negative'] == 1)
-        & (feats['sentiment_downtrend_7d'] == 1)
+    # (d) Optional: keep rolling z-scores as extra ML features
+    for win in [30, 180, 365]:
+        roll_mean = sent.rolling(win).mean()
+        roll_std = sent.rolling(win).std()
+        feats[f"sentiment_z_{win}d"] = (sent - roll_mean) / (roll_std + 1e-9)
+
+    # (e) Final contrarian flag:
+    # "Today is near the worst lows in 1m, 6m, 1y AND still trending down over last week"
+    feats["contrarian_buy_flag"] = (
+            (
+                    (feats["sentiment_near_bottom_30d"] == 1)
+                    & (feats["sentiment_near_bottom_180d"] == 1)
+                    & (feats["sentiment_near_bottom_365d"] == 1)
+                    & (feats["sentiment_downtrend_7d"] == 1)
+            )
+            |
+            ((feats["sentiment_new_low_180d"] == 1) | (feats["sentiment_new_low_365d"] == 1)
+            )
     ).astype(int)
 
     # ---------- 6) Interactions ----------
