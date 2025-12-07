@@ -37,7 +37,7 @@ class RawDailyData(models.Model):
     btc_close = models.FloatField(null=True, blank=True)
 
     # BTC price (from btc_price sheet)
-    btc_price_normalised = models.FloatField(null=True, blank=True)
+    btc_price_mean = models.FloatField(null=True, blank=True)
 
     # Housekeeping
     created_at = models.DateTimeField(auto_now_add=True)
@@ -49,6 +49,4 @@ class RawDailyData(models.Model):
 
     def __str__(self):
         return f"{self.date}"
-from django.db import models
 
-# Create your models here.

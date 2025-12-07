@@ -1,6 +1,7 @@
 # datafeed/management/commands/sync_sheets.py
 
 import os
+from email.utils import specialsre
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
@@ -17,7 +18,6 @@ from datafeed.models import RawDailyData
 # Simple 2-column sheets: Date, Value
 SHEET_FIELD_MAP = {
     "mean_dollar_invested_age": "mdia",
-
     "mvrv_usd_1d": "mvrv_usd_1d",
     "mvrv_usd_7d": "mvrv_usd_7d",
     "mvrv_usd_30d": "mvrv_usd_30d",
@@ -26,13 +26,12 @@ SHEET_FIELD_MAP = {
     "mvrv_usd_180d": "mvrv_usd_180d",
     "mvrv_usd_365d": "mvrv_usd_365d",
     "mvrv_long_short_diff_usd": "mvrv_long_short_diff_usd",
-
     "BTC_holders_1_10": "btc_holders_1_10",
     "BTC_holders_10_100": "btc_holders_10_100",
     "BTC_holders_100_1k": "btc_holders_100_1k",
     "BTC_holders_1k_10k": "btc_holders_1k_10k",
-
     "sentiment_weighted_total": "sentiment_weighted_total",
+    "btc_price":"btc_price_mean"
 }
 
 
@@ -55,7 +54,6 @@ class Command(BaseCommand):
             )
 
         spreadsheet = get_spreadsheet(sheet_id)
-
         # 1) Merge all series into dict[date -> {field: value, ...}]
         merged: dict = {}
 
@@ -73,17 +71,17 @@ class Command(BaseCommand):
             ws = spreadsheet.worksheet("btc_OHLC")
             rows = ws.get_all_records()
             for row in rows:
-                date_str = row.get("Date") or row.get("date")
+                date_str = row.get("Date")
                 if not date_str:
                     continue
                 dt = parse_date(date_str)
                 if not dt:
                     continue
                 merged.setdefault(dt, {})
-                merged[dt]["btc_open"] = parse_float(row.get("Open"))
-                merged[dt]["btc_high"] = parse_float(row.get("High"))
-                merged[dt]["btc_low"] = parse_float(row.get("Low"))
-                merged[dt]["btc_close"] = parse_float(row.get("Close"))
+                merged[dt]["btc_open"] = parse_float(row.get("Open Price USD"))
+                merged[dt]["btc_high"] = parse_float(row.get("High Price USD"))
+                merged[dt]["btc_low"] = parse_float(row.get("Low Price USD"))
+                merged[dt]["btc_close"] = parse_float(row.get("Close Price USD"))
         except Exception as e:
             self.stdout.write(self.style.WARNING(f"btc_OHLC sheet skipped: {e}"))
 
@@ -93,7 +91,7 @@ class Command(BaseCommand):
             ws = spreadsheet.worksheet("btc_price")
             rows = ws.get_all_records()
             for row in rows:
-                date_str = row.get("Date") or row.get("date")
+                date_str = row.get("Date")
                 if not date_str:
                     continue
                 dt = parse_date(date_str)
@@ -101,14 +99,7 @@ class Command(BaseCommand):
                     continue
                 merged.setdefault(dt, {})
                 merged[dt]["btc_price_mean"] = parse_float(
-                    row.get("mean_price")
-                    or row.get("MeanPrice")
-                    or row.get("Price")
-                )
-                merged[dt]["btc_price_normalised"] = parse_float(
-                    row.get("normalised_price")
-                    or row.get("NormalisedPrice")
-                    or row.get("Normalised")
+                    row.get("Value")
                 )
         except Exception as e:
             self.stdout.write(self.style.WARNING(f"btc_price sheet skipped: {e}"))

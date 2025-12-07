@@ -1,21 +1,19 @@
 from dotenv import load_dotenv
 from django.conf import settings
 import os
+from pathlib import Path
 import datetime
 import gspread
 from google.oauth2.service_account import Credentials
+from typing import Dict, Optional
 
 BASE_DIR = settings.BASE_DIR
 
 load_dotenv(".env")
 
 SHEET_ID = os.getenv("GSPREAD_SHEET_ID")
-# from .env
-CREDS_FILE = os.getenv(
-    "GSPREAD_CREDS_FILE",
-    str(BASE_DIR / "credentials" / "gsheets-service-account.json"),
-)
-
+DEFAULT_CREDS_PATH = BASE_DIR / "credentials" / "gsheets-service-account.json"
+CREDS_FILE = Path(os.environ.get("GSPREAD_CREDS_FILE", str(DEFAULT_CREDS_PATH)))
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 
@@ -35,7 +33,8 @@ def get_client():
     return gspread.authorize(creds)
 
 
-def get_spreadsheet(sheet_id: str | None = None):
+def get_spreadsheet(sheet_id: Optional[str] = None):
+
     """
     Open the spreadsheet by ID.
     If sheet_id is None, read it from GSPREAD_SHEET_ID env var.
@@ -84,8 +83,8 @@ def read_two_column_sheet(spreadsheet, sheet_name: str, date_col="Date", value_c
     except gspread.WorksheetNotFound:
         return {}
 
-    rows = ws.get_all_records()  # expects header row
-    result: dict[datetime.date, float | None] = {}
+    rows = ws.get_all_records()  # Optional[str] = None
+    result: Dict[datetime.date, Optional[float]] = {}
 
     for row in rows:
         date_str = row.get(date_col) or row.get(date_col.lower())
