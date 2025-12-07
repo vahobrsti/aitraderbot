@@ -1,7 +1,6 @@
 # features/feature_builder.py
 
 import pandas as pd
-import numpy as np
 
 
 def build_features_and_labels_from_raw(
@@ -30,6 +29,10 @@ def build_features_and_labels_from_raw(
         'mvrv_usd_365d',
     ]
     df['mvrv_composite'] = df[mvrv_cols].mean(axis=1)
+    # convert to a PnL-style percentage: -100..+ (roughly) 100+
+    # > 0 = in profit, < 0 = in loss, 0 = breakeven
+    df['mvrv_composite_pct'] = (df['mvrv_composite_ratio'] - 1.0) * 100.0
+
 
     # Whale buckets: small vs big
     df['btc_holders_1_100'] = df['btc_holders_1_10'] + df['btc_holders_10_100']
@@ -59,12 +62,13 @@ def build_features_and_labels_from_raw(
 
     # ---------- 3) MVRV composite extremes ----------
     for win in [90, 180, 365]:
-        roll_mean = df['mvrv_composite'].rolling(win).mean()
-        roll_std = df['mvrv_composite'].rolling(win).std()
-        z = (df['mvrv_composite'] - roll_mean) / (roll_std + 1e-9)
+        roll_mean = df['mvrv_composite_pct'].rolling(win).mean()
+        roll_std = df['mvrv_composite_pct'].rolling(win).std()
+        z = (df['mvrv_composite_pct'] - roll_mean) / (roll_std + 1e-9)
         feats[f'mvrv_comp_z_{win}d'] = z
         feats[f'mvrv_comp_undervalued_{win}d'] = (z < -1.0).astype(int)
         feats[f'mvrv_comp_overheated_{win}d'] = (z > 1.0).astype(int)
+        feats['mvrv_composite_pct'] = df['mvrv_composite_pct']
 
     # ---------- 4) Whale accumulation ----------
     for bucket, col in [
