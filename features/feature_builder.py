@@ -133,7 +133,7 @@ def build_features_and_labels_from_raw(
         feats[f"sentiment_z_{win}d"] = (sent - roll_mean) / (roll_std + 1e-9)
 
     # (e) Final contrarian flag:
-    # "Today is near the worst lows in 1m, 6m, 1y AND still trending down over last week"
+    # "Today is near the worst lows in 1m, 6m, 1y AND still trending down over last week" or we have logged a new low which is great
     feats["contrarian_buy_flag"] = (
             (
                     (feats["sentiment_near_bottom_30d"] == 1)
