@@ -421,8 +421,6 @@ def build_features_and_labels_from_raw(
     fwd_min = df['mean_price'].rolling(window).min().shift(-window + 1)
     target_short = df['mean_price'] * (1 - target_return)
     feats['label_good_move_short'] = (fwd_min <= target_short).astype(int)
-    # Legacy alias (optional, keeping for compatibility if needed)
-    feats['label_good_move'] = feats['label_good_move_long'] | feats['label_good_move_short']
 
     feats = feats.dropna().copy()
     return feats
