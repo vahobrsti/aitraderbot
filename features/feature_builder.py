@@ -378,20 +378,35 @@ def build_features_and_labels_from_raw(
     ).astype(int)
 
     # ---------- 6) Interactions ----------
-    feats['mdia_pos_and_sent_pos'] = (
-        (feats['mdia_slope_7d'] > 0)
-        & (feats['sentiment_z_30d'] > 0)
-    ).astype(int)
+    # (Note: Specific MDIA & Sentiment interactions were handled in Section 1)
+    
+    # ---------- 6) Interactions / "Option Signals" ----------
+    # Intuition:
+    # Call Option (Buy Exposure):
+    #   - MVRV is Low (Undervalued OR New Low OR Near Historical Bottom) -> Price is cheap
+    #   - Sentiment is Negative -> Crowd is fearful
+    
+    mvrv_is_cheap = (
+        (feats['mvrv_comp_undervalued_90d'] == 1) |
+        (feats['mvrv_comp_new_low_180d'] == 1) |
+        (feats['mvrv_comp_near_bottom_any'] == 1)
+    )
+    sent_is_fear = (df['sentiment_norm'] < -1.0)  # "Very negative"
 
-    feats['mdia_pos_and_sent_neg'] = (
-        (feats['mdia_slope_7d'] > 0)
-        & (feats['sentiment_z_30d'] < 0)
-    ).astype(int)
+    feats['signal_option_call'] = (mvrv_is_cheap & sent_is_fear).astype(int)
 
-    feats['strong_value_env'] = (
-        (feats['mvrv_comp_undervalued_90d'] == 1)
-        & (feats['whale_100_10k_accum_30d'] == 1)
-    ).astype(int)
+    # Put Option (Sell/Hedge Exposure):
+    #   - MVRV is High (Overheated OR New High OR Near Historical Top) -> Price is expensive
+    #   - Sentiment is Positive -> Crowd is euphoric
+
+    mvrv_is_expensive = (
+        (feats['mvrv_comp_overheated_90d'] == 1) |
+        (feats['mvrv_comp_new_high_180d'] == 1) |
+        (feats['mvrv_comp_near_top_any'] == 1)
+    )
+    sent_is_greed = (df['sentiment_norm'] > 1.0) # "Very positive"
+
+    feats['signal_option_put'] = (mvrv_is_expensive & sent_is_greed).astype(int)
 
     # ---------- 7) Label: "good move within horizon_days?" ----------
     window = horizon_days
