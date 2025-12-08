@@ -52,10 +52,56 @@ def build_features_and_labels_from_raw(
     feats = pd.DataFrame(index=df.index)
 
     # ---------- 1) MDIA slope ----------
-    feats['mdia_slope_7d'] = df['mdia'] - df['mdia'].shift(7)
-    feats['mdia_slope_30d'] = df['mdia'] - df['mdia'].shift(30)
-    feats['mdia_slope_pos'] = (feats['mdia_slope_7d'] > 0).astype(int)
-    feats['mdia_slope_neg'] = (feats['mdia_slope_7d'] < 0).astype(int)
+    # Intuition: 
+    # - Negative slope = Good (Capital injecting). The more negative, the better.
+    # - Positive slope = Bad (Stagnant). Check Sentiment:
+    #    -> MDIA(+) & Sentiment(+) => BAD (Price likely down)
+    #    -> MDIA(+) & Sentiment(-) => GOOD (Recovery mid-term)
+
+    # 1. Calculate Slopes (Deltas) AND Gradients (Per-Day Rate)
+    # We need gradients to fairly compare 1d vs 2d vs 4d vs 7d
+    for win in [1, 2, 4, 7, 14]:
+        slope_col = f'mdia_slope_{win}d'
+        feats[slope_col] = df['mdia'] - df['mdia'].shift(win)
+        # Gradient = Delta / Days
+        feats[f'mdia_grad_{win}d'] = feats[slope_col] / win
+
+    # 1.1 Measure "Injection Acceleration" (The Term Structure of Slopes)
+    # "Compare 1d to 2d, 2d to 4d, 4d to 7d"
+    # If 1d is *more negative* than 2d, we are accelerating downwards (New Capital Entering).
+    # We calculate the difference: (ShortTerm - LongTerm). 
+    # Negative Value = Accelerating Downwards (Good).
+    
+    feats['mdia_accel_1d_vs_2d'] = feats['mdia_grad_1d'] - feats['mdia_grad_2d']
+    feats['mdia_accel_2d_vs_4d'] = feats['mdia_grad_2d'] - feats['mdia_grad_4d']
+    feats['mdia_accel_4d_vs_7d'] = feats['mdia_grad_4d'] - feats['mdia_grad_7d']
+
+    # 1.2 "More positive = Higher Downside Risk" (Stagnation Severity)
+    # We look at the 7d trend for this general risk gauge
+    feats['mdia_slope_stagnation_severity'] = feats['mdia_slope_7d'].clip(lower=0)
+
+    # 2. Interactions with Sentiment
+    # (We use df['sentiment_norm'] which was calculated above)
+    mdia_is_pos_7d = feats['mdia_slope_7d'] > 0
+    sent_is_pos = df['sentiment_norm'] > 0
+    sent_is_neg = df['sentiment_norm'] < 0
+
+    # Case 1: MDIA(+) [Bad] AND Sentiment(+) [Bad] -> Very Bearish
+    feats['signal_mdia_stagnant_overheated'] = (
+        mdia_is_pos_7d & sent_is_pos
+    ).astype(int)
+
+    # Case 2: MDIA(+) [Bad] BUT Sentiment(-) [Good] -> Recovery Context
+    feats['signal_mdia_stagnant_fear'] = (
+        mdia_is_pos_7d & sent_is_neg
+    ).astype(int)
+
+    # Case 3: MDIA(-) [Good] -> Pure Capital Injection Signal
+    # We just use the raw slope features (mdia_slope_Xd) for this, 
+    # as "the more negative the better" is naturally captured by the raw value.
+    feats['signal_mdia_injection'] = (
+        feats['mdia_slope_7d'] < 0
+    ).astype(int)
 
     # ---------- 2) MVRV long–short ----------
     feats['mvrv_ls_value'] = df['mvrv_long_short']
