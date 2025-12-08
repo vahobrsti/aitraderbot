@@ -104,14 +104,39 @@ def build_features_and_labels_from_raw(
     ).astype(int)
 
     # ---------- 2) MVRV long–short ----------
-    feats['mvrv_ls_value'] = df['mvrv_long_short']
-    feats['mvrv_ls_trend_7d'] = df['mvrv_long_short'] - df['mvrv_long_short'].shift(7)
-    feats['mvrv_ls_trend_30d'] = df['mvrv_long_short'] - df['mvrv_long_short'].shift(30)
-    feats['mvrv_ls_positive'] = (feats['mvrv_ls_value'] > 0).astype(int)
-    feats['mvrv_ls_negative'] = (feats['mvrv_ls_value'] < 0).astype(int)
-    feats['mvrv_ls_uptrend'] = (feats['mvrv_ls_trend_30d'] > 0).astype(int)
-    feats['mvrv_ls_downtrend'] = (feats['mvrv_ls_trend_30d'] < 0).astype(int)
+    # Intuition:
+    # 1. Value: Positive (+) is Good, Negative (-) is Bad.
+    # 2. Trend: Downtrend is VERY BEARISH (regardless of value). Uptrend is good.
+    # 3. Action: Calculate slopes over 1d, 2d, 4d, 8d.
 
+    feats['mvrv_ls_value'] = df['mvrv_long_short']
+
+    # (a) Calculate Slopes/Trends over user-specified windows
+    for win in [1, 2, 4, 8]:
+        feats[f'mvrv_ls_trend_{win}d'] = df['mvrv_long_short'] - df['mvrv_long_short'].shift(win)
+
+    # (b) Define Trend Regimes
+    # "See if it is trending up or down" -> We use the 4d and 8d trends for robustness
+    is_downtrending = (feats['mvrv_ls_trend_4d'] < 0) & (feats['mvrv_ls_trend_8d'] < 0)
+    is_uptrending = (feats['mvrv_ls_trend_4d'] > 0) & (feats['mvrv_ls_trend_8d'] > 0)
+
+    # (c) Interaction / Signals
+    
+    # "if + , good; if -, bad" (Base Condition)
+    feats['mvrv_ls_is_positive'] = (feats['mvrv_ls_value'] > 0).astype(int)
+    
+    # "if it's in downtrend regardless of current value is very bearish"
+    feats['mvrv_ls_bearish_flush'] = is_downtrending.astype(int)
+    
+    # "if it is in an uptrend, then good"
+    feats['mvrv_ls_bullish_recovery'] = is_uptrending.astype(int)
+
+    # Composite Score (Optional but helpful):
+    # +1 if uptrend, -1 if downtrend, 0 neutral
+    feats['mvrv_ls_trend_score'] = 0
+    feats.loc[is_uptrending, 'mvrv_ls_trend_score'] = 1
+    feats.loc[is_downtrending, 'mvrv_ls_trend_score'] = -1
+    feats['mvrv_ls_very_bearish_regime'] = ( (feats['mvrv_ls_value'] < 0) & is_downtrending).astype(int)
     # ---------- 3) MVRV composite extremes [start] ----------
     mvrv = df["mvrv_composite_pct"]
 
