@@ -182,7 +182,6 @@ def build_features_and_labels_from_raw(
     ).astype(int)
    
     # ---------- 5) Sentiment ----------
-    # ---------- 5) Sentiment ----------
     # Work with normalized sentiment
     sent = df["sentiment_norm"]
 
@@ -235,14 +234,14 @@ def build_features_and_labels_from_raw(
     # Common conditions across 1m, 3m, 6m
     # "check historical values over 1 month, 3month and 6 months..."
     near_bottom_multi = (
-        (feats["sentiment_near_bottom_30d"] == 1) &
-        (feats["sentiment_near_bottom_90d"] == 1) &
+        (feats["sentiment_near_bottom_30d"] == 1) |
+        (feats["sentiment_near_bottom_90d"] == 1) |
         (feats["sentiment_near_bottom_180d"] == 1)
     )
 
     near_top_multi = (
-        (feats["sentiment_near_top_30d"] == 1) &
-        (feats["sentiment_near_top_90d"] == 1) &
+        (feats["sentiment_near_top_30d"] == 1) |
+        (feats["sentiment_near_top_90d"] == 1) |
         (feats["sentiment_near_top_180d"] == 1)
     )
 
