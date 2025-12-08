@@ -67,14 +67,80 @@ def build_features_and_labels_from_raw(
     feats['mvrv_ls_downtrend'] = (feats['mvrv_ls_trend_30d'] < 0).astype(int)
 
     # ---------- 3) MVRV composite extremes ----------
+    mvrv = df['mvrv_composite_pct']
+
+    # (a) Rolling z-scores (keep as generic ML features)
     for win in [90, 180, 365]:
-        roll_mean = df['mvrv_composite_pct'].rolling(win).mean()
-        roll_std = df['mvrv_composite_pct'].rolling(win).std()
-        z = (df['mvrv_composite_pct'] - roll_mean) / (roll_std + 1e-9)
+        roll_mean = mvrv.rolling(win).mean()
+        roll_std = mvrv.rolling(win).std()
+        z = (mvrv - roll_mean) / (roll_std + 1e-9)
+
         feats[f'mvrv_comp_z_{win}d'] = z
         feats[f'mvrv_comp_undervalued_{win}d'] = (z < -1.0).astype(int)
         feats[f'mvrv_comp_overheated_{win}d'] = (z > 1.0).astype(int)
-        feats['mvrv_composite_pct'] = df['mvrv_composite_pct']
+
+    # (b) Min / max and distance from them over 3m, 6m, 1y
+    for win in [90, 180, 365]:
+        roll_min = mvrv.rolling(win).min()
+        roll_max = mvrv.rolling(win).max()
+
+        feats[f'mvrv_comp_min_{win}d'] = roll_min
+        feats[f'mvrv_comp_max_{win}d'] = roll_max
+
+        feats[f'mvrv_comp_dist_from_min_{win}d'] = mvrv - roll_min
+        feats[f'mvrv_comp_dist_from_max_{win}d'] = roll_max - mvrv
+
+        # new lows / highs versus previous window
+        prev_min = mvrv.shift(1).rolling(win).min()
+        prev_max = mvrv.shift(1).rolling(win).max()
+
+        feats[f'mvrv_comp_new_low_{win}d'] = (mvrv < prev_min).astype(int)
+        feats[f'mvrv_comp_new_high_{win}d'] = (mvrv > prev_max).astype(int)
+
+    # (c) "Near bottom" and "near top" flags (tunable in percentage points)
+    MVRV_BOTTOM_THRESH = 5.0   # within 5 %-points of local minimum
+    MVRV_TOP_THRESH = 5.0      # within 5 %-points of local maximum
+
+    for win in [90, 180, 365]:
+        feats[f'mvrv_comp_near_bottom_{win}d'] = (
+            feats[f'mvrv_comp_dist_from_min_{win}d'] < MVRV_BOTTOM_THRESH
+        ).astype(int)
+
+        feats[f'mvrv_comp_near_top_{win}d'] = (
+            feats[f'mvrv_comp_dist_from_max_{win}d'] < MVRV_TOP_THRESH
+        ).astype(int)
+
+    # (d) Aggregate flags that reflect your intuition:
+    # Undervalued: at/near multi-month lows or fresh multi-month low
+    feats['mvrv_undervalued_extreme'] = (
+        (
+            (feats['mvrv_comp_near_bottom_90d'] == 1)
+            & (feats['mvrv_comp_near_bottom_180d'] == 1)
+            & (feats['mvrv_comp_near_bottom_365d'] == 1)
+        )
+        |
+        (
+            (feats['mvrv_comp_new_low_180d'] == 1)
+            | (feats['mvrv_comp_new_low_365d'] == 1)
+        )
+    ).astype(int)
+
+    # Overheated: at/near multi-month highs or fresh multi-month high
+    feats['mvrv_overheated_extreme'] = (
+        (
+            (feats['mvrv_comp_near_top_90d'] == 1)
+            & (feats['mvrv_comp_near_top_180d'] == 1)
+            & (feats['mvrv_comp_near_top_365d'] == 1)
+        )
+        |
+        (
+            (feats['mvrv_comp_new_high_180d'] == 1)
+            | (feats['mvrv_comp_new_high_365d'] == 1)
+        )
+    ).astype(int)
+
+    # Keep raw composite pct as well
+    feats['mvrv_composite_pct'] = mvrv
 
     # ---------- 4) Whale accumulation ----------
     for bucket, col in [
