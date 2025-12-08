@@ -233,23 +233,50 @@ def build_features_and_labels_from_raw(
 
 
     # ---------- 4) Whale accumulation ----------
-    for bucket, col in [
-        ('1_100', 'btc_holders_1_100'),
-        ('100_10k', 'btc_holders_100_10k'),
-    ]:
-        for win in [1, 7, 30, 180]:
+    # Buckets of interest: 1-100 (Retail/Small) and 100-10k (Whale/Smart Money)
+    cols_map = {
+        '1_100': 'btc_holders_1_100',
+        '100_10k': 'btc_holders_100_10k'
+    }
+
+    # 1. Base Changes over 1d, 2d, 4d, 7d
+    windows = [1, 2, 4, 7]
+    for bucket, col in cols_map.items():
+        for win in windows:
+            # Change in raw balance
             feats[f'whale_{bucket}_change_{win}d'] = df[col] - df[col].shift(win)
 
-        feats[f'whale_{bucket}_accum_7d'] = (
-            feats[f'whale_{bucket}_change_7d'] > 0
-        ).astype(int)
-        feats[f'whale_{bucket}_accum_30d'] = (
-            feats[f'whale_{bucket}_change_30d'] > 0
-        ).astype(int)
+    # 2. "Good" Signal: 100-10k increasing (Strong smart money signal)
+    # Intuition: "if the balance held by this group is increasing over 1day, 2day, 4day and 1week"
+    # We create a "Consistent Accumulation" flag if ALL those windows are positive
+    feats['whale_smart_accum_consistent'] = (
+        (feats['whale_100_10k_change_1d'] > 0) &
+        (feats['whale_100_10k_change_2d'] > 0) &
+        (feats['whale_100_10k_change_4d'] > 0) &
+        (feats['whale_100_10k_change_7d'] > 0)
+    ).astype(int)
 
-    feats['broad_accum_flag'] = (
-        (feats['whale_1_100_accum_30d'] == 1)
-        & (feats['whale_100_10k_accum_30d'] == 1)
+    # 3. "Very Good": Both 1-100 AND 100-10k are increasing
+    # We check the 7d trend for this broad signal
+    feats['whale_broad_accum_7d'] = (
+        (feats['whale_100_10k_change_7d'] > 0) & 
+        (feats['whale_1_100_change_7d'] > 0)
+    ).astype(int)
+
+    # 4. Divergence Check: "if 1-100 increasing but 100-10k decreasing... check total"
+    
+    # Calculate Total Holdings (Small + Medium/Large)
+    df['total_holders_1_to_10k'] = df['btc_holders_1_100'] + df['btc_holders_100_10k']
+    
+    # Check if total is flat or up
+    feats['whale_total_change_7d'] = df['total_holders_1_to_10k'] - df['total_holders_1_to_10k'].shift(7)
+    
+    # Condition: Retail Buying (1-100 UP) AND Whales Selling (100-10k DOWN)
+    retail_buy_whale_sell = (feats['whale_1_100_change_7d'] > 0) & (feats['whale_100_10k_change_7d'] < 0)
+    
+    # Signal: Divergence is "Okay" if Total Supply held is still Flat/Up
+    feats['whale_retail_absorption_positive'] = (
+        retail_buy_whale_sell & (feats['whale_total_change_7d'] >= 0)
     ).astype(int)
    
     # ---------- 5) Sentiment ----------
