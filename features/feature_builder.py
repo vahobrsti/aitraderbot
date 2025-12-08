@@ -47,7 +47,7 @@ def build_features_and_labels_from_raw(
     sigma = s.std()  # sample std dev (perfectly fine)
     df["sentiment_norm"] = (s - mu) / sigma
 
-    df['close'] = df['btc_close']
+    df['mean_price'] = df['btc_price_mean']
 
     feats = pd.DataFrame(index=df.index)
 
@@ -408,13 +408,22 @@ def build_features_and_labels_from_raw(
 
     feats['signal_option_put'] = (mvrv_is_expensive & sent_is_greed).astype(int)
 
-    # ---------- 7) Label: "good move within horizon_days?" ----------
+    # ---------- 7) Labels: Long & Short Opportunities ----------
+    # We create two distinct labels so the model can learn both directions.
     window = horizon_days
-    fwd_max = df['close'].rolling(window).max().shift(-window + 1)
-    target_level = df['close'] * (1 + target_return)
-    label = (fwd_max >= target_level).astype(int)
+    
+    # LONG Label: Did price go UP by target_return?
+    fwd_max = df['mean_price'].rolling(window).max().shift(-window + 1)
+    target_long = df['mean_price'] * (1 + target_return)
+    feats['label_good_move_long'] = (fwd_max >= target_long).astype(int)
 
-    feats['label_good_move'] = label
+    # SHORT Label: Did price DROP by target_return?
+    fwd_min = df['mean_price'].rolling(window).min().shift(-window + 1)
+    target_short = df['mean_price'] * (1 - target_return)
+    feats['label_good_move_short'] = (fwd_min <= target_short).astype(int)
+
+    # Legacy alias (optional, keeping for compatibility if needed)
+    feats['label_good_move'] = feats['label_good_move_long']
 
     # Drop rows where we don't have enough history/forward data
     feats = feats.dropna().copy()
