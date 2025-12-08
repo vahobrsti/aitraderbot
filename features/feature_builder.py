@@ -66,7 +66,7 @@ def build_features_and_labels_from_raw(
     feats['mvrv_ls_uptrend'] = (feats['mvrv_ls_trend_30d'] > 0).astype(int)
     feats['mvrv_ls_downtrend'] = (feats['mvrv_ls_trend_30d'] < 0).astype(int)
 
-    # ---------- 3) MVRV composite extremes ----------
+    # ---------- 3) MVRV composite extremes [start] ----------
     mvrv = df["mvrv_composite_pct"]
 
     # (a) Rolling z-scores (generic ML features)
@@ -180,55 +180,104 @@ def build_features_and_labels_from_raw(
         (feats['whale_1_100_accum_30d'] == 1)
         & (feats['whale_100_10k_accum_30d'] == 1)
     ).astype(int)
-
+   
+    # ---------- 5) Sentiment ----------
     # ---------- 5) Sentiment ----------
     # Work with normalized sentiment
     sent = df["sentiment_norm"]
 
-    # (a) Distance from rolling minima over 1m, 6m, 1y
-    for win in [30, 180, 365]:
+    # (a) 7-day trend (for bonus points)
+    feats["sentiment_trend_7d"] = sent - sent.shift(7)
+    feats["sentiment_downtrend_7d"] = (feats["sentiment_trend_7d"] < 0).astype(int)
+    feats["sentiment_uptrend_7d"] = (feats["sentiment_trend_7d"] > 0).astype(int)
+
+    # (b) Rolling stats over 1m, 3m, 6m, 1y
+    # User requested: 1 month, 3 months, 6 months (and we keep 1y for long-term context)
+    windows = [30, 90, 180, 365]
+    BOTTOM_THRESH = 0.5
+    TOP_THRESH = 0.5 
+
+    for win in windows:
+        # Min / Max
         roll_min = sent.rolling(win).min()
+        roll_max = sent.rolling(win).max()
+        
         feats[f"sentiment_min_{win}d"] = roll_min
+        feats[f"sentiment_max_{win}d"] = roll_max
+        
+        # Distance from extremes
         feats[f"sentiment_dist_from_min_{win}d"] = sent - roll_min
-        # Detect a *new* low in this window:
-        # compare today's value to the previous rolling min (excluding today)
-        prev_min = sent.shift(1).rolling(win).min()
-        feats[f"sentiment_new_low_{win}d"] = (
-            (sent < prev_min)  # strictly lower than anything in last `win` days
-        ).astype(int)
-
-    # (b) "Near bottom" flags (tunable threshold in z-score units)
-    BOTTOM_THRESH = 0.5  # you can tune this later
-
-    for win in [30, 180, 365]:
+        feats[f"sentiment_dist_from_max_{win}d"] = roll_max - sent  # positive distance
+        
+        # Near Bottom / Top flags
         feats[f"sentiment_near_bottom_{win}d"] = (
             feats[f"sentiment_dist_from_min_{win}d"] < BOTTOM_THRESH
         ).astype(int)
+        
+        feats[f"sentiment_near_top_{win}d"] = (
+            feats[f"sentiment_dist_from_max_{win}d"] < TOP_THRESH
+        ).astype(int)
 
-    # (c) 7-day trend on normalized sentiment
-    feats["sentiment_trend_7d"] = sent - sent.shift(7)
-    feats["sentiment_downtrend_7d"] = (
-        feats["sentiment_trend_7d"] < 0
-    ).astype(int)
+        # New Lows / Highs (strict: lower/higher than previous window's min/max)
+        prev_min = sent.shift(1).rolling(win).min()
+        prev_max = sent.shift(1).rolling(win).max()
+        
+        feats[f"sentiment_new_low_{win}d"] = (sent < prev_min).astype(int)
+        feats[f"sentiment_new_high_{win}d"] = (sent > prev_max).astype(int)
 
-    # (d) Optional: keep rolling z-scores as extra ML features
-    for win in [30, 180, 365]:
+        # Z-scores (optional but useful)
         roll_mean = sent.rolling(win).mean()
         roll_std = sent.rolling(win).std()
         feats[f"sentiment_z_{win}d"] = (sent - roll_mean) / (roll_std + 1e-9)
 
-    # (e) Final contrarian flag:
-    # "Today is near the worst lows in 1m, 6m, 1y AND still trending down over last week" or we have logged a new low which is great
-    feats["contrarian_buy_flag"] = (
-            (
-                    (feats["sentiment_near_bottom_30d"] == 1)
-                    & (feats["sentiment_near_bottom_180d"] == 1)
-                    & (feats["sentiment_near_bottom_365d"] == 1)
-                    & (feats["sentiment_downtrend_7d"] == 1)
-            )
-            |
-            ((feats["sentiment_new_low_180d"] == 1) | (feats["sentiment_new_low_365d"] == 1)
-            )
+    # (c) Aggregate Signals
+
+    # Common conditions across 1m, 3m, 6m
+    # "check historical values over 1 month, 3month and 6 months..."
+    near_bottom_multi = (
+        (feats["sentiment_near_bottom_30d"] == 1) &
+        (feats["sentiment_near_bottom_90d"] == 1) &
+        (feats["sentiment_near_bottom_180d"] == 1)
+    )
+
+    near_top_multi = (
+        (feats["sentiment_near_top_30d"] == 1) &
+        (feats["sentiment_near_top_90d"] == 1) &
+        (feats["sentiment_near_top_180d"] == 1)
+    )
+
+    # BUY SIGNAL
+    # 1. Current value is negative
+    # 2. Close to min on 1m, 3m, 6m
+    # 3. Bonus: Downtrend
+    # OR: New Low (Strong signal) on longer timeframes (e.g. 6m or 1y)
+    feats["sentiment_contrarian_buy"] = (
+        (
+            (sent < 0) & 
+            near_bottom_multi & 
+            (feats["sentiment_downtrend_7d"] == 1)
+        )
+        |
+        (
+            (feats["sentiment_new_low_180d"] == 1) | (feats["sentiment_new_low_365d"] == 1)
+        )
+    ).astype(int)
+
+    # SELL SIGNAL
+    # 1. Current value is positive
+    # 2. Close to max on 1m, 3m, 6m
+    # 3. Bonus: Uptrend
+    # OR: New High (Strong signal)
+    feats["sentiment_contrarian_sell"] = (
+        (
+            (sent > 0) & 
+            near_top_multi & 
+            (feats["sentiment_uptrend_7d"] == 1)
+        )
+        |
+        (
+            (feats["sentiment_new_high_180d"] == 1) | (feats["sentiment_new_high_365d"] == 1)
+        )
     ).astype(int)
 
     # ---------- 6) Interactions ----------
