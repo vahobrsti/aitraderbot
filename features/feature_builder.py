@@ -31,7 +31,7 @@ def build_features_and_labels_from_raw(
     df['mvrv_composite'] = df[mvrv_cols].mean(axis=1)
     # convert to a PnL-style percentage: -100..+ (roughly) 100+
     # > 0 = in profit, < 0 = in loss, 0 = breakeven
-    df['mvrv_composite_pct'] = (df['mvrv_composite_ratio'] - 1.0) * 100.0
+    df['mvrv_composite_pct'] = (df['mvrv_composite'] - 1.0) * 100.0
 
 
     # Whale buckets: small vs big
