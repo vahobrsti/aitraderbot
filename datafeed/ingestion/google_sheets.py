@@ -87,8 +87,13 @@ def read_two_column_sheet(spreadsheet, sheet_name: str, date_col="Date", value_c
     result: Dict[datetime.date, Optional[float]] = {}
 
     for row in rows:
-        date_str = row.get(date_col) or row.get(date_col.lower())
-        value = row.get(value_col) or row.get(value_col.lower())
+        date_str = row.get(date_col)
+        if date_str is None:
+            date_str = row.get(date_col.lower())
+
+        value = row.get(value_col)
+        if value is None:
+            value = row.get(value_col.lower())
 
         if not date_str:
             continue
