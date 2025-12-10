@@ -5,7 +5,7 @@ import pandas as pd
 
 def build_features_and_labels_from_raw(
     df: pd.DataFrame,
-    horizon_days: int = 21,
+    horizon_days: int = 14,
     target_return: float = 0.05,
 ) -> pd.DataFrame:
     """
@@ -413,12 +413,12 @@ def build_features_and_labels_from_raw(
     window = horizon_days
     
     # LONG Label: Did price go UP by target_return?
-    fwd_max = df['mean_price'].rolling(window).max().shift(-window + 1)
+    fwd_max = df['mean_price'].rolling(window).max().shift(-window)
     target_long = df['mean_price'] * (1 + target_return)
     feats['label_good_move_long'] = (fwd_max >= target_long).astype(int)
 
     # SHORT Label: Did price DROP by target_return?
-    fwd_min = df['mean_price'].rolling(window).min().shift(-window + 1)
+    fwd_min = df['mean_price'].rolling(window).min().shift(-window)
     target_short = df['mean_price'] * (1 - target_return)
     feats['label_good_move_short'] = (fwd_min <= target_short).astype(int)
 
