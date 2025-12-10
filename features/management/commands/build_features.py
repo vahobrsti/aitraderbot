@@ -15,7 +15,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--out",
             type=str,
-            default="features_21d_5pct.csv",
+            default="features_14d_5pct.csv",
             help="Output CSV path",
         )
         parser.add_argument(
