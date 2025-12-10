@@ -21,8 +21,8 @@ class Command(BaseCommand):
         parser.add_argument(
             "--horizon",
             type=int,
-            default=21,
-            help="Prediction horizon in days (e.g. 21 for ~3 weeks)",
+            default=14,
+            help="Prediction horizon in days (e.g. 14 for ~2 weeks)",
         )
         parser.add_argument(
             "--target_return",
