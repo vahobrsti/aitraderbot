@@ -43,64 +43,113 @@ def build_features_and_labels_from_raw(
     # normalize the sentiment
     df['sentiment_raw'] = df['sentiment_weighted_total']
     s = df["sentiment_raw"]
-    mu = s.mean()
-    sigma = s.std()  # sample std dev (perfectly fine)
+    # Use expanding window to avoid look-ahead bias
+    mu = s.expanding().mean()
+    sigma = s.expanding().std()
     df["sentiment_norm"] = (s - mu) / sigma
 
     df['mean_price'] = df['btc_price_mean']
 
-    feats = pd.DataFrame(index=df.index)
+    feats = {}
 
-    # ---------- 1) MDIA slope ----------
-    # Intuition: 
-    # - Negative slope = Good (Capital injecting). The more negative, the better.
-    # - Positive slope = Bad (Stagnant). Check Sentiment:
-    #    -> MDIA(+) & Sentiment(+) => BAD (Price likely down)
-    #    -> MDIA(+) & Sentiment(-) => GOOD (Recovery mid-term)
-
-    # 1. Calculate Slopes (Deltas) AND Gradients (Per-Day Rate)
-    # We need gradients to fairly compare 1d vs 2d vs 4d vs 7d
-    for win in [1, 2, 4, 7, 14]:
-        slope_col = f'mdia_slope_{win}d'
-        feats[slope_col] = df['mdia'] - df['mdia'].shift(win)
-        # Gradient = Delta / Days
-        feats[f'mdia_grad_{win}d'] = feats[slope_col] / win
-
-    # 1.1 Measure "Injection Acceleration" (The Term Structure of Slopes)
-    # "Compare 1d to 2d, 2d to 4d, 4d to 7d"
-    # If 1d is *more negative* than 2d, we are accelerating downwards (New Capital Entering).
-    # We calculate the difference: (ShortTerm - LongTerm). 
-    # Negative Value = Accelerating Downwards (Good).
+    # ---------- 1) MDIA slope & Regimes (Robust) ----------
+    # Intuition:
+    # - MDIA falling = Capital Inflow (Bullish)
+    # - We want broad participation (falling across horizons) AND acceleration
     
-    feats['mdia_accel_1d_vs_2d'] = feats['mdia_grad_1d'] - feats['mdia_grad_2d']
-    feats['mdia_accel_2d_vs_4d'] = feats['mdia_grad_2d'] - feats['mdia_grad_4d']
-    feats['mdia_accel_4d_vs_7d'] = feats['mdia_grad_4d'] - feats['mdia_grad_7d']
+    # 1. Calculate Raw Slopes
+    mdia_horizons = [1, 2, 4, 7]
+    for win in mdia_horizons:
+        slope_col = f'mdia_slope_{win}d'
+        # Raw delta
+        feats[slope_col] = df['mdia'] - df['mdia'].shift(win)
+        
+        # 2. Normalize (Rolling Z-Score of the Slope)
+        #    This makes "steepness" relative to the last 90 days
+        #    Use 90d window to capture medium-term volatility of flows
+        z_win = 90
+        slope_series = feats[slope_col]
+        roll_mean = slope_series.rolling(z_win, min_periods=30).mean()
+        roll_std = slope_series.rolling(z_win, min_periods=30).std()
+        
+        # Avoid div by zero
+        z_score = (slope_series - roll_mean) / (roll_std + 1e-9)
+        feats[f'mdia_slope_z_{win}d'] = z_score
 
-    # 1.2 "More positive = Higher Downside Risk" (Stagnation Severity)
-    # We look at the 7d trend for this general risk gauge
-    feats['mdia_slope_stagnation_severity'] = feats['mdia_slope_7d'].clip(lower=0)
+        # 3. Ordinal Buckets
+        #    +1 = Rising (Distribution) -> Z > 0.5
+        #     0 = Neutral / Noise       -> -0.5 <= Z <= 0.5
+        #    -1 = Inflow                -> -1.5 <= Z < -0.5
+        #    -2 = Strong Inflow         -> Z < -1.5
+        
+        # Vectorized bucket assignment
+        bucket_col = f'mdia_bucket_{win}d'
+        buckets = pd.Series(0, index=df.index) # Default 0
+        
+        buckets.loc[z_score > 0.5] = 1
+        buckets.loc[z_score < -0.5] = -1
+        buckets.loc[z_score < -1.5] = -2
+        
+        feats[bucket_col] = buckets.astype(int)
 
-    # 2. Interactions with Sentiment
-    # (We use df['sentiment_norm'] which was calculated above)
-    mdia_is_pos_7d = feats['mdia_slope_7d'] > 0
-    sent_is_pos = df['sentiment_norm'] > 0
-    sent_is_neg = df['sentiment_norm'] < 0
-
-    # Case 1: MDIA(+) [Bad] AND Sentiment(+) [Bad] -> Very Bearish
-    feats['signal_mdia_stagnant_overheated'] = (
-        mdia_is_pos_7d & sent_is_pos
+    # 4. Breadth Regime: "All horizons showing inflow"
+    #    Check if 1d, 2d, 4d, 7d are all <= -1 (Inflow or Strong Inflow)
+    feats['mdia_breadth_inflow'] = (
+        (feats['mdia_bucket_1d'] <= -1) &
+        (feats['mdia_bucket_2d'] <= -1) &
+        (feats['mdia_bucket_4d'] <= -1) &
+        (feats['mdia_bucket_7d'] <= -1)
     ).astype(int)
 
-    # Case 2: MDIA(+) [Bad] BUT Sentiment(-) [Good] -> Recovery Context
-    feats['signal_mdia_stagnant_fear'] = (
-        mdia_is_pos_7d & sent_is_neg
+    # 4b. Moderate Breadth: "3 out of 4 horizons showing inflow"
+    inflow_count = (
+        (feats['mdia_bucket_1d'] <= -1).astype(int) +
+        (feats['mdia_bucket_2d'] <= -1).astype(int) +
+        (feats['mdia_bucket_4d'] <= -1).astype(int) +
+        (feats['mdia_bucket_7d'] <= -1).astype(int)
+    )
+    feats['mdia_breadth_inflow_3of4'] = (inflow_count >= 3).astype(int)
+    # Expose count as a feature for ML/Debugging
+    feats['mdia_inflow_count'] = inflow_count
+
+    # 5. Acceleration Regime: "Short term is dropping FASTER (more negative) than long term"
+    #    Compare buckets: is 2d bucket MORE NEGATIVE (lower) than 4d bucket?
+    #    e.g. 2d is -2 (Strong), 4d is -1 (Normal) -> Acceleration!
+    feats['mdia_accel_2d_vs_4d'] = (
+        feats['mdia_bucket_2d'] < feats['mdia_bucket_4d']
+    ).astype(int)
+    
+    # 5b. Acceleration Regime (Strict): "2d dropping faster than 1d" (Immediate acceleration)
+    feats['mdia_accel_2d_vs_1d'] = (
+        feats['mdia_bucket_2d'] < feats['mdia_bucket_1d']
+    ).astype(int)
+    
+    # Combined Acceleration: Either 2d vs 4d OR 2d vs 1d (Flexible)
+    feats['mdia_is_accelerating'] = (
+        (feats['mdia_accel_2d_vs_4d'] == 1) | 
+        (feats['mdia_accel_2d_vs_1d'] == 1)
     ).astype(int)
 
-    # Case 3: MDIA(-) [Good] -> Pure Capital Injection Signal
-    # We just use the raw slope features (mdia_slope_Xd) for this, 
-    # as "the more negative the better" is naturally captured by the raw value.
-    feats['signal_mdia_injection'] = (
-        feats['mdia_slope_7d'] < 0
+    # 6. Final Regimes
+
+    # (A) Strong Inflow: Broad participation AND Acceleration
+    feats['mdia_regime_strong_inflow'] = (
+        (feats['mdia_breadth_inflow'] == 1) &
+        (feats['mdia_is_accelerating'] == 1)
+    ).astype(int)
+
+    # (B) Inflow (Moderate): Broad participation (3/4 horizons) but not Strong
+    feats['mdia_regime_inflow'] = (
+        (feats['mdia_breadth_inflow_3of4'] == 1) &
+        (feats['mdia_regime_strong_inflow'] == 0) # Exclusive
+    ).astype(int)
+
+    # (C) Distribution / Risk: Short term horizons are rising (Positive Buckets) 
+    # AND we are NOT in a broad inflow regime (to avoid mixed signals)
+    feats['mdia_regime_distribution'] = (
+        (feats['mdia_bucket_1d'] >= 1) &
+        (feats['mdia_bucket_2d'] >= 1) &
+        (feats['mdia_breadth_inflow'] == 0)
     ).astype(int)
 
     # ---------- 2) MVRV long–short ----------
@@ -133,9 +182,9 @@ def build_features_and_labels_from_raw(
 
     # Composite Score (Optional but helpful):
     # +1 if uptrend, -1 if downtrend, 0 neutral
-    feats['mvrv_ls_trend_score'] = 0
-    feats.loc[is_uptrending, 'mvrv_ls_trend_score'] = 1
-    feats.loc[is_downtrending, 'mvrv_ls_trend_score'] = -1
+    # vectorized replacement for .loc
+    feats['mvrv_ls_trend_score'] = is_uptrending.astype(int) - is_downtrending.astype(int)
+    
     feats['mvrv_ls_very_bearish_regime'] = ( (feats['mvrv_ls_value'] < 0) & is_downtrending).astype(int)
     # ---------- 3) MVRV composite extremes [start] ----------
     mvrv = df["mvrv_composite_pct"]
@@ -393,55 +442,6 @@ def build_features_and_labels_from_raw(
         roll_std = sent.rolling(win).std()
         feats[f"sentiment_z_{win}d"] = (sent - roll_mean) / (roll_std + 1e-9)
 
-    # (c) Aggregate Signals
-
-    # Common conditions across 1m, 3m, 6m
-    # "check historical values over 1 month, 3month and 6 months..."
-    near_bottom_multi = (
-        (feats["sentiment_near_bottom_30d"] == 1) |
-        (feats["sentiment_near_bottom_90d"] == 1) |
-        (feats["sentiment_near_bottom_180d"] == 1)
-    )
-
-    near_top_multi = (
-        (feats["sentiment_near_top_30d"] == 1) |
-        (feats["sentiment_near_top_90d"] == 1) |
-        (feats["sentiment_near_top_180d"] == 1)
-    )
-
-    # BUY SIGNAL
-    # 1. Current value is negative
-    # 2. Close to min on 1m, 3m, 6m
-    # 3. Bonus: Downtrend
-    # OR: New Low (Strong signal) on longer timeframes (e.g. 6m or 1y)
-    feats["sentiment_contrarian_buy"] = (
-        (
-            (sent < 0) & 
-            near_bottom_multi & 
-            (feats["sentiment_downtrend_7d"] == 1)
-        )
-        |
-        (
-            (feats["sentiment_new_low_180d"] == 1) | (feats["sentiment_new_low_365d"] == 1)
-        )
-    ).astype(int)
-
-    # SELL SIGNAL
-    # 1. Current value is positive
-    # 2. Close to max on 1m, 3m, 6m
-    # 3. Bonus: Uptrend
-    # OR: New High (Strong signal)
-    feats["sentiment_contrarian_sell"] = (
-        (
-            (sent > 0) & 
-            near_top_multi & 
-            (feats["sentiment_uptrend_7d"] == 1)
-        )
-        |
-        (
-            (feats["sentiment_new_high_180d"] == 1) | (feats["sentiment_new_high_365d"] == 1)
-        )
-    ).astype(int)
 
     # ---------- 5.5) Relative Sentiment (Crowd Psychology) - Canonical ----------
 
@@ -525,11 +525,6 @@ def build_features_and_labels_from_raw(
     # Avoid longs: sustained extreme greed
     feats["sent_regime_avoid_longs"] = feats["sent_extreme_greed_persist_5d"]
 
-
-
-    # ---------- 6) Interactions ----------
-    # (Note: Specific MDIA & Sentiment interactions were handled in Section 1)
-    
     # ---------- 6) Interactions / "Option Signals" ----------
     # Intuition:
     # Call Option (Buy Exposure):
@@ -577,5 +572,7 @@ def build_features_and_labels_from_raw(
     target_short = df['mean_price'] * (1 - target_return)
     feats['label_good_move_short'] = (fwd_min <= target_short).astype(int)
 
+    # Convert dict to DataFrame once at the end to avoid fragmentation
+    feats = pd.DataFrame(feats, index=df.index)
     feats = feats.dropna().copy()
     return feats
