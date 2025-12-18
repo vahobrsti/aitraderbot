@@ -145,7 +145,10 @@ def build_features_and_labels_from_raw(
         roll_mean = mvrv.rolling(win).mean()
         roll_std = mvrv.rolling(win).std()
         z = (mvrv - roll_mean) / (roll_std + 1e-9)
-
+        
+        if (z > 2.0).any():
+            print(f"High Z (win={win}d):")
+            print(z[z > 2.0])
         feats[f"mvrv_comp_z_{win}d"] = z
         feats[f"mvrv_comp_undervalued_{win}d"] = (z < -1.0).astype(int)
         feats[f"mvrv_comp_overheated_{win}d"] = (z > 1.0).astype(int)
@@ -220,7 +223,7 @@ def build_features_and_labels_from_raw(
 
     # Overheated: at/near multi-month highs OR fresh multi-month high
     feats["mvrv_overheated_extreme"] = (
-        (feats["mvrv_comp_near_top_any"] == 1)
+        (feats["mvrv_comp_near_top_180d"] == 1)
         |
         (
             (feats["mvrv_comp_new_high_180d"] == 1)
@@ -239,8 +242,8 @@ def build_features_and_labels_from_raw(
         '100_10k': 'btc_holders_100_10k'
     }
 
-    # 1. Base Changes over 1d, 2d, 4d, 7d
-    windows = [1, 2, 4, 7]
+    # 1. Base Changes over 1d, 2d, 4d, 7d, 30d
+    windows = [1, 2, 4, 7, 30]
     for bucket, col in cols_map.items():
         for win in windows:
             # Change in raw balance
@@ -377,6 +380,72 @@ def build_features_and_labels_from_raw(
         )
     ).astype(int)
 
+    # ---------- 5.5) Relative Sentiment (Crowd Psychology) ----------
+    # Normalization: Rolling Percentile (Rank) over 180 days (approx 6 months)
+    # This maps the sentiment to a 0.0 - 1.0 scale relative to the last 6 months.
+    
+    sent_roll_180 = s.rolling(window=180).rank(pct=True)
+    feats['sentiment_roll_pct_180d'] = sent_roll_180
+
+    # Buckets
+    # Extreme Fear: bottom 10%
+    feats['sent_bucket_extreme_fear'] = (sent_roll_180 < 0.10).astype(int)
+    # Fear: 10-30%
+    feats['sent_bucket_fear'] = ((sent_roll_180 >= 0.10) & (sent_roll_180 < 0.30)).astype(int)
+    # Neutral: 30-70%
+    feats['sent_bucket_neutral'] = ((sent_roll_180 >= 0.30) & (sent_roll_180 < 0.70)).astype(int)
+    # Greed: 70-90%
+    feats['sent_bucket_greed'] = ((sent_roll_180 >= 0.70) & (sent_roll_180 < 0.90)).astype(int)
+    # Extreme Greed: top 10%
+    feats['sent_bucket_extreme_greed'] = (sent_roll_180 >= 0.90).astype(int)
+
+    # Direction / Momentum Overlays
+    # Rising 3-5 days
+    sent_change_3d = sent_roll_180.diff(3)
+    sent_change_5d = sent_roll_180.diff(5)
+    
+    feats['sent_momentum_3d'] = sent_change_3d
+    feats['sent_momentum_5d'] = sent_change_5d
+
+    is_rising = (sent_change_3d > 0) & (sent_change_5d > 0)
+    is_falling = (sent_change_3d < 0) & (sent_change_5d < 0)
+    
+    feats['sent_is_rising'] = is_rising.astype(int)
+    feats['sent_is_falling'] = is_falling.astype(int)
+
+    # Flattening: Small absolute change over 3 days (e.g., < 5% rank shift)
+    is_flattening = (sent_change_3d.abs() < 0.05)
+    
+    # Persistent Extreme Greed: stayed in extreme greed for last 5 days
+    is_persistent_greed = (feats['sent_bucket_extreme_greed'].rolling(5).min() == 1)
+
+    # Trading Interpretation Regimes
+    
+    # 1. Fear + Rising -> CALL-supportive
+    # (We use bucket Fear or Extreme Fear, but user specified "Fear + Rising")
+    feats['regime_call_supportive'] = (
+        (feats['sent_bucket_fear'] == 1) & is_rising
+    ).astype(int)
+
+    # 2. Extreme Fear + Flattening -> CALL (mean reversion)
+    # Panic has stopped getting worse
+    feats['regime_call_mean_reversion'] = (
+        (feats['sent_bucket_extreme_fear'] == 1) & is_flattening
+    ).astype(int)
+
+    # 3. Greed + Rising -> PUT-supportive (contrarian)
+    # Crowding starts and keeps going up -> ripe for reversal?
+    # (Note: User said "Greed + Rising" is PUT-supportive (contrarian))
+    feats['regime_put_supportive'] = (
+        (feats['sent_bucket_greed'] == 1) & is_rising
+    ).astype(int)
+
+    # 4. Extreme Greed + Persistent -> PUT / avoid longs
+    feats['regime_avoid_longs'] = (
+        (feats['sent_bucket_extreme_greed'] == 1) & is_persistent_greed
+    ).astype(int)
+
+
     # ---------- 6) Interactions ----------
     # (Note: Specific MDIA & Sentiment interactions were handled in Section 1)
     
@@ -406,7 +475,12 @@ def build_features_and_labels_from_raw(
     )
     sent_is_greed = (df['sentiment_norm'] > 1.0) # "Very positive"
 
-    feats['signal_option_put'] = (mvrv_is_expensive & sent_is_greed).astype(int)
+    feats['signal_option_put'] = (
+        mvrv_is_expensive & 
+        sent_is_greed & 
+        (feats['mdia_slope_7d'] > 0) &
+        (feats['whale_100_10k_change_30d'] < 0)
+    ).astype(int)
 
     # ---------- 7) Labels: Long & Short Opportunities ----------
     # We create two distinct labels so the model can learn both directions.
