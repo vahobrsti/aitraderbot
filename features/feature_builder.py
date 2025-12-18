@@ -142,72 +142,72 @@ def build_features_and_labels_from_raw(
 
     # (a) Rolling z-scores (generic ML features)
     for win in [90, 180, 365]:
-        roll_mean = mvrv.rolling(win).mean()
-        roll_std = mvrv.rolling(win).std()
+        min_p = max(30, win // 3)
+        roll_mean = mvrv.rolling(win, min_periods=min_p).mean()
+        roll_std = mvrv.rolling(win, min_periods=min_p).std()
         z = (mvrv - roll_mean) / (roll_std + 1e-9)
         
         if (z > 2.0).any():
-            print(f"High Z (win={win}d):")
-            print(z[z > 2.0])
+            # (Optional debug print removed for performance)
+            pass
         feats[f"mvrv_comp_z_{win}d"] = z
         feats[f"mvrv_comp_undervalued_{win}d"] = (z < -1.0).astype(int)
         feats[f"mvrv_comp_overheated_{win}d"] = (z > 1.0).astype(int)
 
     # (b) Min / max and distance from them over 3m, 6m, 1y
     for win in [90, 180, 365]:
-        roll_min = mvrv.rolling(win).min()
-        roll_max = mvrv.rolling(win).max()
+        min_p = max(30, win // 3)
+        roll_min = mvrv.rolling(win, min_periods=min_p).min()
+        roll_max = mvrv.rolling(win, min_periods=min_p).max()
+        roll_range = roll_max - roll_min
 
         feats[f"mvrv_comp_min_{win}d"] = roll_min
         feats[f"mvrv_comp_max_{win}d"] = roll_max
 
-        feats[f"mvrv_comp_dist_from_min_{win}d"] = mvrv - roll_min
-        feats[f"mvrv_comp_dist_from_max_{win}d"] = roll_max - mvrv
+        # Relative distance (scale by range)
+        # Avoid division by zero by clipping
+        safe_range = roll_range.clip(lower=1e-9)
+        
+        dist_from_min = mvrv - roll_min
+        dist_from_max = roll_max - mvrv
+        
+        rel_dist_min = dist_from_min / safe_range
+        rel_dist_max = dist_from_max / safe_range
+
+        feats[f"mvrv_comp_dist_from_min_{win}d"] = dist_from_min
+        feats[f"mvrv_comp_dist_from_max_{win}d"] = dist_from_max
+        
+        # Save relative distances as features
+        feats[f"mvrv_comp_rel_dist_min_{win}d"] = rel_dist_min
+        feats[f"mvrv_comp_rel_dist_max_{win}d"] = rel_dist_max
 
         # new lows / highs versus previous window (exclude today)
-        prev_min = mvrv.shift(1).rolling(win).min()
-        prev_max = mvrv.shift(1).rolling(win).max()
+        prev_min = mvrv.shift(1).rolling(win, min_periods=min_p).min()
+        prev_max = mvrv.shift(1).rolling(win, min_periods=min_p).max()
 
         feats[f"mvrv_comp_new_low_{win}d"] = (mvrv < prev_min).astype(int)
         feats[f"mvrv_comp_new_high_{win}d"] = (mvrv > prev_max).astype(int)
 
-    # (b.1) closest distance to *any* horizon low / high
-    feats["mvrv_comp_dist_from_min_any"] = feats[
-        [
-            "mvrv_comp_dist_from_min_90d",
-            "mvrv_comp_dist_from_min_180d",
-            "mvrv_comp_dist_from_min_365d",
-        ]
-    ].min(axis=1)
+        # "Near bottom" and "near top" flags (relative)
+        # Threshold: within bottom 5% of the range
+        MVRV_REL_THRESH = 0.05
+        
+        feats[f"mvrv_comp_near_bottom_{win}d"] = (rel_dist_min < MVRV_REL_THRESH).astype(int)
+        feats[f"mvrv_comp_near_top_{win}d"] = (rel_dist_max < MVRV_REL_THRESH).astype(int)
 
-    feats["mvrv_comp_dist_from_max_any"] = feats[
-        [
-            "mvrv_comp_dist_from_max_90d",
-            "mvrv_comp_dist_from_max_180d",
-            "mvrv_comp_dist_from_max_365d",
-        ]
-    ].min(axis=1)
-
-    # (c) "Near bottom" and "near top" flags (tunable in percentage points)
-    MVRV_BOTTOM_THRESH = 5.0  # within 5 %-points of a local minimum
-    MVRV_TOP_THRESH = 5.0     # within 5 %-points of a local maximum
-
+    # (b.1) Consolidated "Near Bottom/Top Any"
+    # We check if it is near bottom in ANY of the horizons 
     feats["mvrv_comp_near_bottom_any"] = (
-        feats["mvrv_comp_dist_from_min_any"] < MVRV_BOTTOM_THRESH
+        (feats["mvrv_comp_near_bottom_90d"] == 1) |
+        (feats["mvrv_comp_near_bottom_180d"] == 1) |
+        (feats["mvrv_comp_near_bottom_365d"] == 1)
     ).astype(int)
 
     feats["mvrv_comp_near_top_any"] = (
-        feats["mvrv_comp_dist_from_max_any"] < MVRV_TOP_THRESH
+        (feats["mvrv_comp_near_top_90d"] == 1) |
+        (feats["mvrv_comp_near_top_180d"] == 1) |
+        (feats["mvrv_comp_near_top_365d"] == 1)
     ).astype(int)
-
-    for win in [90, 180, 365]:
-        feats[f"mvrv_comp_near_bottom_{win}d"] = (
-            feats[f"mvrv_comp_dist_from_min_{win}d"] < MVRV_BOTTOM_THRESH
-        ).astype(int)
-
-        feats[f"mvrv_comp_near_top_{win}d"] = (
-            feats[f"mvrv_comp_dist_from_max_{win}d"] < MVRV_TOP_THRESH
-        ).astype(int)
 
     # (d) Aggregate flags that reflect your intuition:
 
@@ -223,16 +223,68 @@ def build_features_and_labels_from_raw(
 
     # Overheated: at/near multi-month highs OR fresh multi-month high
     feats["mvrv_overheated_extreme"] = (
-        (feats["mvrv_comp_near_top_180d"] == 1)
+        (feats["mvrv_comp_near_top_any"] == 1)
         |
         (
             (feats["mvrv_comp_new_high_180d"] == 1)
             | (feats["mvrv_comp_new_high_365d"] == 1)
         )
+        
     ).astype(int)
 
     # Keep raw composite pct as well
     feats["mvrv_composite_pct"] = mvrv
+
+    # (e) Composite MVRV (Valuation Backbone) - Z-Score Buckets & Relaive Regimes
+    # Normalization: Rolling Z-score (long window: 365 days / 1 year)
+    
+    z_long = feats["mvrv_comp_z_365d"]
+
+    # Buckets
+    feats['mvrv_bucket_deep_undervalued'] = (z_long < -1.5).astype(int)
+    feats['mvrv_bucket_undervalued']      = ((z_long >= -1.5) & (z_long < -0.5)).astype(int) # explicit check
+    feats['mvrv_bucket_fair']             = ((z_long >= -0.5) & (z_long <= 0.5)).astype(int)
+    feats['mvrv_bucket_overvalued']       = ((z_long > 0.5) & (z_long <= 1.5)).astype(int)
+    feats['mvrv_bucket_extreme_overvalued'] = (z_long > 1.5).astype(int)
+
+    # Direction Overlay (Z-score Space)
+    # Use change in Z-score over 7 days for stable momentum
+    z_trend_7d = z_long.diff(7)
+    
+    feats['mvrv_z_trend_7d']  = z_trend_7d
+    feats['mvrv_is_rising']     = (z_trend_7d > 0).astype(int)
+    feats['mvrv_is_falling']    = (z_trend_7d < 0).astype(int)
+    feats['mvrv_is_flattening'] = (z_trend_7d.abs() < 0.1).astype(int) # < 0.1 std dev change over 7d
+
+    # Trading Interpretation Regimes
+    
+    # 1. Undervalued + Rising -> CALL Backbone
+    is_undervalued_zone = (
+        (feats['mvrv_bucket_deep_undervalued'] == 1) | 
+        (feats['mvrv_bucket_undervalued'] == 1)
+    )
+    feats['regime_mvrv_call_backbone'] = (
+         is_undervalued_zone & (feats['mvrv_is_rising'] == 1)
+    ).astype(int)
+
+    # 3. Overvalued + Flattening -> Reduce Longs
+    feats['regime_mvrv_reduce_longs'] = (
+        (feats['mvrv_bucket_overvalued'] == 1) & 
+        (feats['mvrv_is_flattening'] == 1)
+    ).astype(int)
+
+    # 4. Extreme Overvaluation + Rolling Over (Falling) -> PUT-supportive
+    feats['regime_mvrv_put_supportive'] = (
+        (feats['mvrv_bucket_extreme_overvalued'] == 1) & 
+        (feats['mvrv_is_falling'] == 1)
+    ).astype(int)
+
+    # 5. New Low for 6m or 1y -> Very Good Call Supportive (Accumulate)
+    feats['regime_mvrv_call_accumulate'] = (
+        (feats['mvrv_comp_new_low_180d'] == 1) | 
+        (feats['mvrv_comp_new_low_365d'] == 1)
+    ).astype(int)
+
 
 
     # ---------- 4) Whale accumulation ----------
@@ -301,21 +353,32 @@ def build_features_and_labels_from_raw(
         # Min / Max
         roll_min = sent.rolling(win).min()
         roll_max = sent.rolling(win).max()
+        roll_range = roll_max - roll_min
         
         feats[f"sentiment_min_{win}d"] = roll_min
         feats[f"sentiment_max_{win}d"] = roll_max
         
-        # Distance from extremes
-        feats[f"sentiment_dist_from_min_{win}d"] = sent - roll_min
-        feats[f"sentiment_dist_from_max_{win}d"] = roll_max - sent  # positive distance
         
-        # Near Bottom / Top flags
+        # Relative Distance (Range Scaled)
+        # Avoid division by zero by clipping
+        safe_range = roll_range.clip(lower=1e-9)
+        
+        dist_from_min = sent - roll_min
+        dist_from_max = roll_max - sent
+        
+        rel_dist_min = dist_from_min / safe_range
+        rel_dist_max = dist_from_max / safe_range
+        
+        # Near Bottom / Top flags (Relative)
+        # Threshold: within bottom 10% of range (Legacy diagnostics)
+        LEGACY_REL_THRESH = 0.10
+        
         feats[f"sentiment_near_bottom_{win}d"] = (
-            feats[f"sentiment_dist_from_min_{win}d"] < BOTTOM_THRESH
+            rel_dist_min < LEGACY_REL_THRESH
         ).astype(int)
         
         feats[f"sentiment_near_top_{win}d"] = (
-            feats[f"sentiment_dist_from_max_{win}d"] < TOP_THRESH
+            (rel_dist_max < LEGACY_REL_THRESH)
         ).astype(int)
 
         # New Lows / Highs (strict: lower/higher than previous window's min/max)
@@ -380,70 +443,88 @@ def build_features_and_labels_from_raw(
         )
     ).astype(int)
 
-    # ---------- 5.5) Relative Sentiment (Crowd Psychology) ----------
-    # Normalization: Rolling Percentile (Rank) over 180 days (approx 6 months)
-    # This maps the sentiment to a 0.0 - 1.0 scale relative to the last 6 months.
-    
-    sent_roll_180 = s.rolling(window=180).rank(pct=True)
-    feats['sentiment_roll_pct_180d'] = sent_roll_180
+    # ---------- 5.5) Relative Sentiment (Crowd Psychology) - Canonical ----------
 
-    # Buckets
-    # Extreme Fear: bottom 10%
-    feats['sent_bucket_extreme_fear'] = (sent_roll_180 < 0.10).astype(int)
-    # Fear: 10-30%
-    feats['sent_bucket_fear'] = ((sent_roll_180 >= 0.10) & (sent_roll_180 < 0.30)).astype(int)
-    # Neutral: 30-70%
-    feats['sent_bucket_neutral'] = ((sent_roll_180 >= 0.30) & (sent_roll_180 < 0.70)).astype(int)
-    # Greed: 70-90%
-    feats['sent_bucket_greed'] = ((sent_roll_180 >= 0.70) & (sent_roll_180 < 0.90)).astype(int)
-    # Extreme Greed: top 10%
-    feats['sent_bucket_extreme_greed'] = (sent_roll_180 >= 0.90).astype(int)
+    sent = df["sentiment_norm"]
 
-    # Direction / Momentum Overlays
-    # Rising 3-5 days
-    sent_change_3d = sent_roll_180.diff(3)
-    sent_change_5d = sent_roll_180.diff(5)
-    
-    feats['sent_momentum_3d'] = sent_change_3d
-    feats['sent_momentum_5d'] = sent_change_5d
+    # (1) Rolling percentile level (180d): percentile of TODAY within last 180d
+    sent_roll_pct_180d = sent.rolling(180, min_periods=60).apply(
+        lambda x: x.rank(pct=True).iloc[-1],
+        raw=False
+    )
+    feats["sentiment_roll_pct_180d"] = sent_roll_pct_180d
 
-    is_rising = (sent_change_3d > 0) & (sent_change_5d > 0)
-    is_falling = (sent_change_3d < 0) & (sent_change_5d < 0)
-    
-    feats['sent_is_rising'] = is_rising.astype(int)
-    feats['sent_is_falling'] = is_falling.astype(int)
+    # (2) Buckets
+    feats["sent_bucket_extreme_fear"]  = (sent_roll_pct_180d < 0.10).astype(int)
+    feats["sent_bucket_fear"]          = ((sent_roll_pct_180d >= 0.10) & (sent_roll_pct_180d < 0.30)).astype(int)
+    feats["sent_bucket_neutral"]       = ((sent_roll_pct_180d >= 0.30) & (sent_roll_pct_180d < 0.70)).astype(int)
+    feats["sent_bucket_greed"]         = ((sent_roll_pct_180d >= 0.70) & (sent_roll_pct_180d < 0.90)).astype(int)
+    feats["sent_bucket_extreme_greed"] = (sent_roll_pct_180d >= 0.90).astype(int)
 
-    # Flattening: Small absolute change over 3 days (e.g., < 5% rank shift)
-    is_flattening = (sent_change_3d.abs() < 0.05)
-    
-    # Persistent Extreme Greed: stayed in extreme greed for last 5 days
-    is_persistent_greed = (feats['sent_bucket_extreme_greed'].rolling(5).min() == 1)
+    # (3) Momentum overlays (Robust)
+    # Require "rising" to mean positive change > threshold
+    MOMENTUM_THRESH = 0.05
+    sent_change_3d = sent.diff(3)
+    sent_change_5d = sent.diff(5)
 
-    # Trading Interpretation Regimes
-    
-    # 1. Fear + Rising -> CALL-supportive
-    # (We use bucket Fear or Extreme Fear, but user specified "Fear + Rising")
-    feats['regime_call_supportive'] = (
-        (feats['sent_bucket_fear'] == 1) & is_rising
+    feats["sent_is_rising"]  = ((sent_change_3d > MOMENTUM_THRESH) & (sent_change_5d > MOMENTUM_THRESH)).astype(int)
+    feats["sent_is_falling"] = ((sent_change_3d < -MOMENTUM_THRESH) & (sent_change_5d < -MOMENTUM_THRESH)).astype(int)
+
+    # Flattening: small raw change relative to recent volatility
+    # Threshold: < 0.25 * rolling_std_90d
+    # Use min_periods and conservative fill
+    roll_std_90 = sent.rolling(90, min_periods=30).std().fillna(1.0) 
+    feats["sent_is_flattening"] = (sent_change_3d.abs() < (0.25 * roll_std_90)).astype(int)
+
+    # (4) Persistence
+    # Extreme Greed
+    feats["sent_extreme_greed_persist_5d"] = (
+        feats["sent_bucket_extreme_greed"]
+        .rolling(5, min_periods=5)
+        .min()
+        .fillna(0)
+        .astype(int)
+    )
+    # Extreme Fear (New)
+    feats["sent_extreme_fear_persist_5d"] = (
+        feats["sent_bucket_extreme_fear"]
+        .rolling(5, min_periods=5)
+        .min()
+        .fillna(0)
+        .astype(int)
+    )
+    # Greed Persistence (7d) - Not just extreme
+    feats["sent_greed_persist_7d"] = (
+        feats["sent_bucket_greed"]
+        .rolling(7, min_periods=7)
+        .min()
+        .fillna(0)
+        .astype(int)
+    )
+
+    # (5) Trading regimes (Renamed to sent_regime_...)
+
+    # Fear (incl extreme fear) + rising -> CALL-supportive
+    feats["sent_regime_call_supportive"] = (
+        (feats["sent_bucket_fear"] | feats["sent_bucket_extreme_fear"]) &
+        feats["sent_is_rising"]
     ).astype(int)
 
-    # 2. Extreme Fear + Flattening -> CALL (mean reversion)
-    # Panic has stopped getting worse
-    feats['regime_call_mean_reversion'] = (
-        (feats['sent_bucket_extreme_fear'] == 1) & is_flattening
+    # Extreme fear + flattening -> mean-reversion call
+    feats["sent_regime_call_mean_reversion"] = (
+        feats["sent_bucket_extreme_fear"] &
+        feats["sent_is_flattening"]
     ).astype(int)
 
-    # 3. Greed + Rising -> PUT-supportive (contrarian)
-    # Crowding starts and keeps going up -> ripe for reversal?
-    # (Note: User said "Greed + Rising" is PUT-supportive (contrarian))
-    feats['regime_put_supportive'] = (
-        (feats['sent_bucket_greed'] == 1) & is_rising
+    # Greed (incl extreme greed) + rising -> PUT-supportive (contrarian)
+    feats["sent_regime_put_supportive"] = (
+        (feats["sent_bucket_greed"] | feats["sent_bucket_extreme_greed"]) &
+        feats["sent_is_rising"]
     ).astype(int)
 
-    # 4. Extreme Greed + Persistent -> PUT / avoid longs
-    feats['regime_avoid_longs'] = (
-        (feats['sent_bucket_extreme_greed'] == 1) & is_persistent_greed
-    ).astype(int)
+    # Avoid longs: sustained extreme greed
+    feats["sent_regime_avoid_longs"] = feats["sent_extreme_greed_persist_5d"]
+
 
 
     # ---------- 6) Interactions ----------
