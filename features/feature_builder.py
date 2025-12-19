@@ -152,40 +152,147 @@ def build_features_and_labels_from_raw(
         (feats['mdia_breadth_inflow'] == 0)
     ).astype(int)
 
-    # ---------- 2) MVRV long–short ----------
-    # Intuition:
-    # 1. Value: Positive (+) is Good, Negative (-) is Bad.
-    # 2. Trend: Downtrend is VERY BEARISH (regardless of value). Uptrend is good.
-    # 3. Action: Calculate slopes over 1d, 2d, 4d, 8d.
+    # ---------- 2) MVRV long–short (Robust Bucket System) ----------
+    # Two separate things to bucketize:
+    # A) Level (secondary / confidence weighting) - is current value extreme relative to history?
+    # B) Direction / trend (primary / regime-defining) - is the metric improving or deteriorating?
 
-    feats['mvrv_ls_value'] = df['mvrv_long_short']
+    ls = df['mvrv_long_short']
+    feats['mvrv_ls_value'] = ls
 
-    # (a) Calculate Slopes/Trends over user-specified windows
-    for win in [1, 2, 4, 8]:
-        feats[f'mvrv_ls_trend_{win}d'] = df['mvrv_long_short'] - df['mvrv_long_short'].shift(win)
-
-    # (b) Define Trend Regimes
-    # "See if it is trending up or down" -> We use the 4d and 8d trends for robustness
-    is_downtrending = (feats['mvrv_ls_trend_4d'] < 0) & (feats['mvrv_ls_trend_8d'] < 0)
-    is_uptrending = (feats['mvrv_ls_trend_4d'] > 0) & (feats['mvrv_ls_trend_8d'] > 0)
-
-    # (c) Interaction / Signals
+    # ========== A) LEVEL BUCKETS (Rolling Percentile - 365d) ==========
+    # Level -2: extreme negative (bottom 10%)
+    # Level -1: negative (10-30%)
+    # Level  0: neutral (30-70%)
+    # Level +1: positive (70-90%)
+    # Level +2: extreme positive (top 10%)
     
-    # "if + , good; if -, bad" (Base Condition)
-    feats['mvrv_ls_is_positive'] = (feats['mvrv_ls_value'] > 0).astype(int)
+    ls_roll_pct = ls.rolling(365, min_periods=90).apply(
+        lambda x: x.rank(pct=True).iloc[-1],
+        raw=False
+    )
+    feats['mvrv_ls_roll_pct_365d'] = ls_roll_pct
     
-    # "if it's in downtrend regardless of current value is very bearish"
-    feats['mvrv_ls_bearish_flush'] = is_downtrending.astype(int)
+    # Level bucket assignment
+    ls_level = pd.Series(0, index=df.index)  # Default neutral
+    ls_level.loc[ls_roll_pct < 0.10] = -2
+    ls_level.loc[(ls_roll_pct >= 0.10) & (ls_roll_pct < 0.30)] = -1
+    ls_level.loc[(ls_roll_pct >= 0.30) & (ls_roll_pct < 0.70)] = 0
+    ls_level.loc[(ls_roll_pct >= 0.70) & (ls_roll_pct < 0.90)] = 1
+    ls_level.loc[ls_roll_pct >= 0.90] = 2
+    feats['mvrv_ls_level'] = ls_level.astype(int)
     
-    # "if it is in an uptrend, then good"
-    feats['mvrv_ls_bullish_recovery'] = is_uptrending.astype(int)
+    # Expose individual level flags
+    feats['mvrv_ls_level_extreme_neg'] = (ls_level == -2).astype(int)
+    feats['mvrv_ls_level_neg'] = (ls_level == -1).astype(int)
+    feats['mvrv_ls_level_neutral'] = (ls_level == 0).astype(int)
+    feats['mvrv_ls_level_pos'] = (ls_level == 1).astype(int)
+    feats['mvrv_ls_level_extreme_pos'] = (ls_level == 2).astype(int)
 
-    # Composite Score (Optional but helpful):
-    # +1 if uptrend, -1 if downtrend, 0 neutral
-    # vectorized replacement for .loc
-    feats['mvrv_ls_trend_score'] = is_uptrending.astype(int) - is_downtrending.astype(int)
+    # ========== B) DIRECTION / TREND BUCKETS (Primary) ==========
+    # For each horizon h ∈ {2,4,7,14}:
+    # Trend +1: meaningfully rising
+    # Trend  0: flat / noise
+    # Trend -1: meaningfully falling
+    # Use threshold relative to rolling std of Δh to avoid "+0.0001 counts as rising"
     
-    feats['mvrv_ls_very_bearish_regime'] = ( (feats['mvrv_ls_value'] < 0) & is_downtrending).astype(int)
+    trend_horizons = [2, 4, 7, 14]
+    trend_buckets = {}
+    
+    for h in trend_horizons:
+        delta_h = ls - ls.shift(h)
+        feats[f'mvrv_ls_delta_{h}d'] = delta_h
+        
+        # Rolling mean and std of the delta (90d window for stability)
+        delta_mean = delta_h.rolling(90, min_periods=30).mean().fillna(0)
+        delta_std = delta_h.rolling(90, min_periods=30).std().fillna(1e-9)
+        
+        # Proper Z-score: mean-centered to reduce false signals during drift
+        delta_z = (delta_h - delta_mean) / (delta_std + 1e-9)
+        feats[f'mvrv_ls_delta_z_{h}d'] = delta_z
+        
+        # Bucket: use 0.5 std as threshold for "meaningful"
+        trend_bucket = pd.Series(0, index=df.index)  # Default flat
+        trend_bucket.loc[delta_z > 0.5] = 1    # Rising
+        trend_bucket.loc[delta_z < -0.5] = -1  # Falling
+        
+        feats[f'mvrv_ls_trend_{h}d'] = trend_bucket.astype(int)
+        trend_buckets[h] = trend_bucket
+
+    # ========== C) MULTI-HORIZON CONFIRMATION LOGIC ==========
+    # From the four directional buckets (2/4/7/14), derive trend breadth
+    
+    # Count how many horizons are +1 (rising) and -1 (falling)
+    rising_count = (
+        (trend_buckets[2] == 1).astype(int) +
+        (trend_buckets[4] == 1).astype(int) +
+        (trend_buckets[7] == 1).astype(int) +
+        (trend_buckets[14] == 1).astype(int)
+    )
+    falling_count = (
+        (trend_buckets[2] == -1).astype(int) +
+        (trend_buckets[4] == -1).astype(int) +
+        (trend_buckets[7] == -1).astype(int) +
+        (trend_buckets[14] == -1).astype(int)
+    )
+    
+    feats['mvrv_ls_rising_count'] = rising_count
+    feats['mvrv_ls_falling_count'] = falling_count
+    
+    # Strong Uptrend: 3+ of 4 horizons are +1, and none are -1 (high conviction)
+    strong_uptrend = (rising_count >= 3) & (falling_count == 0)
+    feats['mvrv_ls_strong_uptrend'] = strong_uptrend.astype(int)
+    
+    # Weak Uptrend: 2+ horizons rising, none falling (early confirmation)
+    weak_uptrend = (rising_count >= 2) & (falling_count == 0) & ~strong_uptrend
+    feats['mvrv_ls_weak_uptrend'] = weak_uptrend.astype(int)
+    
+    # Strong Downtrend: 3+ of 4 horizons are -1, and none are +1 (high conviction)
+    strong_downtrend = (falling_count >= 3) & (rising_count == 0)
+    feats['mvrv_ls_strong_downtrend'] = strong_downtrend.astype(int)
+    
+    # Weak Downtrend: 2+ horizons falling, none rising (early warning)
+    weak_downtrend = (falling_count >= 2) & (rising_count == 0) & ~strong_downtrend
+    feats['mvrv_ls_weak_downtrend'] = weak_downtrend.astype(int)
+    
+    # Early Rollover: short-term (2d/4d) turning down first
+    early_rollover = (trend_buckets[2] == -1) | (trend_buckets[4] == -1)
+    feats['mvrv_ls_early_rollover'] = early_rollover.astype(int)
+    
+    # Mixed / Transition: anything else
+    feats['mvrv_ls_mixed'] = (~strong_uptrend & ~strong_downtrend & ~weak_uptrend & ~weak_downtrend).astype(int)
+
+    # ========== D) FINAL REGIMES (Outputs) ==========
+    
+    # Regime: Call Confirm (Strong Uptrend)
+    # Stronger if level >= 0 (not deeply negative)
+    feats['mvrv_ls_regime_call_confirm'] = strong_uptrend.astype(int)
+    feats['mvrv_ls_regime_call_confirm_strong'] = (
+        strong_uptrend & (ls_level >= 0)
+    ).astype(int)
+    feats['mvrv_ls_regime_early_recovery'] = (
+        strong_uptrend & (ls_level < 0)
+    ).astype(int)
+    
+    # Regime: Put Confirm (Strong Downtrend - high conviction)
+    feats['mvrv_ls_regime_put_confirm'] = strong_downtrend.astype(int)
+    
+    # Regime: Put Early Warning (Weak Downtrend - early confirmation)
+    feats['mvrv_ls_regime_put_early'] = weak_downtrend.astype(int)
+    
+    # Regime: Distribution Warning (level high AND early rollover)
+    # Triggers earlier than put_confirm - when 2d/4d flip down first at high levels
+    feats['mvrv_ls_regime_distribution_warning'] = (
+        (ls_level >= 1) & (early_rollover | weak_downtrend | strong_downtrend)
+    ).astype(int)
+    
+    # Regime: Bear Continuation (level very negative AND downtrend continues)
+    feats['mvrv_ls_regime_bear_continuation'] = (
+        (ls_level <= -1) & strong_downtrend
+    ).astype(int)
+    
+    # Regime: None (mixed - should not gate trades)
+    feats['mvrv_ls_regime_none'] = feats['mvrv_ls_mixed']
     # ---------- 3) MVRV composite extremes [start] ----------
     mvrv = df["mvrv_composite_pct"]
 
