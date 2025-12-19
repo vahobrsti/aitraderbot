@@ -196,7 +196,10 @@ def build_features_and_labels_from_raw(
     # Trend -1: meaningfully falling
     # Use threshold relative to rolling std of Δh to avoid "+0.0001 counts as rising"
     
+    # Horizon-specific thresholds: short horizons use lower, long horizons need stricter
+    # Target: ~30-40% of days flagged as trending per horizon
     trend_horizons = [2, 4, 7, 14]
+    horizon_thresholds = {2: 0.8, 4: 1.0, 7: 1.0, 14: 1.2}
     trend_buckets = {}
     
     for h in trend_horizons:
@@ -211,10 +214,11 @@ def build_features_and_labels_from_raw(
         delta_z = (delta_h - delta_mean) / (delta_std + 1e-9)
         feats[f'mvrv_ls_delta_z_{h}d'] = delta_z
         
-        # Bucket: use 0.5 std as threshold for "meaningful"
+        # Horizon-specific threshold for "meaningful" (Validation: ~30-40% of days)
+        thresh = horizon_thresholds[h]
         trend_bucket = pd.Series(0, index=df.index)  # Default flat
-        trend_bucket.loc[delta_z > 0.5] = 1    # Rising
-        trend_bucket.loc[delta_z < -0.5] = -1  # Falling
+        trend_bucket.loc[delta_z > thresh] = 1    # Rising
+        trend_bucket.loc[delta_z < -thresh] = -1  # Falling
         
         feats[f'mvrv_ls_trend_{h}d'] = trend_bucket.astype(int)
         trend_buckets[h] = trend_bucket
@@ -255,8 +259,18 @@ def build_features_and_labels_from_raw(
     weak_downtrend = (falling_count >= 2) & (rising_count == 0) & ~strong_downtrend
     feats['mvrv_ls_weak_downtrend'] = weak_downtrend.astype(int)
     
-    # Early Rollover: short-term (2d/4d) turning down first
-    early_rollover = (trend_buckets[2] == -1) | (trend_buckets[4] == -1)
+    # Early Rollover Warning (permissive): either 2d OR 4d turning down
+    # Use as early warning flag only, not for regime gating
+    early_rollover_any = (trend_buckets[2] == -1) | (trend_buckets[4] == -1)
+    feats['mvrv_ls_early_rollover_any'] = early_rollover_any.astype(int)
+    
+    # Early Rollover Regime (strict): 2d AND 4d both down, AND not in strong uptrend
+    # This is the proper regime signal for distribution warning
+    early_rollover = (
+        (trend_buckets[2] == -1) & 
+        (trend_buckets[4] == -1) & 
+        ~strong_uptrend
+    )
     feats['mvrv_ls_early_rollover'] = early_rollover.astype(int)
     
     # Mixed / Transition: anything else
