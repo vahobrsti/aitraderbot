@@ -501,6 +501,14 @@ def build_features_and_labels_from_raw(
         .fillna(0)
         .astype(int)
     )
+    # Fear Persistence (7d) - Not just extreme (symmetric with greed)
+    feats["sent_fear_persist_7d"] = (
+        feats["sent_bucket_fear"]
+        .rolling(7, min_periods=7)
+        .min()
+        .fillna(0)
+        .astype(int)
+    )
 
     # (5) Trading regimes (Renamed to sent_regime_...)
 
