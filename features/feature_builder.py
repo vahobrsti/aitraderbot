@@ -478,52 +478,189 @@ def build_features_and_labels_from_raw(
 
 
 
-    # ---------- 4) Whale accumulation ----------
-    # Buckets of interest: 1-100 (Retail/Small) and 100-10k (Whale/Smart Money)
-    cols_map = {
-        '1_100': 'btc_holders_1_100',
-        '100_10k': 'btc_holders_100_10k'
+    # ---------- 4) Whale Accumulation (Layered Bucket System) ----------
+    # Two distinct whale classes with different behavioral meaning:
+    # A) Mega whales: 100-10k BTC - Strategic capital, slow, persistent, leads trends
+    # B) Small whales: 1-100 BTC - Faster, reactive, confirms or accelerates
+    
+    whale_groups = {
+        'mega': 'btc_holders_100_10k',   # 100-10k BTC (primary signal)
+        'small': 'btc_holders_1_100',    # 1-100 BTC (secondary/catalyst)
     }
-
-    # 1. Base Changes over 1d, 2d, 4d, 7d, 30d
-    windows = [1, 2, 4, 7, 30]
-    for bucket, col in cols_map.items():
-        for win in windows:
-            # Change in raw balance
-            feats[f'whale_{bucket}_change_{win}d'] = df[col] - df[col].shift(win)
-
-    # 2. "Good" Signal: 100-10k increasing (Strong smart money signal)
-    # Intuition: "if the balance held by this group is increasing over 1day, 2day, 4day and 1week"
-    # We create a "Consistent Accumulation" flag if ALL those windows are positive
-    feats['whale_smart_accum_consistent'] = (
-        (feats['whale_100_10k_change_1d'] > 0) &
-        (feats['whale_100_10k_change_2d'] > 0) &
-        (feats['whale_100_10k_change_4d'] > 0) &
-        (feats['whale_100_10k_change_7d'] > 0)
+    
+    # ========== A) PER-GROUP DIRECTIONAL BUCKETS (Z-Score Based) ==========
+    # For each group, bucket balance changes into directional states: +1, 0, -1
+    # "Meaningful" defined relative to rolling std (90d window)
+    
+    whale_horizons = [1, 2, 4, 7]
+    # Horizon-specific thresholds (same logic as MVRV LS)
+    whale_thresholds = {1: 0.8, 2: 0.8, 4: 1.0, 7: 1.0}
+    
+    group_buckets = {}  # {group: {horizon: bucket_series}}
+    
+    for group, col in whale_groups.items():
+        group_buckets[group] = {}
+        
+        for h in whale_horizons:
+            # Raw balance change
+            delta_h = df[col] - df[col].shift(h)
+            feats[f'whale_{group}_delta_{h}d'] = delta_h
+            
+            # Z-score of delta (mean-centered, relative to volatility)
+            delta_mean = delta_h.rolling(90, min_periods=30).mean().fillna(0)
+            delta_std = delta_h.rolling(90, min_periods=30).std().fillna(1e-9)
+            delta_z = (delta_h - delta_mean) / (delta_std + 1e-9)
+            feats[f'whale_{group}_delta_z_{h}d'] = delta_z
+            
+            # Directional bucket: +1 (accum), 0 (flat), -1 (distrib)
+            thresh = whale_thresholds[h]
+            bucket = pd.Series(0, index=df.index)
+            bucket.loc[delta_z > thresh] = 1   # Accumulation
+            bucket.loc[delta_z < -thresh] = -1  # Distribution
+            
+            feats[f'whale_{group}_bucket_{h}d'] = bucket.astype(int)
+            group_buckets[group][h] = bucket
+    
+    # ========== A.2) 14D CAMPAIGN CONFIRMATION (Mega Whales Only) ==========
+    # 14d confirms persistent campaigns, does NOT trigger regimes
+    # Used to increase confidence / duration, not gate signals
+    
+    mega_col = whale_groups['mega']
+    delta_14d = df[mega_col] - df[mega_col].shift(14)
+    feats['whale_mega_delta_14d'] = delta_14d
+    
+    delta_14d_mean = delta_14d.rolling(90, min_periods=30).mean().fillna(0)
+    delta_14d_std = delta_14d.rolling(90, min_periods=30).std().fillna(1e-9)
+    delta_14d_z = (delta_14d - delta_14d_mean) / (delta_14d_std + 1e-9)
+    feats['whale_mega_delta_z_14d'] = delta_14d_z
+    
+    # 14d bucket (threshold 1.2 consistent with MVRV LS)
+    mega_14d_bucket = pd.Series(0, index=df.index)
+    mega_14d_bucket.loc[delta_14d_z > 1.2] = 1   # Campaign accumulation
+    mega_14d_bucket.loc[delta_14d_z < -1.2] = -1  # Campaign distribution
+    feats['whale_mega_bucket_14d'] = mega_14d_bucket.astype(int)
+    group_buckets['mega'][14] = mega_14d_bucket
+    
+    # ========== B) PER-GROUP MULTI-HORIZON CONFIRMATION ==========
+    # Count accumulation (+1) and distribution (-1) across horizons
+    
+    group_regimes = {}  # Store regime booleans for cross-group logic
+    
+    for group in whale_groups.keys():
+        buckets = group_buckets[group]
+        
+        accum_count = (
+            (buckets[1] == 1).astype(int) +
+            (buckets[2] == 1).astype(int) +
+            (buckets[4] == 1).astype(int) +
+            (buckets[7] == 1).astype(int)
+        )
+        distrib_count = (
+            (buckets[1] == -1).astype(int) +
+            (buckets[2] == -1).astype(int) +
+            (buckets[4] == -1).astype(int) +
+            (buckets[7] == -1).astype(int)
+        )
+        
+        feats[f'whale_{group}_accum_count'] = accum_count
+        feats[f'whale_{group}_distrib_count'] = distrib_count
+        
+        # Per-group regimes
+        strong_accum = (accum_count >= 3) & (distrib_count == 0)
+        moderate_accum = (accum_count >= 2) & (distrib_count == 0) & ~strong_accum
+        any_accum = strong_accum | moderate_accum
+        
+        strong_distrib = (distrib_count >= 3) & (accum_count == 0)
+        moderate_distrib = (distrib_count >= 2) & (accum_count == 0) & ~strong_distrib
+        any_distrib = strong_distrib | moderate_distrib
+        
+        mixed = ~any_accum & ~any_distrib
+        conflict = (accum_count > 0) & (distrib_count > 0)
+        
+        feats[f'whale_{group}_strong_accum'] = strong_accum.astype(int)
+        feats[f'whale_{group}_moderate_accum'] = moderate_accum.astype(int)
+        feats[f'whale_{group}_any_accum'] = any_accum.astype(int)
+        feats[f'whale_{group}_strong_distrib'] = strong_distrib.astype(int)
+        feats[f'whale_{group}_moderate_distrib'] = moderate_distrib.astype(int)
+        feats[f'whale_{group}_any_distrib'] = any_distrib.astype(int)
+        feats[f'whale_{group}_mixed'] = mixed.astype(int)
+        feats[f'whale_{group}_conflict'] = conflict.astype(int)
+        
+        # Store for cross-group logic
+        group_regimes[group] = {
+            'strong_accum': strong_accum,
+            'moderate_accum': moderate_accum,
+            'any_accum': any_accum,
+            'strong_distrib': strong_distrib,
+            'any_distrib': any_distrib,
+            'mixed': mixed,
+        }
+    
+    # ========== B.2) MEGA WHALE CAMPAIGN CONFIRMATION ==========
+    # 14d accumulation/distribution + at least moderate 1-7d accumulation
+    # Does NOT gate regimes — tags them as stronger
+    
+    mega_14d_accum = group_buckets['mega'][14] == 1
+    mega_14d_distrib = group_buckets['mega'][14] == -1
+    mega_any_accum = group_regimes['mega']['any_accum']
+    mega_any_distrib = group_regimes['mega']['any_distrib']
+    
+    # Campaign confirmed = 14d direction + short-term confirmation
+    feats['whale_mega_campaign_accum'] = (mega_14d_accum & mega_any_accum).astype(int)
+    feats['whale_mega_campaign_distrib'] = (mega_14d_distrib & mega_any_distrib).astype(int)
+    
+    # ========== C) CROSS-GROUP INTERACTION REGIMES ==========
+    mega = group_regimes['mega']
+    small = group_regimes['small']
+    
+    # Total balance for divergence resolution
+    df['whale_total_balance'] = df['btc_holders_1_100'] + df['btc_holders_100_10k']
+    total_change_7d = df['whale_total_balance'] - df['whale_total_balance'].shift(7)
+    feats['whale_total_change_7d'] = total_change_7d
+    total_rising = total_change_7d > 0
+    total_flat_or_rising = total_change_7d >= 0
+    
+    # REGIME 1: Broad Whale Accumulation (Very Bullish)
+    # 100-10k = Strong/Moderate Accum AND 1-100 = Any Accum
+    feats['whale_regime_broad_accum'] = (
+        mega['any_accum'] & small['any_accum']
     ).astype(int)
-
-    # 3. "Very Good": Both 1-100 AND 100-10k are increasing
-    # We check the 7d trend for this broad signal
-    feats['whale_broad_accum_7d'] = (
-        (feats['whale_100_10k_change_7d'] > 0) & 
-        (feats['whale_1_100_change_7d'] > 0)
+    
+    # REGIME 2: Strategic Accumulation (Bullish)
+    # 100-10k = Accum, split by small whale behavior:
+    # - Clean: small neutral/mixed (smart money quietly accumulating)
+    # - Divergent: small distributing (higher risk, internal conflict)
+    strategic_clean = mega['any_accum'] & small['mixed']
+    strategic_divergent = mega['any_accum'] & small['any_distrib']
+    
+    feats['whale_regime_strategic_accum'] = (
+        mega['any_accum'] & ~small['any_accum']  # Mega accum, small not accumulating
     ).astype(int)
-
-    # 4. Divergence Check: "if 1-100 increasing but 100-10k decreasing... check total"
+    feats['whale_regime_strategic_accum_clean'] = strategic_clean.astype(int)
+    feats['whale_regime_strategic_accum_divergent'] = strategic_divergent.astype(int)
     
-    # Calculate Total Holdings (Small + Medium/Large)
-    df['total_holders_1_to_10k'] = df['btc_holders_1_100'] + df['btc_holders_100_10k']
+    # REGIME 3: Retail-Driven Rally (Conditional Bullish)
+    # 1-100 = Accum, 100-10k = Distrib or Flat
+    # Resolve with total balance
+    retail_rally_base = small['any_accum'] & (mega['any_distrib'] | mega['mixed'])
+    feats['whale_regime_retail_rally'] = retail_rally_base.astype(int)
+    feats['whale_regime_retail_rally_fragile'] = (
+        retail_rally_base & total_flat_or_rising
+    ).astype(int)  # Fragile but tradable
+    feats['whale_regime_retail_rally_trap'] = (
+        retail_rally_base & ~total_flat_or_rising
+    ).astype(int)  # Bull trap warning
     
-    # Check if total is flat or up
-    feats['whale_total_change_7d'] = df['total_holders_1_to_10k'] - df['total_holders_1_to_10k'].shift(7)
+    # REGIME 4: Whale Distribution (Bearish)
+    # 100-10k = Distribution (regardless of 1-100)
+    feats['whale_regime_distribution'] = mega['any_distrib'].astype(int)
+    feats['whale_regime_distribution_strong'] = mega['strong_distrib'].astype(int)
     
-    # Condition: Retail Buying (1-100 UP) AND Whales Selling (100-10k DOWN)
-    retail_buy_whale_sell = (feats['whale_1_100_change_7d'] > 0) & (feats['whale_100_10k_change_7d'] < 0)
-    
-    # Signal: Divergence is "Okay" if Total Supply held is still Flat/Up
-    feats['whale_retail_absorption_positive'] = (
-        retail_buy_whale_sell & (feats['whale_total_change_7d'] >= 0)
+    # REGIME 5: Mixed / No Signal
+    feats['whale_regime_mixed'] = (
+        mega['mixed'] & small['mixed']
     ).astype(int)
+   
    
     # ---------- 5) Sentiment ----------
     # Work with normalized sentiment
@@ -704,8 +841,7 @@ def build_features_and_labels_from_raw(
     feats['signal_option_put'] = (
         mvrv_is_expensive & 
         sent_is_greed & 
-        (feats['mdia_slope_7d'] > 0) &
-        (feats['whale_100_10k_change_30d'] < 0)
+        (feats['whale_regime_distribution'] == 1)  # Use new whale distribution regime
     ).astype(int)
 
     # ---------- 7) Labels: Long & Short Opportunities ----------
