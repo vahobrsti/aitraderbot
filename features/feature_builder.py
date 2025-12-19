@@ -264,28 +264,43 @@ def build_features_and_labels_from_raw(
     early_rollover_any = (trend_buckets[2] == -1) | (trend_buckets[4] == -1)
     feats['mvrv_ls_early_rollover_any'] = early_rollover_any.astype(int)
     
-    # Early Rollover Regime (strict): 2d AND 4d both down, AND not in strong uptrend
-    # This is the proper regime signal for distribution warning
+    # Early Rollover Regime (strict): 2d AND 4d both down
+    # Veto: strong_uptrend (noise during momentum)
+    # Veto: weak_uptrend (structure already uncertain)
+    # Veto: strong_downtrend (redundant with put_confirm)
+    # This fires only when structure was neutral/bullish then cracks
     early_rollover = (
         (trend_buckets[2] == -1) & 
         (trend_buckets[4] == -1) & 
-        ~strong_uptrend
+        ~strong_uptrend &
+        ~weak_uptrend &
+        ~strong_downtrend
     )
     feats['mvrv_ls_early_rollover'] = early_rollover.astype(int)
     
     # Mixed / Transition: anything else
     feats['mvrv_ls_mixed'] = (~strong_uptrend & ~strong_downtrend & ~weak_uptrend & ~weak_downtrend).astype(int)
+    
+    # Conflict: horizons disagree (some rising, some falling) - chop / transition / fakeouts
+    conflict = (rising_count > 0) & (falling_count > 0)
+    feats['mvrv_ls_conflict'] = conflict.astype(int)
+    
+    # Level Ready: flag for when rolling percentile has enough data (not NaN early rows)
+    feats['mvrv_ls_level_ready'] = ls_roll_pct.notna().astype(int)
 
     # ========== D) FINAL REGIMES (Outputs) ==========
     
     # Regime: Call Confirm (Strong Uptrend)
-    # Stronger if level >= 0 (not deeply negative)
     feats['mvrv_ls_regime_call_confirm'] = strong_uptrend.astype(int)
-    feats['mvrv_ls_regime_call_confirm_strong'] = (
-        strong_uptrend & (ls_level >= 0)
-    ).astype(int)
-    feats['mvrv_ls_regime_early_recovery'] = (
+    
+    # Two types of call confirm (different contexts, not "strong vs weak"):
+    # - Recovery: strong_uptrend from negative level (reversal / V-bottom)
+    # - Trend: strong_uptrend from neutral/positive level (trend continuation)
+    feats['mvrv_ls_regime_call_confirm_recovery'] = (
         strong_uptrend & (ls_level < 0)
+    ).astype(int)
+    feats['mvrv_ls_regime_call_confirm_trend'] = (
+        strong_uptrend & (ls_level >= 0)
     ).astype(int)
     
     # Regime: Put Confirm (Strong Downtrend - high conviction)
@@ -294,10 +309,15 @@ def build_features_and_labels_from_raw(
     # Regime: Put Early Warning (Weak Downtrend - early confirmation)
     feats['mvrv_ls_regime_put_early'] = weak_downtrend.astype(int)
     
-    # Regime: Distribution Warning (level high AND early rollover)
-    # Triggers earlier than put_confirm - when 2d/4d flip down first at high levels
+    # Regime: Distribution Warning (level high + short-term cracks BEFORE full downtrend)
+    # Two severities:
+    # - Early: level high + any short-term weakness (permissive)
+    # - Strict: level high + confirmed 2d+4d rollover (high conviction)
+    feats['mvrv_ls_regime_distribution_warning_early'] = (
+        (ls_level >= 1) & early_rollover_any & ~strong_downtrend
+    ).astype(int)
     feats['mvrv_ls_regime_distribution_warning'] = (
-        (ls_level >= 1) & (early_rollover | weak_downtrend | strong_downtrend)
+        (ls_level >= 1) & early_rollover
     ).astype(int)
     
     # Regime: Bear Continuation (level very negative AND downtrend continues)
@@ -305,8 +325,9 @@ def build_features_and_labels_from_raw(
         (ls_level <= -1) & strong_downtrend
     ).astype(int)
     
-    # Regime: None (mixed - should not gate trades)
-    feats['mvrv_ls_regime_none'] = feats['mvrv_ls_mixed']
+    # Regime: None (truly no signal - mixed without conflict)
+    # Conflict is separate: "metric disagreeing across horizons" != "no signal"
+    feats['mvrv_ls_regime_none'] = (feats['mvrv_ls_mixed'] & ~conflict).astype(int)
     # ---------- 3) MVRV composite extremes [start] ----------
     mvrv = df["mvrv_composite_pct"]
 
