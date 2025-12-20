@@ -90,12 +90,18 @@ def compute_confidence_score(row: pd.Series) -> tuple[int, dict]:
         components['whale'] = '0 (neutral)'
     
     # MVRV LS contribution
-    if row.get('mvrv_ls_regime_call_confirm', 0) == 1:
-        score += 2
-        components['mvrv_ls'] = '+2 (call_confirm)'
-    elif row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1:
+    # NOTE: Check recovery FIRST because it's a subset of call_confirm
+    # (both require strong_uptrend, but recovery also requires level < 0)
+    if row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1:
+        score += 2  # Recovery is actually the best asymmetric setup
+        components['mvrv_ls'] = '+2 (early_recovery)'
+    elif row.get('mvrv_ls_regime_call_confirm_trend', 0) == 1:
+        score += 1  # Trend continuation is good but less special
+        components['mvrv_ls'] = '+1 (trend_confirm)'
+    elif row.get('mvrv_ls_regime_call_confirm', 0) == 1:
+        # Fallback: call_confirm is true but neither recovery nor trend flagged
         score += 1
-        components['mvrv_ls'] = '+1 (early_recovery)'
+        components['mvrv_ls'] = '+1 (call_confirm fallback)'
     elif row.get('mvrv_ls_regime_put_confirm', 0) == 1:
         score -= 2
         components['mvrv_ls'] = '-2 (put_confirm)'
@@ -123,9 +129,10 @@ def compute_confidence_score(row: pd.Series) -> tuple[int, dict]:
 
 def score_to_confidence(score: int) -> Confidence:
     """Convert numeric score to confidence level"""
-    if score >= 5:
+    # Tuned thresholds for 1-3 trades/month with meaningful MEDIUM signals
+    if score >= 4:
         return Confidence.HIGH
-    elif score >= 3:
+    elif score >= 2:
         return Confidence.MEDIUM
     else:
         return Confidence.LOW
@@ -144,26 +151,33 @@ def classify_market_state(row: pd.Series) -> MarketState:
     
     whale_broad = row.get('whale_regime_broad_accum', 0) == 1
     whale_strategic = row.get('whale_regime_strategic_accum', 0) == 1
+    whale_sponsored = whale_broad or whale_strategic  # Any sponsorship
     whale_distrib = row.get('whale_regime_distribution', 0) == 1
     whale_mixed = row.get('whale_regime_mixed', 0) == 1
+    whale_neutral = not whale_sponsored and not whale_distrib  # Neither accumulating nor distributing
     
     mvrv_call = row.get('mvrv_ls_regime_call_confirm', 0) == 1
     mvrv_recovery = row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1
     mvrv_trend = row.get('mvrv_ls_regime_call_confirm_trend', 0) == 1
+    mvrv_weak_up = row.get('mvrv_ls_weak_uptrend', 0) == 1  # For looser MOMENTUM
     mvrv_put = row.get('mvrv_ls_regime_put_confirm', 0) == 1
     mvrv_bear = row.get('mvrv_ls_regime_bear_continuation', 0) == 1
     mvrv_rollover = row.get('mvrv_ls_early_rollover', 0) == 1
     mvrv_weak_down = row.get('mvrv_ls_weak_downtrend', 0) == 1
     mvrv_distrib_warn = row.get('mvrv_ls_regime_distribution_warning', 0) == 1
     
+    # NOTE: Conflicts are now score-only (not classification gate)
+    # This keeps more meaningful states instead of dumping into NO_TRADE
+    # Conflicts still reduce score/confidence, which gates execution
+    
     # === CLASSIFICATION RULES (most specific first) ===
     
     # 🚀 STRONG BULLISH: All aligned bullish
-    if mdia_strong and (whale_broad or whale_strategic) and mvrv_call:
+    if mdia_strong and whale_sponsored and mvrv_call:
         return MarketState.STRONG_BULLISH
     
     # 📈 EARLY RECOVERY: Smart money leading, structure turning
-    if mdia_inflow and whale_strategic and mvrv_recovery:
+    if mdia_inflow and whale_sponsored and mvrv_recovery:
         return MarketState.EARLY_RECOVERY
     
     # 🐻 BEAR CONTINUATION: No buyers, sellers in control
@@ -173,14 +187,14 @@ def classify_market_state(row: pd.Series) -> MarketState:
     # ⚠️ DISTRIBUTION RISK: Smart money exiting, structure cracking
     if whale_distrib and not mdia_strong and (mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn):
         return MarketState.DISTRIBUTION_RISK
-    if mvrv_distrib_warn and whale_distrib:
-        return MarketState.DISTRIBUTION_RISK
     
-    # 🔥 MOMENTUM CONTINUATION: Trend continuation without strong sponsorship
-    if mdia_inflow and (whale_mixed or not whale_distrib) and mvrv_trend:
+    # 🔥 MOMENTUM CONTINUATION: Trend continuation WITHOUT strong sponsorship
+    # TUNED: Accept weak_uptrend OR full trend (not just full trend)
+    mvrv_improving = mvrv_trend or mvrv_weak_up
+    if mdia_inflow and (whale_mixed or whale_neutral) and mvrv_improving:
         return MarketState.MOMENTUM_CONTINUATION
     
-    # 🟡 NO TRADE: Conflicts or no alignment
+    # 🟡 NO TRADE: No alignment
     return MarketState.NO_TRADE
 
 
@@ -224,14 +238,13 @@ def fuse_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 # === CONVENIENCE FEATURE GENERATION ===
 
-def add_fusion_features(feats: dict, df_features: pd.DataFrame) -> dict:
+def add_fusion_features(feats: dict) -> dict:
     """
     Add fusion features directly into feature dict during build.
     Called from feature_builder.py.
     
     Args:
         feats: The features dict being built
-        df_features: DataFrame of features built so far (converted from feats dict)
     
     Returns:
         feats dict with fusion columns added

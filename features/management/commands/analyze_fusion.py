@@ -14,6 +14,7 @@ from features.signals.fusion import (
 from features.signals.options import (
     get_strategy, format_recommendation, generate_trade_signal
 )
+from features.signals.overlays import apply_long_overlays
 
 
 class Command(BaseCommand):
@@ -53,12 +54,34 @@ class Command(BaseCommand):
         state_counts = {s.value: 0 for s in MarketState}
         confidence_counts = {c.value: 0 for c in Confidence}
         score_sum = 0
+        
+        # Overlay stats
+        long_signals = 0
+        edge_boosted = 0
+        long_veto_filtered = 0
+        short_signals = 0
+        short_veto_filtered = 0
 
         for idx, row in df.iterrows():
             result = fuse_signals(row)
             state_counts[result.state.value] += 1
             confidence_counts[result.confidence.value] += 1
             score_sum += result.score
+            
+            # Track overlay effects
+            overlay = apply_long_overlays(result, row)
+            
+            if result.state in {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION}:
+                long_signals += 1
+                if overlay.long_edge_active:
+                    edge_boosted += 1
+                if overlay.long_veto_active:
+                    long_veto_filtered += 1
+            
+            if result.state in {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION}:
+                short_signals += 1
+                if overlay.short_veto_active:
+                    short_veto_filtered += 1
 
         total = len(df)
         
@@ -74,10 +97,71 @@ class Command(BaseCommand):
             self.stdout.write(f"  {conf:10s} {count:5d} ({pct:5.1f}%)")
 
         self.stdout.write(f"\nAverage Fusion Score: {score_sum / total:.2f}")
+        
+        # Overlay stats
+        self.stdout.write("\n" + "=" * 60)
+        self.stdout.write("OVERLAY STATS")
+        self.stdout.write("=" * 60)
+        self.stdout.write(f"\nLONG signals: {long_signals}")
+        if long_signals > 0:
+            self.stdout.write(f"  Edge boosted:  {edge_boosted:4d} ({edge_boosted/long_signals*100:.1f}%)")
+            self.stdout.write(f"  Veto filtered: {long_veto_filtered:4d} ({long_veto_filtered/long_signals*100:.1f}%)")
+        self.stdout.write(f"\nSHORT signals: {short_signals}")
+        if short_signals > 0:
+            self.stdout.write(f"  Veto filtered: {short_veto_filtered:4d} ({short_veto_filtered/short_signals*100:.1f}%)")
+        
+        # === SHORT VETOED SIGNALS ===
+        self.stdout.write("\n" + "=" * 60)
+        self.stdout.write("LAST 10 SHORT-VETOED SIGNALS")
+        self.stdout.write("=" * 60)
+        
+        short_vetoed_list = []
+        for idx, row in df.iterrows():
+            result = fuse_signals(row)
+            if result.state in {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION}:
+                overlay = apply_long_overlays(result, row)
+                if overlay.short_veto_active:
+                    date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
+                    short_vetoed_list.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'reason': overlay.reason,
+                    })
+        
+        self.stdout.write(f"\nTotal short-vetoed: {len(short_vetoed_list)}")
+        for sig in short_vetoed_list[-10:]:
+            self.stdout.write(f"  {sig['date']} | {sig['state']:20s} | score: {sig['score']:+d} | {sig['reason']}")
+
+        # === ALL TRADE SIGNALS (NOT NO_TRADE) ===
+        self.stdout.write("\n" + "=" * 60)
+        self.stdout.write("ALL TRADE SIGNALS (Excluding no_trade)")
+        self.stdout.write("=" * 60)
+        
+        trade_signals = []
+        for idx, row in df.iterrows():
+            result = fuse_signals(row)
+            if result.state != MarketState.NO_TRADE:
+                date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
+                trade_signals.append({
+                    'date': date_str,
+                    'state': result.state.value,
+                    'confidence': result.confidence.value,
+                    'score': result.score,
+                })
+        
+        self.stdout.write(f"\nTotal trade signals: {len(trade_signals)}")
+        
+        for sig in trade_signals[-50:]:  # Show last 50 trade signals
+            dir_emoji = "🟢" if sig['state'] in ['strong_bullish', 'early_recovery', 'momentum'] else "🔴"
+            self.stdout.write(f"  {sig['date']} {dir_emoji} {sig['state']:20s} | {sig['confidence']:6s} | score: {sig['score']:+d}")
+        
+        if len(trade_signals) > 50:
+            self.stdout.write(f"  ... (showing last 50 of {len(trade_signals)})")
 
         # === LATEST SIGNALS ===
         self.stdout.write("\n" + "=" * 60)
-        self.stdout.write(f"LATEST {latest_n} TRADE SIGNALS")
+        self.stdout.write(f"LATEST {latest_n} ROWS (Any State)")
         self.stdout.write("=" * 60)
 
         latest_rows = df.tail(latest_n)
