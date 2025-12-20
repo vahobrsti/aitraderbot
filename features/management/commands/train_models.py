@@ -7,6 +7,7 @@ from django.core.management.base import BaseCommand
 from features.ml.training import (
     train_long_model_with_holdout,
     train_short_model_with_holdout,
+    train_with_walk_forward,
     FeatureMode,
 )
 
@@ -42,8 +43,13 @@ class Command(BaseCommand):
         parser.add_argument(
             "--lag",
             type=int,
-            default=0,
-            help="Decision lag in days (shift features to avoid lookahead). 0=no lag, 1=trade next day.",
+            default=1,
+            help="Decision lag in days (shift features to avoid lookahead). 1=trade next day (default), 0=trade at close.",
+        )
+        parser.add_argument(
+            "--walk-forward",
+            action="store_true",
+            help="Use walk-forward validation with 6 rolling folds, then final test on 2025.",
         )
 
     def handle(self, *args, **options):
@@ -51,6 +57,7 @@ class Command(BaseCommand):
         out_dir = Path(options["out_dir"])
         mode = FeatureMode(options["mode"])
         decision_lag = options["lag"]
+        use_walk_forward = options["walk_forward"]
 
         if not csv_path.exists():
             self.stderr.write(self.style.ERROR(f"Features CSV not found: {csv_path}"))
@@ -61,12 +68,29 @@ class Command(BaseCommand):
         long_model_path = out_dir / "long_model.joblib"
         short_model_path = out_dir / "short_model.joblib"
 
-        # Train long model
-        self.stdout.write(self.style.MIGRATE_HEADING("Training LONG model..."))
-        train_long_model_with_holdout(csv_path, long_model_path, mode=mode, decision_lag=decision_lag)
+        if use_walk_forward:
+            # Walk-forward validation mode
+            self.stdout.write(self.style.MIGRATE_HEADING("WALK-FORWARD: Training LONG model..."))
+            train_with_walk_forward(
+                csv_path, long_model_path, 
+                label_col="label_good_move_long",
+                mode=mode, decision_lag=decision_lag
+            )
 
-        if not options["no_short"]:
-            self.stdout.write(self.style.MIGRATE_HEADING("Training SHORT model..."))
-            train_short_model_with_holdout(csv_path, short_model_path, mode=mode, decision_lag=decision_lag)
+            if not options["no_short"]:
+                self.stdout.write(self.style.MIGRATE_HEADING("WALK-FORWARD: Training SHORT model..."))
+                train_with_walk_forward(
+                    csv_path, short_model_path,
+                    label_col="label_good_move_short",
+                    mode=mode, decision_lag=decision_lag
+                )
+        else:
+            # Standard holdout mode
+            self.stdout.write(self.style.MIGRATE_HEADING("Training LONG model..."))
+            train_long_model_with_holdout(csv_path, long_model_path, mode=mode, decision_lag=decision_lag)
+
+            if not options["no_short"]:
+                self.stdout.write(self.style.MIGRATE_HEADING("Training SHORT model..."))
+                train_short_model_with_holdout(csv_path, short_model_path, mode=mode, decision_lag=decision_lag)
 
         self.stdout.write(self.style.SUCCESS("Model training completed."))

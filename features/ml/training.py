@@ -101,14 +101,14 @@ def split_X_y(df: pd.DataFrame, feature_cols: list[str], label_col: str):
 
 def split_train_val_test_by_date(df: pd.DataFrame):
     """
-    Train:  up to 2024-06-30
-    Val:    2024-07-01 to 2024-12-31
+    Train:  up to 2023-12-31
+    Val:    2024-01-01 to 2024-12-31
     Test:   2025-01-01 onwards
     """
     df = df.sort_index()
 
-    train = df.loc[: "2024-06-30"]
-    val   = df.loc["2024-07-01":"2024-12-31"]
+    train = df.loc[: "2023-12-31"]
+    val   = df.loc["2024-01-01":"2024-12-31"]
     test  = df.loc["2025-01-01":]
 
     return train, val, test
@@ -342,3 +342,242 @@ def train_short_model_with_holdout(
         model_out,
     )
     print(f"\n[SHORT] Saved model to {model_out}")
+
+
+# ============================================================================
+# WALK-FORWARD VALIDATION
+# ============================================================================
+
+def get_walk_forward_folds(val_months: int = 6):
+    """
+    Generate walk-forward validation folds.
+    
+    Each fold: train up to cutoff, validate on next `val_months` months.
+    Test (2025) is never touched during validation.
+    
+    Returns list of (train_end, val_start, val_end) date tuples.
+    """
+    folds = [
+        ("2023-03-31", "2023-04-01", "2023-09-30"),  # Fold 1
+        ("2023-06-30", "2023-07-01", "2023-12-31"),  # Fold 2
+        ("2023-09-30", "2023-10-01", "2024-03-31"),  # Fold 3
+        ("2023-12-31", "2024-01-01", "2024-06-30"),  # Fold 4
+        ("2024-03-31", "2024-04-01", "2024-09-30"),  # Fold 5
+        ("2024-06-30", "2024-07-01", "2024-12-31"),  # Fold 6
+    ]
+    return folds
+
+
+def evaluate_fold(df: pd.DataFrame, feature_cols: list[str], label_col: str,
+                  train_end: str, val_start: str, val_end: str) -> dict:
+    """
+    Train and evaluate a single walk-forward fold.
+    
+    Returns metrics dict for this fold.
+    """
+    # Split data
+    train_df = df.loc[:train_end]
+    val_df = df.loc[val_start:val_end]
+    
+    # Drop NaN per split
+    train_df = drop_na_for_task(train_df, feature_cols, label_col)
+    val_df = drop_na_for_task(val_df, feature_cols, label_col)
+    
+    if len(train_df) == 0 or len(val_df) == 0:
+        return None
+    
+    X_train, y_train = split_X_y(train_df, feature_cols, label_col)
+    X_val, y_val = split_X_y(val_df, feature_cols, label_col)
+    
+    # Train model
+    model = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=6,
+        min_samples_leaf=20,
+        n_jobs=-1,
+        random_state=42,
+    )
+    model.fit(X_train, y_train)
+    
+    # Predict
+    y_val_proba = model.predict_proba(X_val)[:, 1]
+    
+    # Compute metrics
+    auc = roc_auc_score(y_val, y_val_proba)
+    baseline = y_val.mean()
+    
+    metrics = {
+        'train_end': train_end,
+        'val_start': val_start,
+        'val_end': val_end,
+        'n_train': len(train_df),
+        'n_val': len(val_df),
+        'baseline': baseline,
+        'auc': auc,
+    }
+    
+    # Top-k precision
+    for k in [1, 2, 5, 10]:
+        prec = compute_top_k_precision(y_val, y_val_proba, k)
+        lift = prec / baseline if baseline > 0 else 0
+        metrics[f'top_{k}_prec'] = prec
+        metrics[f'top_{k}_lift'] = lift
+    
+    return metrics
+
+
+def run_walk_forward_validation(
+    csv_path: Path,
+    label_col: str,
+    mode: FeatureMode = FeatureMode.HYBRID,
+    decision_lag: int = 1,
+) -> list[dict]:
+    """
+    Run walk-forward validation across multiple folds.
+    
+    Returns list of metrics dicts, one per fold.
+    """
+    print(f"\n{'='*60}")
+    print(f"WALK-FORWARD VALIDATION | {label_col} | mode={mode.value} | lag={decision_lag}")
+    print('='*60)
+    
+    # Load and prepare data
+    df = load_feature_dataset(csv_path)
+    feature_cols = get_feature_cols(df, mode)
+    
+    if decision_lag > 0:
+        df = apply_decision_lag(df, feature_cols, decision_lag)
+    
+    print(f"Using {len(feature_cols)} features")
+    print(f"Data range: {df.index.min().date()} → {df.index.max().date()}")
+    
+    # Get folds
+    folds = get_walk_forward_folds()
+    all_metrics = []
+    
+    print(f"\nRunning {len(folds)} folds...")
+    print("-" * 80)
+    
+    for i, (train_end, val_start, val_end) in enumerate(folds, 1):
+        metrics = evaluate_fold(df, feature_cols, label_col, train_end, val_start, val_end)
+        
+        if metrics is None:
+            print(f"  Fold {i}: SKIPPED (no data)")
+            continue
+        
+        all_metrics.append(metrics)
+        
+        # Print fold summary
+        print(f"  Fold {i}: Train→{train_end} | Val[{val_start}→{val_end}] | "
+              f"n={metrics['n_val']:3d} | base={metrics['baseline']:.3f} | "
+              f"AUC={metrics['auc']:.3f} | Top5%={metrics['top_5_prec']:.3f} (lift={metrics['top_5_lift']:.2f}x)")
+    
+    # Compute averages
+    if all_metrics:
+        print("-" * 80)
+        print("\n--- AVERAGE ACROSS FOLDS ---")
+        
+        avg_auc = np.mean([m['auc'] for m in all_metrics])
+        avg_baseline = np.mean([m['baseline'] for m in all_metrics])
+        
+        print(f"  Avg Baseline: {avg_baseline:.3f}")
+        print(f"  Avg AUC:      {avg_auc:.3f}")
+        
+        for k in [1, 2, 5, 10]:
+            avg_prec = np.mean([m[f'top_{k}_prec'] for m in all_metrics])
+            avg_lift = np.mean([m[f'top_{k}_lift'] for m in all_metrics])
+            std_lift = np.std([m[f'top_{k}_lift'] for m in all_metrics])
+            print(f"  Avg Top {k:2d}%: prec={avg_prec:.3f} lift={avg_lift:.2f}x (±{std_lift:.2f})")
+    
+    return all_metrics
+
+
+def train_with_walk_forward(
+    csv_path: Path,
+    model_out: Path,
+    label_col: str,
+    mode: FeatureMode = FeatureMode.HYBRID,
+    decision_lag: int = 1,
+) -> None:
+    """
+    Full walk-forward training pipeline:
+    1. Run walk-forward validation to assess stability
+    2. Train final model on all pre-2025 data
+    3. Evaluate once on locked 2025 test set
+    4. Save model
+    """
+    name = "LONG" if "long" in label_col else "SHORT"
+    
+    # Step 1: Walk-forward validation
+    fold_metrics = run_walk_forward_validation(csv_path, label_col, mode, decision_lag)
+    
+    # Step 2: Final training on all pre-2025 data
+    print(f"\n{'='*60}")
+    print(f"FINAL MODEL | {name} | Train→2024-12-31 | Test=2025")
+    print('='*60)
+    
+    df = load_feature_dataset(csv_path)
+    feature_cols = get_feature_cols(df, mode)
+    
+    if decision_lag > 0:
+        df = apply_decision_lag(df, feature_cols, decision_lag)
+    
+    # Train on everything up to 2024
+    train_df = df.loc[:"2024-12-31"]
+    test_df = df.loc["2025-01-01":]
+    
+    train_df = drop_na_for_task(train_df, feature_cols, label_col)
+    test_df = drop_na_for_task(test_df, feature_cols, label_col)
+    
+    print(f"Final Train: {train_df.index.min().date()} → {train_df.index.max().date()} ({len(train_df)} rows)")
+    print(f"Final Test:  {test_df.index.min().date()} → {test_df.index.max().date()} ({len(test_df)} rows)")
+    
+    X_train, y_train = split_X_y(train_df, feature_cols, label_col)
+    X_test, y_test = split_X_y(test_df, feature_cols, label_col)
+    
+    # Train final model
+    model = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=6,
+        min_samples_leaf=20,
+        n_jobs=-1,
+        random_state=42,
+    )
+    model.fit(X_train, y_train)
+    
+    # Evaluate on test
+    y_test_proba = model.predict_proba(X_test)[:, 1]
+    test_auc = roc_auc_score(y_test, y_test_proba)
+    test_baseline = y_test.mean()
+    
+    print(f"\n--- FINAL TEST METRICS ({name}) ---")
+    print(f"  Baseline: {test_baseline:.3f}")
+    print(f"  AUC:      {test_auc:.3f}")
+    
+    for k in [1, 2, 5, 10]:
+        prec = compute_top_k_precision(y_test, y_test_proba, k)
+        lift = prec / test_baseline if test_baseline > 0 else 0
+        print(f"  Top {k:2d}%:  prec={prec:.3f} lift={lift:.2f}x")
+    
+    # Compute average validation metrics for comparison
+    if fold_metrics:
+        avg_val_auc = np.mean([m['auc'] for m in fold_metrics])
+        avg_val_lift = np.mean([m['top_5_lift'] for m in fold_metrics])
+        print(f"\n  (Avg Val AUC={avg_val_auc:.3f} vs Test AUC={test_auc:.3f})")
+        print(f"  (Avg Val Lift@5%={avg_val_lift:.2f}x vs Test Lift@5%={lift:.2f}x)")
+    
+    # Save model
+    model_out.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(
+        {
+            "model": model,
+            "feature_names": feature_cols,
+            "feature_mode": mode.value,
+            "decision_lag": decision_lag,
+            "test_auc": float(test_auc),
+            "walk_forward_metrics": fold_metrics,
+        },
+        model_out,
+    )
+    print(f"\n[{name}] Saved model to {model_out}")
+

@@ -847,18 +847,17 @@ def build_features_and_labels_from_raw(
     feats['signal_option_call'] = (mvrv_is_cheap & sent_is_fear).astype(int)
 
     # Put Option (Sell/Hedge Exposure):
-    #   - MVRV is High (Overheated OR New High OR Near Historical Top) -> Price is expensive
+    #   - MVRV-60d is near peak (pct_rank >= 0.80 OR dist_from_max <= 0.20) -> locally overvalued
     #   - Sentiment is Positive -> Crowd is euphoric
 
-    mvrv_is_expensive = (
-        (feats['mvrv_comp_overheated_90d'] == 1) |
-        (feats['mvrv_comp_new_high_180d'] == 1) |
-        (feats['mvrv_comp_near_top_any'] == 1)
+    mvrv_60d_near_peak = (
+        (feats['mvrv_60d_pct_rank'] >= 0.80) |
+        (feats['mvrv_60d_dist_from_max'] <= 0.20)
     )
     sent_is_greed = (df['sentiment_norm'] > 1.0) # "Very positive"
 
     feats['signal_option_put'] = (
-        mvrv_is_expensive & 
+        mvrv_60d_near_peak & 
         sent_is_greed & 
         (feats['whale_regime_distribution'] == 1)  # Use new whale distribution regime
     ).astype(int)
