@@ -33,10 +33,18 @@ class Command(BaseCommand):
             default=10,
             help="Number of latest rows to show signals for",
         )
+        parser.add_argument(
+            "--direction",
+            type=str,
+            choices=["long", "short", "all"],
+            default="all",
+            help="Filter by direction: 'long', 'short', or 'all'. Shows last N setups after overlay filter.",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["csv"])
         latest_n = options["latest"]
+        direction = options.get("direction")
 
         if not csv_path.exists():
             self.stderr.write(f"CSV not found: {csv_path}")
@@ -45,6 +53,11 @@ class Command(BaseCommand):
         # Load features
         df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
         self.stdout.write(f"\nLoaded {len(df)} rows from {csv_path}\n")
+        
+        # If direction specified, show filtered setups and exit
+        if direction:
+            self._show_direction_setups(df, direction, latest_n)
+            return
 
         # === MARKET STATE DISTRIBUTION ===
         self.stdout.write("=" * 60)
@@ -200,4 +213,83 @@ class Command(BaseCommand):
             self.stdout.write(f"  Strike: {strategy.strike_guidance.value} | DTE: {strategy.dte}")
             self.stdout.write(f"  Sizing: H={strategy.sizing.high_confidence*100:.0f}% M={strategy.sizing.medium_confidence*100:.0f}% L={strategy.sizing.low_confidence*100:.0f}%")
 
+        self.stdout.write("\nDone.\n")
+    
+    def _show_direction_setups(self, df, direction: str, n: int):
+        """Show last N setups filtered by direction after overlay filter."""
+        from features.signals.overlays import apply_overlays
+        
+        long_states = {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION}
+        short_states = {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION}
+        
+        setups = []
+        
+        for idx, row in df.iterrows():
+            result = fuse_signals(row)
+            overlay = apply_overlays(result, row)
+            date_str = str(idx)[:10]
+            
+            # Filter by direction
+            if direction == "long" and result.state in long_states:
+                # Keep if edge boosted OR not vetoed
+                if overlay.long_edge_active or not overlay.long_veto_active:
+                    overlay_status = "Clean"
+                    if overlay.long_edge_active:
+                        overlay_status = f"EDGE: {overlay.reason.replace('LONG EDGE: ', '')}"
+                    setups.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'overlay': overlay_status,
+                    })
+            
+            elif direction == "short" and result.state in short_states:
+                # Keep if not hard vetoed
+                if not overlay.short_veto_active or 'SOFT' in overlay.reason:
+                    overlay_status = "Clean"
+                    if overlay.short_veto_active:
+                        overlay_status = overlay.reason.replace('SHORT VETO: ', '')
+                    setups.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'overlay': overlay_status,
+                    })
+            
+            elif direction == "all" and result.state != MarketState.NO_TRADE:
+                # Apply all filters
+                is_long = result.state in long_states
+                is_short = result.state in short_states
+                
+                if is_long and (overlay.long_edge_active or not overlay.long_veto_active):
+                    overlay_status = "Clean" if not overlay.long_edge_active else f"EDGE"
+                    setups.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'overlay': overlay_status,
+                    })
+                elif is_short and (not overlay.short_veto_active or 'SOFT' in overlay.reason):
+                    overlay_status = "Clean" if not overlay.short_veto_active else "SOFT VETO"
+                    setups.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'overlay': overlay_status,
+                    })
+        
+        # Print results
+        dir_emoji = "🟢" if direction == "long" else "🔴" if direction == "short" else "⚪"
+        self.stdout.write(f"\n{dir_emoji} LAST {n} {direction.upper()} SETUPS (After Overlay Filter)")
+        self.stdout.write("=" * 80)
+        self.stdout.write(f"\nTotal {direction} setups: {len(setups)}")
+        self.stdout.write("")
+        
+        for sig in setups[-n:]:
+            self.stdout.write(f"  {sig['date']} | {sig['state']:20s} | score: {sig['score']:+d} | {sig['confidence']:6s} | {sig['overlay']}")
+        
         self.stdout.write("\nDone.\n")
