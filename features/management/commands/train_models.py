@@ -7,8 +7,8 @@ from django.core.management.base import BaseCommand
 from features.ml.training import (
     train_long_model_with_holdout,
     train_short_model_with_holdout,
+    FeatureMode,
 )
-
 
 
 class Command(BaseCommand):
@@ -32,10 +32,25 @@ class Command(BaseCommand):
             action="store_true",
             help="Only train the long model, skip the short model.",
         )
+        parser.add_argument(
+            "--mode",
+            type=str,
+            choices=["pure", "hybrid"],
+            default="hybrid",
+            help="Feature mode: 'pure' excludes all regime signals, 'hybrid' keeps regimes but excludes trading signals.",
+        )
+        parser.add_argument(
+            "--lag",
+            type=int,
+            default=0,
+            help="Decision lag in days (shift features to avoid lookahead). 0=no lag, 1=trade next day.",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["features_csv"])
         out_dir = Path(options["out_dir"])
+        mode = FeatureMode(options["mode"])
+        decision_lag = options["lag"]
 
         if not csv_path.exists():
             self.stderr.write(self.style.ERROR(f"Features CSV not found: {csv_path}"))
@@ -48,10 +63,10 @@ class Command(BaseCommand):
 
         # Train long model
         self.stdout.write(self.style.MIGRATE_HEADING("Training LONG model..."))
-        train_long_model_with_holdout(csv_path, long_model_path)
+        train_long_model_with_holdout(csv_path, long_model_path, mode=mode, decision_lag=decision_lag)
 
         if not options["no_short"]:
             self.stdout.write(self.style.MIGRATE_HEADING("Training SHORT model..."))
-            train_short_model_with_holdout(csv_path, short_model_path)
+            train_short_model_with_holdout(csv_path, short_model_path, mode=mode, decision_lag=decision_lag)
 
         self.stdout.write(self.style.SUCCESS("Model training completed."))

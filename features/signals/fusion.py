@@ -32,9 +32,9 @@ class MarketState(Enum):
 
 class Confidence(Enum):
     """Confidence levels for position sizing"""
-    HIGH = "high"      # ≥5 score
-    MEDIUM = "medium"  # 3-4 score
-    LOW = "low"        # ≤2 score
+    HIGH = "high"      # score >= 4
+    MEDIUM = "medium"  # score 2-3
+    LOW = "low"        # score < 2
 
 
 @dataclass
