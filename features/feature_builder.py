@@ -425,6 +425,25 @@ def build_features_and_labels_from_raw(
 
     # Keep raw composite pct as well
     feats["mvrv_composite_pct"] = mvrv
+    
+    # (d.1) MVRV-60d short signal enhancement features
+    # mvrv_usd_60d is raw ratio: 1.15 = 15% profit, 0.85 = 15% underwater
+    # High values (near peak) = shorts more reliable
+    mvrv_60d = df["mvrv_usd_60d"]
+    
+    # Feature 1: mvrv_usd_60d percentile over last 60 days (0-1 scale)
+    # High percentile = near recent high = shorts more reliable
+    feats["mvrv_60d_pct_rank"] = mvrv_60d.rolling(60, min_periods=20).apply(
+        lambda x: (x.iloc[-1] >= x).sum() / len(x) if len(x) > 0 else 0.5,
+        raw=False
+    )
+    
+    # Feature 2: Distance from rolling 60-day max (normalized by range)
+    # 0 = at max, 1 = at min. Low value = near peak = shorts more reliable
+    roll_min_60 = mvrv_60d.rolling(60, min_periods=20).min()
+    roll_max_60 = mvrv_60d.rolling(60, min_periods=20).max()
+    range_60 = roll_max_60 - roll_min_60
+    feats["mvrv_60d_dist_from_max"] = (roll_max_60 - mvrv_60d) / (range_60 + 1e-9)
 
     # (e) Composite MVRV (Valuation Backbone) - Z-Score Buckets & Relaive Regimes
     # Normalization: Rolling Z-score (long window: 365 days / 1 year)
