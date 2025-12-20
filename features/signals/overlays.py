@@ -23,13 +23,27 @@ from .fusion import MarketState, Confidence, FusionResult
 @dataclass
 class OverlayResult:
     """Result of applying overlays"""
-    long_edge_active: bool      # Sentiment + MVRV composite favor longs
-    long_veto_active: bool      # Sentiment + MVRV composite warn against longs
-    short_veto_active: bool     # Fear + undervaluation warn against shorts
+    # Strength levels: 0 = none, 1 = partial/soft, 2 = full/hard
+    edge_strength: int          # 0=none, 1=partial edge, 2=full edge
+    long_veto_strength: int     # 0=none, 1=moderate, 2=strong veto
+    short_veto_strength: int    # 0=none, 1=soft, 2=hard veto
     score_adjustment: int       # +2/+1/0/-1/-2
     extended_dte: bool          # Should extend DTE for mean reversion
     reduced_size: bool          # Should reduce size due to veto
     reason: str                 # Human-readable explanation
+    
+    # Convenience properties for backwards compatibility
+    @property
+    def long_edge_active(self) -> bool:
+        return self.edge_strength > 0
+    
+    @property
+    def long_veto_active(self) -> bool:
+        return self.long_veto_strength > 0
+    
+    @property
+    def short_veto_active(self) -> bool:
+        return self.short_veto_strength > 0
 
 
 def compute_long_edge_overlay(row: pd.Series) -> tuple[bool, str]:
@@ -186,6 +200,11 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
     
     For LONG states: Apply long edge boost and long veto
     For SHORT states: Apply short veto (fear + undervaluation = snapback risk)
+    
+    Veto dominance rules:
+    - STRONG veto always wins (overrides any edge)
+    - Moderate veto beats partial edge
+    - Full edge can override moderate veto
     """
     # Define state categories
     long_states = {
@@ -201,9 +220,9 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
     # Neutral overlay for NO_TRADE
     if fusion_result.state == MarketState.NO_TRADE:
         return OverlayResult(
-            long_edge_active=False,
-            long_veto_active=False,
-            short_veto_active=False,
+            edge_strength=0,
+            long_veto_strength=0,
+            short_veto_strength=0,
             score_adjustment=0,
             extended_dte=False,
             reduced_size=False,
@@ -215,38 +234,47 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
         edge_active, edge_reason = compute_long_edge_overlay(row)
         veto_active, veto_reason = compute_long_veto_overlay(row)
         
+        # Determine strength levels
+        edge_str = 0
+        veto_str = 0
+        
+        if edge_active:
+            edge_str = 2 if "FULL:" in edge_reason else 1
+        if veto_active:
+            veto_str = 2 if "STRONG" in veto_reason else 1
+        
+        # Apply veto dominance rules
         score_adj = 0
         extended_dte = False
         reduced_size = False
         reason = ""
         
-        if edge_active and not veto_active:
-            if "FULL:" in edge_reason:
-                score_adj = +2
-                extended_dte = True
-            else:  # PARTIAL
-                score_adj = +1
-                extended_dte = False
-            reason = f"LONG EDGE: {edge_reason}"
-            
-        elif veto_active and not edge_active:
-            if "STRONG" in veto_reason:
-                score_adj = -2
-            else:
-                score_adj = -1
+        if veto_str == 2:
+            # STRONG veto always wins
+            score_adj = -2
             reduced_size = True
-            reason = f"LONG VETO: {veto_reason}"
-            
-        elif edge_active and veto_active:
-            score_adj = 0
-            reason = f"CONFLICT: {edge_reason} vs {veto_reason}"
+            reason = f"LONG VETO (STRONG wins): {veto_reason}"
+        elif veto_str == 1 and edge_str < 2:
+            # Moderate veto beats partial edge
+            score_adj = -1
+            reduced_size = True
+            reason = f"LONG VETO (moderate wins over partial): {veto_reason}"
+        elif edge_str == 2:
+            # Full edge (can override moderate veto)
+            score_adj = +2
+            extended_dte = True
+            reason = f"LONG EDGE (FULL): {edge_reason}"
+        elif edge_str == 1 and veto_str == 0:
+            # Partial edge, no veto
+            score_adj = +1
+            reason = f"LONG EDGE (PARTIAL): {edge_reason}"
         else:
             reason = "No overlay active"
         
         return OverlayResult(
-            long_edge_active=edge_active,
-            long_veto_active=veto_active,
-            short_veto_active=False,
+            edge_strength=edge_str,
+            long_veto_strength=veto_str,
+            short_veto_strength=0,
             score_adjustment=score_adj,
             extended_dte=extended_dte,
             reduced_size=reduced_size,
@@ -258,24 +286,30 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
         is_confirmed_bear = fusion_result.state == MarketState.BEAR_CONTINUATION
         short_veto, short_reason = compute_short_veto_overlay(row, is_confirmed_bear)
         
+        # Determine strength level
+        veto_str = 0
+        if short_veto:
+            veto_str = 2 if "HARD:" in short_reason else 1
+        
         score_adj = 0
         reduced_size = False
         reason = ""
         
-        if short_veto:
-            if "HARD:" in short_reason:
-                score_adj = -2  # Strong reduction
-            else:  # SOFT
-                score_adj = -1  # Mild reduction
+        if veto_str == 2:
+            score_adj = -2  # Strong reduction
             reduced_size = True
-            reason = f"SHORT VETO: {short_reason}"
+            reason = f"SHORT VETO (HARD): {short_reason}"
+        elif veto_str == 1:
+            score_adj = -1  # Mild reduction
+            reduced_size = True
+            reason = f"SHORT VETO (SOFT): {short_reason}"
         else:
             reason = "No short overlay active"
         
         return OverlayResult(
-            long_edge_active=False,
-            long_veto_active=False,
-            short_veto_active=short_veto,
+            edge_strength=0,
+            long_veto_strength=0,
+            short_veto_strength=veto_str,
             score_adjustment=score_adj,
             extended_dte=False,
             reduced_size=reduced_size,
@@ -284,9 +318,9 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
     
     # Fallback (shouldn't reach here)
     return OverlayResult(
-        long_edge_active=False,
-        long_veto_active=False,
-        short_veto_active=False,
+        edge_strength=0,
+        long_veto_strength=0,
+        short_veto_strength=0,
         score_adjustment=0,
         extended_dte=False,
         reduced_size=False,
@@ -333,9 +367,23 @@ def get_dte_multiplier(overlay: OverlayResult) -> float:
 def get_size_multiplier(overlay: OverlayResult) -> float:
     """
     Get position size multiplier based on overlay.
+    
+    Uses reduced_size flag which works for both long and short veto.
+    Uses edge_strength to determine boost level.
     """
-    if overlay.long_edge_active and not overlay.long_veto_active:
-        return 1.25  # Increase size by 25%
-    elif overlay.long_veto_active:
-        return 0.5   # Cut size in half
+    # Check for edge boost (only for longs)
+    if overlay.edge_strength == 2:
+        return 1.25  # Full edge: increase size by 25%
+    elif overlay.edge_strength == 1:
+        return 1.1   # Partial edge: modest increase
+    
+    # Check for any veto (works for both long and short)
+    if overlay.reduced_size:
+        # Severity based on veto strength
+        max_veto = max(overlay.long_veto_strength, overlay.short_veto_strength)
+        if max_veto == 2:
+            return 0.0   # Hard/strong veto: no trade
+        else:
+            return 0.5   # Soft/moderate veto: cut size in half
+    
     return 1.0

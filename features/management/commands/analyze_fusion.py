@@ -37,7 +37,7 @@ class Command(BaseCommand):
             "--direction",
             type=str,
             choices=["long", "short", "all"],
-            default="all",
+            default=None,
             help="Filter by direction: 'long', 'short', or 'all'. Shows last N setups after overlay filter.",
         )
 
@@ -68,12 +68,19 @@ class Command(BaseCommand):
         confidence_counts = {c.value: 0 for c in Confidence}
         score_sum = 0
         
-        # Overlay stats
+        # Overlay stats with strength levels
         long_signals = 0
-        edge_boosted = 0
-        long_veto_filtered = 0
+        edge_full = 0
+        edge_partial = 0
+        long_veto_strong = 0
+        long_veto_moderate = 0
         short_signals = 0
-        short_veto_filtered = 0
+        short_veto_hard = 0
+        short_veto_soft = 0
+        
+        # Post-overlay trade counts
+        long_trades_after = 0
+        short_trades_after = 0
 
         for idx, row in df.iterrows():
             result = fuse_signals(row)
@@ -86,15 +93,29 @@ class Command(BaseCommand):
             
             if result.state in {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION}:
                 long_signals += 1
-                if overlay.long_edge_active:
-                    edge_boosted += 1
-                if overlay.long_veto_active:
-                    long_veto_filtered += 1
+                if overlay.edge_strength == 2:
+                    edge_full += 1
+                elif overlay.edge_strength == 1:
+                    edge_partial += 1
+                if overlay.long_veto_strength == 2:
+                    long_veto_strong += 1
+                elif overlay.long_veto_strength == 1:
+                    long_veto_moderate += 1
+                
+                # Count surviving trades (edge or no strong veto)
+                if overlay.long_veto_strength < 2:
+                    long_trades_after += 1
             
             if result.state in {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION}:
                 short_signals += 1
-                if overlay.short_veto_active:
-                    short_veto_filtered += 1
+                if overlay.short_veto_strength == 2:
+                    short_veto_hard += 1
+                elif overlay.short_veto_strength == 1:
+                    short_veto_soft += 1
+                
+                # Count surviving trades (no hard veto)
+                if overlay.short_veto_strength < 2:
+                    short_trades_after += 1
 
         total = len(df)
         
@@ -111,17 +132,32 @@ class Command(BaseCommand):
 
         self.stdout.write(f"\nAverage Fusion Score: {score_sum / total:.2f}")
         
-        # Overlay stats
+        # Detailed overlay stats
         self.stdout.write("\n" + "=" * 60)
         self.stdout.write("OVERLAY STATS")
         self.stdout.write("=" * 60)
+        
         self.stdout.write(f"\nLONG signals: {long_signals}")
         if long_signals > 0:
-            self.stdout.write(f"  Edge boosted:  {edge_boosted:4d} ({edge_boosted/long_signals*100:.1f}%)")
-            self.stdout.write(f"  Veto filtered: {long_veto_filtered:4d} ({long_veto_filtered/long_signals*100:.1f}%)")
+            self.stdout.write(f"  Edge FULL:      {edge_full:4d} ({edge_full/long_signals*100:.1f}%)")
+            self.stdout.write(f"  Edge PARTIAL:   {edge_partial:4d} ({edge_partial/long_signals*100:.1f}%)")
+            self.stdout.write(f"  Veto STRONG:    {long_veto_strong:4d} ({long_veto_strong/long_signals*100:.1f}%)")
+            self.stdout.write(f"  Veto MODERATE:  {long_veto_moderate:4d} ({long_veto_moderate/long_signals*100:.1f}%)")
+        
         self.stdout.write(f"\nSHORT signals: {short_signals}")
         if short_signals > 0:
-            self.stdout.write(f"  Veto filtered: {short_veto_filtered:4d} ({short_veto_filtered/short_signals*100:.1f}%)")
+            self.stdout.write(f"  Veto HARD:      {short_veto_hard:4d} ({short_veto_hard/short_signals*100:.1f}%)")
+            self.stdout.write(f"  Veto SOFT:      {short_veto_soft:4d} ({short_veto_soft/short_signals*100:.1f}%)")
+        
+        # Post-overlay frequency
+        total_before = long_signals + short_signals
+        total_after = long_trades_after + short_trades_after
+        years = len(df) / 365
+        
+        self.stdout.write(f"\n--- POST-OVERLAY TRADE FREQUENCY ---")
+        self.stdout.write(f"Before overlay: {total_before} trades ({total_before/years:.1f}/year, {total_before/(len(df)/30):.1f}/month)")
+        self.stdout.write(f"After overlay:  {total_after} trades ({total_after/years:.1f}/year, {total_after/(len(df)/30):.1f}/month)")
+        self.stdout.write(f"  Long:  {long_trades_after} | Short: {short_trades_after}")
         
         # === SHORT VETOED SIGNALS ===
         self.stdout.write("\n" + "=" * 60)
