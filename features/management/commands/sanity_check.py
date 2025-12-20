@@ -29,7 +29,7 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.MIGRATE_HEADING("Basic info"))
         self.stdout.write(f"Shape: {df.shape}")
-        self.stdout.write(f"Columns:\n{df.columns.tolist()}")
+        self.stdout.write(f"Columns (first 10):\n{df.columns[:10].tolist()}")
 
         self.stdout.write(self.style.MIGRATE_HEADING("Label head"))
         self.stdout.write(str(df[["label_good_move_long", "label_good_move_short"]].head()))
