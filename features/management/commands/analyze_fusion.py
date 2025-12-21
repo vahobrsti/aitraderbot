@@ -2,6 +2,7 @@
 """
 Django command to analyze signal fusion on feature data.
 Shows market state distribution, confidence levels, and sample trade signals.
+Includes tactical puts analysis for puts inside bull regimes.
 """
 
 from django.core.management.base import BaseCommand
@@ -9,12 +10,13 @@ from pathlib import Path
 import pandas as pd
 
 from features.signals.fusion import (
-    fuse_signals, MarketState, Confidence, fuse_dataframe
+    fuse_signals, MarketState, Confidence, fuse_dataframe, FusionResult
 )
 from features.signals.options import (
     get_strategy, format_recommendation, generate_trade_signal
 )
-from features.signals.overlays import apply_long_overlays
+from features.signals.overlays import apply_long_overlays, apply_overlays, get_size_multiplier
+from features.signals.tactical_puts import tactical_put_inside_bull, TacticalPutStrategy
 
 
 class Command(BaseCommand):
@@ -40,11 +42,18 @@ class Command(BaseCommand):
             default=None,
             help="Filter by direction: 'long', 'short', or 'all'. Shows last N setups after overlay filter.",
         )
+        parser.add_argument(
+            "--year",
+            type=int,
+            default=None,
+            help="Filter to a specific year (e.g., 2024)",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["csv"])
         latest_n = options["latest"]
         direction = options.get("direction")
+        year = options.get("year")
 
         if not csv_path.exists():
             self.stderr.write(f"CSV not found: {csv_path}")
@@ -53,6 +62,11 @@ class Command(BaseCommand):
         # Load features
         df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
         self.stdout.write(f"\nLoaded {len(df)} rows from {csv_path}\n")
+        
+        # Filter by year if specified
+        if year:
+            df = df.loc[f'{year}-01-01':f'{year}-12-31']
+            self.stdout.write(f"Filtered to {year}: {len(df)} rows\n")
         
         # If direction specified, show filtered setups and exit
         if direction:
@@ -77,10 +91,17 @@ class Command(BaseCommand):
         short_signals = 0
         short_veto_hard = 0
         short_veto_soft = 0
+        short_edge_full = 0
+        short_edge_partial = 0
+        
+        # Tactical put stats
+        tactical_put_full = 0
+        tactical_put_partial = 0
         
         # Post-overlay trade counts
         long_trades_after = 0
         short_trades_after = 0
+        tactical_put_count = 0
 
         for idx, row in df.iterrows():
             result = fuse_signals(row)
@@ -105,6 +126,15 @@ class Command(BaseCommand):
                 # Count surviving trades (edge or no strong veto)
                 if overlay.long_veto_strength < 2:
                     long_trades_after += 1
+                
+                # Check for tactical puts
+                tactical_result = tactical_put_inside_bull(result, row)
+                if tactical_result.active:
+                    tactical_put_count += 1
+                    if tactical_result.strength == 2:
+                        tactical_put_full += 1
+                    else:
+                        tactical_put_partial += 1
             
             if result.state in {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION}:
                 short_signals += 1
@@ -112,6 +142,10 @@ class Command(BaseCommand):
                     short_veto_hard += 1
                 elif overlay.short_veto_strength == 1:
                     short_veto_soft += 1
+                if overlay.short_edge_strength == 2:
+                    short_edge_full += 1
+                elif overlay.short_edge_strength == 1:
+                    short_edge_partial += 1
                 
                 # Count surviving trades (no hard veto)
                 if overlay.short_veto_strength < 2:
@@ -146,18 +180,56 @@ class Command(BaseCommand):
         
         self.stdout.write(f"\nSHORT signals: {short_signals}")
         if short_signals > 0:
+            self.stdout.write(f"  Edge FULL:      {short_edge_full:4d} ({short_edge_full/short_signals*100:.1f}%)")
+            self.stdout.write(f"  Edge PARTIAL:   {short_edge_partial:4d} ({short_edge_partial/short_signals*100:.1f}%)")
             self.stdout.write(f"  Veto HARD:      {short_veto_hard:4d} ({short_veto_hard/short_signals*100:.1f}%)")
             self.stdout.write(f"  Veto SOFT:      {short_veto_soft:4d} ({short_veto_soft/short_signals*100:.1f}%)")
+        
+        # Tactical puts stats
+        self.stdout.write(f"\nTACTICAL PUTS (inside bull): {tactical_put_count}")
+        if long_signals > 0:
+            self.stdout.write(f"  FULL:           {tactical_put_full:4d} ({tactical_put_full/long_signals*100:.1f}%)")
+            self.stdout.write(f"  PARTIAL:        {tactical_put_partial:4d} ({tactical_put_partial/long_signals*100:.1f}%)")
         
         # Post-overlay frequency
         total_before = long_signals + short_signals
         total_after = long_trades_after + short_trades_after
+        total_short_opps = short_trades_after + tactical_put_count
         years = len(df) / 365
         
         self.stdout.write(f"\n--- POST-OVERLAY TRADE FREQUENCY ---")
         self.stdout.write(f"Before overlay: {total_before} trades ({total_before/years:.1f}/year, {total_before/(len(df)/30):.1f}/month)")
         self.stdout.write(f"After overlay:  {total_after} trades ({total_after/years:.1f}/year, {total_after/(len(df)/30):.1f}/month)")
         self.stdout.write(f"  Long:  {long_trades_after} | Short: {short_trades_after}")
+        self.stdout.write(f"\n--- TOTAL SHORT OPPORTUNITIES ---")
+        self.stdout.write(f"Fusion shorts passed overlay: {short_trades_after}")
+        self.stdout.write(f"Tactical puts in bull regime: {tactical_put_count}")
+        self.stdout.write(f"TOTAL SHORT OPPS: {total_short_opps} ({total_short_opps/years:.1f}/year)")
+        
+        # === TACTICAL PUTS LIST ===
+        self.stdout.write("\n" + "=" * 60)
+        self.stdout.write("TACTICAL PUTS (Puts Inside Bull Regimes)")
+        self.stdout.write("=" * 60)
+        
+        tactical_put_list = []
+        for idx, row in df.iterrows():
+            result = fuse_signals(row)
+            if result.state in {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION}:
+                tactical_result = tactical_put_inside_bull(result, row)
+                if tactical_result.active:
+                    date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
+                    tactical_put_list.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'strength': tactical_result.strength,
+                        'size': tactical_result.size_mult,
+                        'reason': tactical_result.reason,
+                    })
+        
+        self.stdout.write(f"\nTotal tactical puts: {len(tactical_put_list)}")
+        for sig in tactical_put_list[-15:]:
+            str_label = "FULL" if sig['strength'] == 2 else "PARTIAL"
+            self.stdout.write(f"  {sig['date']} | {sig['state']:15s} | {str_label:7s} | size={sig['size']:.2f} | {sig['reason'][:45]}")
         
         # === SHORT VETOED SIGNALS ===
         self.stdout.write("\n" + "=" * 60)
@@ -231,6 +303,14 @@ class Command(BaseCommand):
             self.stdout.write(f"  Confidence: {conf_stars} ({signal.confidence.value}) | Score: {signal.fusion_score}")
             self.stdout.write(f"  Structures: {', '.join([s.value for s in signal.structures])}")
             self.stdout.write(f"  DTE: {signal.min_dte}-{signal.max_dte}d | Size: {signal.position_size_pct*100:.1f}%")
+            
+            # Check for tactical put
+            result = fuse_signals(row)
+            tactical_result = tactical_put_inside_bull(result, row)
+            if tactical_result.active:
+                str_label = "FULL" if tactical_result.strength == 2 else "PARTIAL"
+                self.stdout.write(f"  🔻 TACTICAL PUT ({str_label}): size={tactical_result.size_mult:.2f}")
+            
             if signal.whale_campaign:
                 self.stdout.write(f"  🐋 Whale Campaign Active!")
 
@@ -278,6 +358,19 @@ class Command(BaseCommand):
                         'score': result.score,
                         'confidence': result.confidence.value,
                         'overlay': overlay_status,
+                        'type': 'long',
+                    })
+                
+                # Also check for tactical puts
+                tactical_result = tactical_put_inside_bull(result, row)
+                if tactical_result.active:
+                    setups.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'overlay': f"TACTICAL PUT: {tactical_result.reason[:30]}",
+                        'type': 'tactical_put',
                     })
             
             elif direction == "short" and result.state in short_states:
@@ -292,6 +385,20 @@ class Command(BaseCommand):
                         'score': result.score,
                         'confidence': result.confidence.value,
                         'overlay': overlay_status,
+                        'type': 'short',
+                    })
+            
+            elif direction == "short" and result.state in long_states:
+                # Check for tactical puts in bull states when asking for shorts
+                tactical_result = tactical_put_inside_bull(result, row)
+                if tactical_result.active:
+                    setups.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'overlay': f"TACTICAL PUT: {tactical_result.reason[:35]}",
+                        'type': 'tactical_put',
                     })
             
             elif direction == "all" and result.state != MarketState.NO_TRADE:
@@ -307,7 +414,21 @@ class Command(BaseCommand):
                         'score': result.score,
                         'confidence': result.confidence.value,
                         'overlay': overlay_status,
+                        'type': 'long',
                     })
+                    
+                    # Also check tactical puts
+                    tactical_result = tactical_put_inside_bull(result, row)
+                    if tactical_result.active:
+                        setups.append({
+                            'date': date_str,
+                            'state': result.state.value,
+                            'score': result.score,
+                            'confidence': result.confidence.value,
+                            'overlay': f"TACTICAL PUT",
+                            'type': 'tactical_put',
+                        })
+                        
                 elif is_short and (not overlay.short_veto_active or 'SOFT' in overlay.reason):
                     overlay_status = "Clean" if not overlay.short_veto_active else "SOFT VETO"
                     setups.append({
@@ -316,6 +437,7 @@ class Command(BaseCommand):
                         'score': result.score,
                         'confidence': result.confidence.value,
                         'overlay': overlay_status,
+                        'type': 'short',
                     })
         
         # Print results
@@ -326,6 +448,7 @@ class Command(BaseCommand):
         self.stdout.write("")
         
         for sig in setups[-n:]:
-            self.stdout.write(f"  {sig['date']} | {sig['state']:20s} | score: {sig['score']:+d} | {sig['confidence']:6s} | {sig['overlay']}")
+            type_emoji = "🔻" if sig['type'] == 'tactical_put' else ""
+            self.stdout.write(f"  {sig['date']} | {sig['state']:20s} | score: {sig['score']:+d} | {sig['confidence']:6s} | {type_emoji}{sig['overlay']}")
         
         self.stdout.write("\nDone.\n")

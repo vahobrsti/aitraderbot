@@ -444,6 +444,20 @@ def build_features_and_labels_from_raw(
     roll_max_60 = mvrv_60d.rolling(60, min_periods=20).max()
     range_60 = roll_max_60 - roll_min_60
     feats["mvrv_60d_dist_from_max"] = (roll_max_60 - mvrv_60d) / (range_60 + 1e-9)
+    
+    # Feature 3-5: MVRV-60d trend detection (for tactical puts)
+    # Calculate short-term slope of MVRV-60d
+    mvrv_60d_delta_3d = mvrv_60d.diff(3)
+    mvrv_60d_delta_7d = mvrv_60d.diff(7)
+    
+    # Normalize deltas by rolling std
+    mvrv_60d_std = mvrv_60d.rolling(30, min_periods=10).std()
+    mvrv_60d_delta_z = mvrv_60d_delta_7d / (mvrv_60d_std + 1e-9)
+    
+    # Trend flags
+    feats["mvrv_60d_is_falling"] = (mvrv_60d_delta_z < -0.5).astype(int)
+    feats["mvrv_60d_is_flattening"] = ((mvrv_60d_delta_z >= -0.5) & (mvrv_60d_delta_z <= 0.5)).astype(int)
+    feats["mvrv_60d_is_rising"] = (mvrv_60d_delta_z > 0.5).astype(int)
 
     # (e) Composite MVRV (Valuation Backbone) - Z-Score Buckets & Relaive Regimes
     # Normalization: Rolling Z-score (long window: 365 days / 1 year)
