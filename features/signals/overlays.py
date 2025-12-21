@@ -10,8 +10,9 @@ Long overlays:
 2. Long Veto Overlay (Bullish Filter) - when sentiment + MVRV composite warn against longs
 
 Short overlays (MVRV-60d ONLY):
-1. Short Edge Overlay - when MVRV-60d is near peak (shorts more reliable)
-2. Short Veto Overlay - when MVRV-60d is far from peak (shorts less reliable)
+Uses a blended "near_peak_score" from mvrv_60d_pct_rank and mvrv_60d_dist_from_max.
+1. Short Edge Overlay - when near_peak_score is high (shorts more reliable)
+2. Short Veto Overlay - when near_peak_score is low (shorts less reliable)
 
 Mental model:
 - fusion.py decides IF we should trade
@@ -33,7 +34,7 @@ class OverlayResult:
     long_veto_strength: int     # 0=none, 1=moderate, 2=strong veto
     short_veto_strength: int    # 0=none, 1=soft, 2=hard veto
     short_edge_strength: int    # 0=none, 1=partial, 2=full edge (for shorts)
-    score_adjustment: int       # +2/+1/0/-1/-2
+    score_adjustment: int       # +2/+1/0/-1/-2 (for logging/interpretability)
     extended_dte: bool          # Should extend DTE for mean reversion
     reduced_size: bool          # Should reduce size due to veto
     reason: str                 # Human-readable explanation
@@ -155,83 +156,85 @@ def compute_long_veto_overlay(row: pd.Series) -> tuple[bool, str]:
 
 # ============================================================================
 # SHORT OVERLAYS - MVRV-60d ONLY (no sentiment, no composite MVRV)
+# Uses a blended "near_peak_score" for smoother behavior
 # ============================================================================
 
-def compute_short_edge_overlay(row: pd.Series) -> tuple[int, str]:
+def compute_near_peak_score(row: pd.Series) -> Optional[float]:
     """
-    Shorts are most reliable when MVRV-60d is stretched near its recent peak.
+    Compute a blended near-peak score from MVRV-60d features.
     
-    Uses ONLY mvrv_60d_pct_rank and mvrv_60d_dist_from_max.
-    No sentiment. No composite MVRV.
+    Blends mvrv_60d_pct_rank and mvrv_60d_dist_from_max into a single 0-1 score.
+    Higher score = nearer to 60-day peak = shorts more reliable.
     
-    Returns (edge_strength, reason), edge_strength ∈ {0,1,2}
-    """
-    pct = row.get("mvrv_60d_pct_rank", None)
-    dist = row.get("mvrv_60d_dist_from_max", None)
-    
-    # If missing or NaN, no edge
-    if pct is None or dist is None:
-        return 0, ""
-    if isinstance(pct, float) and math.isnan(pct):
-        return 0, ""
-    if isinstance(dist, float) and math.isnan(dist):
-        return 0, ""
-    
-    # FULL edge (2): very near peak
-    if pct >= 0.90 or dist <= 0.10:
-        return 2, f"FULL: MVRV-60d near peak (pct={pct:.2f}, dist={dist:.2f})"
-    
-    # PARTIAL edge (1): elevated
-    if pct >= 0.80 or dist <= 0.20:
-        return 1, f"PARTIAL: MVRV-60d elevated (pct={pct:.2f}, dist={dist:.2f})"
-    
-    return 0, ""
-
-
-def compute_short_veto_overlay(row: pd.Series, is_confirmed_bear: bool) -> tuple[bool, str]:
-    """
-    Detect when MVRV-60d conditions make shorts risky.
-    
-    Uses ONLY mvrv_60d_pct_rank and mvrv_60d_dist_from_max.
-    No sentiment. No composite MVRV.
-    
-    Short Veto Logic:
-    - HARD far-from-peak if (pct < 0.25) OR (dist > 0.75)
-    - SOFT far-from-peak if (pct < 0.40) OR (dist > 0.60)
-    
-    Context guard: In confirmed BEAR_CONTINUATION, only apply HARD veto.
-    
-    Returns (is_active, reason)
+    Returns None if data is missing/NaN.
     """
     pct = row.get("mvrv_60d_pct_rank", None)
     dist = row.get("mvrv_60d_dist_from_max", None)
     
-    # If missing or NaN, do NOT veto (fail open)
+    # Check for missing or NaN
     if pct is None or dist is None:
-        return False, ""
+        return None
     if isinstance(pct, float) and math.isnan(pct):
-        return False, ""
+        return None
     if isinstance(dist, float) and math.isnan(dist):
-        return False, ""
+        return None
     
-    # Define far-from-peak thresholds
-    hard_far_from_peak = (pct < 0.25) or (dist > 0.75)
-    soft_far_from_peak = (pct < 0.40) or (dist > 0.60)
+    # Blend: 50% pct_rank (higher is better) + 50% (1 - dist) (lower dist is better)
+    near_peak_score = 0.5 * pct + 0.5 * (1 - dist)
     
-    # Context guard: in confirmed bear, only hard veto applies
-    if is_confirmed_bear:
-        if hard_far_from_peak:
-            return True, f"HARD: MVRV-60d far from peak even in bear (pct={pct:.2f}, dist={dist:.2f})"
-        return False, ""
+    return near_peak_score
+
+
+def compute_short_overlay(row: pd.Series, is_confirmed_bear: bool) -> tuple[int, int, str]:
+    """
+    Compute short overlay using blended near_peak_score.
     
-    # Not in confirmed bear: apply both hard and soft veto
-    if hard_far_from_peak:
-        return True, f"HARD: MVRV-60d far from peak (pct={pct:.2f}, dist={dist:.2f})"
+    Edge and veto are MUTUALLY EXCLUSIVE (no mixed states).
     
-    if soft_far_from_peak:
-        return True, f"SOFT: MVRV-60d not near peak (pct={pct:.2f}, dist={dist:.2f})"
+    Thresholds:
+    - >= 0.85: Full edge (shorts very reliable)
+    - >= 0.75: Partial edge (shorts reliable)
+    - <= 0.35: Soft veto (shorts less reliable) - only for DISTRIBUTION_RISK
+    - <= 0.25: Hard veto (shorts unreliable)
     
-    return False, ""
+    For DISTRIBUTION_RISK: fail-closed (require score >= 0.35 to trade)
+    For BEAR_CONTINUATION: fail-open (only hard veto, structure confirms bear)
+    
+    Returns (edge_strength, veto_strength, reason)
+    """
+    score = compute_near_peak_score(row)
+    
+    # Handle missing data
+    if score is None:
+        if is_confirmed_bear:
+            # BEAR_CONTINUATION: fail-open (structure confirms bear)
+            return 0, 0, "Missing MVRV-60d data (fail-open in confirmed bear)"
+        else:
+            # DISTRIBUTION_RISK: fail-closed (conservative)
+            return 0, 2, "HARD: Missing MVRV-60d data (fail-closed)"
+    
+    # Edge/veto logic (mutually exclusive)
+    if score >= 0.85:
+        return 2, 0, f"FULL EDGE: MVRV-60d near peak (score={score:.2f})"
+    
+    if score >= 0.75:
+        return 1, 0, f"PARTIAL EDGE: MVRV-60d elevated (score={score:.2f})"
+    
+    # Below 0.75: check for vetoes
+    if score <= 0.25:
+        # Hard veto applies to both states
+        if is_confirmed_bear:
+            return 0, 2, f"HARD: MVRV-60d far from peak even in bear (score={score:.2f})"
+        else:
+            return 0, 2, f"HARD: MVRV-60d far from peak (score={score:.2f})"
+    
+    if score <= 0.35:
+        # Soft veto only for DISTRIBUTION_RISK
+        if not is_confirmed_bear:
+            return 0, 1, f"SOFT: MVRV-60d not near peak (score={score:.2f})"
+    
+    # No edge, no veto (0.35 < score < 0.75)
+    return 0, 0, f"No short overlay active (score={score:.2f})"
 
 
 def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult:
@@ -239,7 +242,7 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
     Apply overlays to a fusion result.
     
     For LONG states: Apply long edge boost and long veto (sentiment + composite MVRV)
-    For SHORT states: Apply short edge/veto (MVRV-60d ONLY)
+    For SHORT states: Apply short edge/veto (MVRV-60d ONLY, blended score)
     
     Veto dominance rules:
     - STRONG/HARD veto always wins (overrides any edge)
@@ -323,54 +326,33 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
             reason=reason
         )
     
-    # === SHORT STATE OVERLAYS (MVRV-60d ONLY) ===
+    # === SHORT STATE OVERLAYS (MVRV-60d ONLY, blended score) ===
     if fusion_result.state in short_states:
         is_confirmed_bear = fusion_result.state == MarketState.BEAR_CONTINUATION
         
-        # Compute both veto and edge
-        veto_active, veto_reason = compute_short_veto_overlay(row, is_confirmed_bear)
-        short_edge_str, short_edge_reason = compute_short_edge_overlay(row)
+        # Compute overlay using blended score (edge/veto mutually exclusive)
+        short_edge_str, veto_str, reason = compute_short_overlay(row, is_confirmed_bear)
         
-        # Determine veto strength
-        veto_str = 0
-        if veto_active:
-            veto_str = 2 if "HARD:" in veto_reason else 1
-        
-        # Apply SHORT dominance rules
+        # Determine score_adjustment and flags
         score_adj = 0
         reduced_size = False
-        reason = ""
+        extended_dte = False
         
         if veto_str == 2:
-            # HARD veto always wins, edge ignored
+            # Hard veto
             score_adj = -2
             reduced_size = True
-            reason = f"SHORT VETO (HARD): {veto_reason}"
-        elif veto_str == 1 and short_edge_str == 0:
-            # Soft veto, no edge
+        elif veto_str == 1:
+            # Soft veto
             score_adj = -1
             reduced_size = True
-            reason = f"SHORT VETO (SOFT): {veto_reason}"
-        elif veto_str == 1 and short_edge_str > 0:
-            # Soft veto + edge: mixed scenario
-            reduced_size = True  # Risk control: keep reduced size
-            if short_edge_str == 2:
-                score_adj = 0  # Full edge cancels soft veto score
-            else:
-                score_adj = -1  # Partial edge: still cautious
-            reason = f"SHORT MIXED: {veto_reason} + {short_edge_reason}"
-        elif veto_str == 0 and short_edge_str == 2:
-            # No veto, full edge
+        elif short_edge_str == 2:
+            # Full edge
             score_adj = +2
-            reduced_size = False
-            reason = f"SHORT EDGE (FULL): {short_edge_reason}"
-        elif veto_str == 0 and short_edge_str == 1:
-            # No veto, partial edge
+            extended_dte = True  # Let mean reversion play out
+        elif short_edge_str == 1:
+            # Partial edge
             score_adj = +1
-            reduced_size = False
-            reason = f"SHORT EDGE (PARTIAL): {short_edge_reason}"
-        else:
-            reason = "No short overlay active"
         
         return OverlayResult(
             edge_strength=0,
@@ -378,7 +360,7 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
             short_veto_strength=veto_str,
             short_edge_strength=short_edge_str,
             score_adjustment=score_adj,
-            extended_dte=False,
+            extended_dte=extended_dte,
             reduced_size=reduced_size,
             reason=reason
         )
@@ -405,31 +387,64 @@ def apply_long_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayR
 def adjust_confidence_with_overlay(base_confidence: Confidence, overlay: OverlayResult) -> Confidence:
     """
     Adjust confidence level based on overlay result.
-    """
-    if overlay.score_adjustment == 0:
-        return base_confidence
     
-    # Map confidence to numeric
+    Uses edge/veto strengths directly (not just score_adjustment).
+    """
     conf_map = {Confidence.LOW: 0, Confidence.MEDIUM: 1, Confidence.HIGH: 2}
     reverse_map = {0: Confidence.LOW, 1: Confidence.MEDIUM, 2: Confidence.HIGH}
     
     current = conf_map[base_confidence]
-    adjusted = max(0, min(2, current + (1 if overlay.score_adjustment > 0 else -1)))
     
-    return reverse_map[adjusted]
+    # Hard/strong veto -> force LOW
+    if overlay.long_veto_strength == 2 or overlay.short_veto_strength == 2:
+        return Confidence.LOW
+    
+    # Soft/moderate veto -> down 1 notch
+    if overlay.long_veto_strength == 1 or overlay.short_veto_strength == 1:
+        adjusted = max(0, current - 1)
+        return reverse_map[adjusted]
+    
+    # Full edge -> up 1 notch
+    if overlay.edge_strength == 2 or overlay.short_edge_strength == 2:
+        adjusted = min(2, current + 1)
+        return reverse_map[adjusted]
+    
+    # Partial edge -> up 1 notch only if not already LOW
+    if overlay.edge_strength == 1 or overlay.short_edge_strength == 1:
+        if current > 0:  # Avoid overconfidence from LOW
+            adjusted = min(2, current + 1)
+            return reverse_map[adjusted]
+    
+    return base_confidence
 
 
 def get_dte_multiplier(overlay: OverlayResult) -> float:
     """
     Get DTE multiplier based on overlay.
     
-    Returns multiplier to apply to base DTE recommendation.
-    Note: Shorts do not extend DTE based on short edge.
+    For longs: extend DTE on full edge (mean reversion)
+    For shorts: extend DTE on full edge (let mean reversion play out)
+    For vetoes: shorten DTE (reduce exposure)
     """
+    # Full edge (long or short) extends DTE
     if overlay.extended_dte:
-        return 1.5  # Extend DTE by 50%
-    elif overlay.reduced_size:
-        return 0.75  # Shorten DTE by 25%
+        if overlay.short_edge_strength == 2:
+            return 1.15  # Short full edge: slight extension
+        else:
+            return 1.5   # Long full edge: extend by 50%
+    
+    # Partial short edge: slight extension
+    if overlay.short_edge_strength == 1:
+        return 1.05
+    
+    # Veto shortens DTE
+    if overlay.reduced_size:
+        max_veto = max(overlay.long_veto_strength, overlay.short_veto_strength)
+        if max_veto == 1:
+            return 0.85  # Soft veto: shorten by 15%
+        else:
+            return 0.75  # Hard veto: shorten by 25%
+    
     return 1.0
 
 
