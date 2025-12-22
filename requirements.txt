@@ -1,0 +1,35 @@
+# Core
+Django==4.2.23
+python-dotenv==1.2.1
+
+# Database
+psycopg2-binary==2.9.9
+psycopg==3.2.13
+psycopg-binary==3.2.13
+
+# Data Processing
+pandas==2.3.3
+numpy==2.0.2
+pyarrow==21.0.0
+scipy==1.13.1
+
+# Machine Learning
+scikit-learn==1.6.1
+lightgbm==4.6.0
+joblib==1.5.2
+
+# Google Sheets Integration
+gspread==6.2.1
+google-auth==2.41.1
+google-auth-oauthlib==1.2.3
+
+# HTTP & Networking
+requests==2.32.5
+requests-oauthlib==2.0.0
+urllib3==2.5.0
+certifi==2025.11.12
+
+# Utilities
+python-dateutil==2.9.0.post0
+pytz==2025.2
+tzdata==2025.2
