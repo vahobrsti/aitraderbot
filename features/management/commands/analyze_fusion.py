@@ -374,7 +374,7 @@ class Command(BaseCommand):
                     })
             
             elif direction == "short" and result.state in short_states:
-                # Keep if not hard vetoed
+                # PRIMARY_SHORT: Keep if not hard vetoed
                 if not overlay.short_veto_active or 'SOFT' in overlay.reason:
                     overlay_status = "Clean"
                     if overlay.short_veto_active:
@@ -385,20 +385,21 @@ class Command(BaseCommand):
                         'score': result.score,
                         'confidence': result.confidence.value,
                         'overlay': overlay_status,
-                        'type': 'short',
+                        'type': 'PRIMARY_SHORT',
                     })
             
             elif direction == "short" and result.state in long_states:
-                # Check for tactical puts in bull states when asking for shorts
+                # TACTICAL_PUT: Check for tactical puts in bull states
                 tactical_result = tactical_put_inside_bull(result, row)
                 if tactical_result.active:
+                    str_label = "FULL" if tactical_result.strength == 2 else "PARTIAL"
                     setups.append({
                         'date': date_str,
                         'state': result.state.value,
                         'score': result.score,
                         'confidence': result.confidence.value,
-                        'overlay': f"TACTICAL PUT: {tactical_result.reason[:35]}",
-                        'type': 'tactical_put',
+                        'overlay': f"{str_label}: {tactical_result.reason[tactical_result.reason.find('MVRV'):][:35]}",
+                        'type': 'TACTICAL_PUT',
                     })
             
             elif direction == "all" and result.state != MarketState.NO_TRADE:
@@ -414,19 +415,20 @@ class Command(BaseCommand):
                         'score': result.score,
                         'confidence': result.confidence.value,
                         'overlay': overlay_status,
-                        'type': 'long',
+                        'type': 'LONG',
                     })
                     
                     # Also check tactical puts
                     tactical_result = tactical_put_inside_bull(result, row)
                     if tactical_result.active:
+                        str_label = "FULL" if tactical_result.strength == 2 else "PARTIAL"
                         setups.append({
                             'date': date_str,
                             'state': result.state.value,
                             'score': result.score,
                             'confidence': result.confidence.value,
-                            'overlay': f"TACTICAL PUT",
-                            'type': 'tactical_put',
+                            'overlay': f"{str_label}",
+                            'type': 'TACTICAL_PUT',
                         })
                         
                 elif is_short and (not overlay.short_veto_active or 'SOFT' in overlay.reason):
@@ -437,18 +439,36 @@ class Command(BaseCommand):
                         'score': result.score,
                         'confidence': result.confidence.value,
                         'overlay': overlay_status,
-                        'type': 'short',
+                        'type': 'PRIMARY_SHORT',
                     })
+        
+        # Count by type
+        primary_short_count = sum(1 for s in setups if s['type'] == 'PRIMARY_SHORT')
+        tactical_put_count = sum(1 for s in setups if s['type'] == 'TACTICAL_PUT')
+        long_count = sum(1 for s in setups if s['type'] in ('LONG', 'long'))
         
         # Print results
         dir_emoji = "🟢" if direction == "long" else "🔴" if direction == "short" else "⚪"
         self.stdout.write(f"\n{dir_emoji} LAST {n} {direction.upper()} SETUPS (After Overlay Filter)")
         self.stdout.write("=" * 80)
-        self.stdout.write(f"\nTotal {direction} setups: {len(setups)}")
+        
+        if direction == "short":
+            self.stdout.write(f"\nPRIMARY_SHORT (from short states): {primary_short_count}")
+            self.stdout.write(f"TACTICAL_PUT (from bull states):   {tactical_put_count}")
+            self.stdout.write(f"TOTAL SHORT-RELATED ACTIONS:       {len(setups)}")
+        elif direction == "long":
+            self.stdout.write(f"\nTotal long setups: {long_count}")
+            if tactical_put_count > 0:
+                self.stdout.write(f"(also {tactical_put_count} tactical puts shown)")
+        else:
+            self.stdout.write(f"\nTotal setups: {len(setups)}")
+            self.stdout.write(f"  LONG: {long_count} | PRIMARY_SHORT: {primary_short_count} | TACTICAL_PUT: {tactical_put_count}")
+        
         self.stdout.write("")
         
         for sig in setups[-n:]:
-            type_emoji = "🔻" if sig['type'] == 'tactical_put' else ""
-            self.stdout.write(f"  {sig['date']} | {sig['state']:20s} | score: {sig['score']:+d} | {sig['confidence']:6s} | {type_emoji}{sig['overlay']}")
+            type_label = f"[{sig['type']:12s}]"
+            self.stdout.write(f"  {sig['date']} | {type_label} | {sig['state']:20s} | score: {sig['score']:+d} | {sig['confidence']:6s} | {sig['overlay']}")
         
         self.stdout.write("\nDone.\n")
+
