@@ -52,10 +52,15 @@ class Command(BaseCommand):
         long_states = {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE}
         short_states = {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, MarketState.BEAR_PROBE}
         
-        # Probe cooldown tracking
-        last_probe_long = None
-        last_probe_short = None
-        probe_cooldown_days = 5
+        # Cooldown tracking (collapse clusters into single events)
+        last_long_date = None
+        last_short_date = None
+        last_tactical_date = None
+        
+        # Cooldown days: suppress consecutive trades to avoid clustering
+        core_cooldown_days = 7     # LONG, PRIMARY_SHORT
+        probe_cooldown_days = 5    # BULL_PROBE, BEAR_PROBE
+        tactical_cooldown_days = 7 # TACTICAL_PUT
         
         all_trades = []
         
@@ -67,6 +72,8 @@ class Command(BaseCommand):
             
             is_bull_probe = result.state == MarketState.BULL_PROBE
             is_bear_probe = result.state == MarketState.BEAR_PROBE
+            is_long_state = result.state in long_states and not is_bull_probe
+            is_short_state = result.state in short_states and not is_bear_probe
             
             # Gate probes by score (avoid -1 shorts / weak longs)
             if is_bull_probe and result.score < 2:
@@ -74,12 +81,23 @@ class Command(BaseCommand):
             if is_bear_probe and result.score > -2:
                 continue  # skip weak bear probes
             
-            # Probe cooldown: avoid repeated probes every day
-            if is_bull_probe and last_probe_long is not None:
-                if (date - last_probe_long).days < probe_cooldown_days:
+            # Cooldown checks
+            # Core LONG trades
+            if is_long_state and last_long_date is not None:
+                if (date - last_long_date).days < core_cooldown_days:
+                    continue  # skip clustered longs
+            
+            # Core SHORT trades
+            if is_short_state and last_short_date is not None:
+                if (date - last_short_date).days < core_cooldown_days:
+                    continue  # skip clustered shorts
+            
+            # Probe cooldowns (existing)
+            if is_bull_probe and last_long_date is not None:
+                if (date - last_long_date).days < probe_cooldown_days:
                     continue
-            if is_bear_probe and last_probe_short is not None:
-                if (date - last_probe_short).days < probe_cooldown_days:
+            if is_bear_probe and last_short_date is not None:
+                if (date - last_short_date).days < probe_cooldown_days:
                     continue
             
             # Score-based probe sizing (instead of flat 0.5)
@@ -117,8 +135,8 @@ class Command(BaseCommand):
                         'confidence': result.confidence.value,
                         'notes': f"score={result.score:+d}{edge_label}",
                     })
-                    if is_bull_probe:
-                        last_probe_long = date
+                    # Update cooldown tracker
+                    last_long_date = date
             
             # SHORT trades (from short states)
             if result.state in short_states and size_mult > 0:
@@ -133,11 +151,16 @@ class Command(BaseCommand):
                         'confidence': result.confidence.value,
                         'notes': f"score={result.score:+d}",
                     })
-                    if is_bear_probe:
-                        last_probe_short = date
+                    # Update cooldown tracker
+                    last_short_date = date
             
             # === TACTICAL PUTS (inside bull regimes) ===
+            # Apply cooldown to tactical puts too
             if result.state in long_states:
+                # Skip if within cooldown
+                if last_tactical_date is not None and (date - last_tactical_date).days < tactical_cooldown_days:
+                    continue
+                    
                 tactical = tactical_put_inside_bull(result, row)
                 if tactical.active:
                     str_label = "FULL" if tactical.strength == 2 else "PARTIAL"
@@ -150,6 +173,7 @@ class Command(BaseCommand):
                         'confidence': 'tactical',
                         'notes': f"{str_label} (hedge inside bull)",
                     })
+                    last_tactical_date = date
         
         # Sort by date
         all_trades.sort(key=lambda x: x['date'])
