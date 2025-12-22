@@ -210,8 +210,8 @@ def classify_market_state(row: pd.Series) -> MarketState:
         return MarketState.BULL_PROBE
     
     # 🔴 BEAR PROBE: Selling pressure + distribution, macro neutral
-    # MDIA distributing + whales distributing, MVRV neutral (early crack)
-    if (mdia_distrib or not mdia_inflow) and whale_distrib and mvrv_neutral:
+    # Require explicit MDIA distribution (not just absence of inflow)
+    if mdia_distrib and whale_distrib and mvrv_neutral:
         return MarketState.BEAR_PROBE
     
     # 🟡 NO TRADE: No alignment
