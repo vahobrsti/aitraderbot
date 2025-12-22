@@ -21,12 +21,14 @@ from typing import Optional
 
 
 class MarketState(Enum):
-    """6 canonical market states for trading decisions"""
+    """8 canonical market states for trading decisions"""
     STRONG_BULLISH = "strong_bullish"        # 🚀 High conviction long
     EARLY_RECOVERY = "early_recovery"        # 📈 Asymmetric upside
     MOMENTUM_CONTINUATION = "momentum"       # 🔥 Trend continuation
+    BULL_PROBE = "bull_probe"                # 🎯 Timing + sponsorship, macro neutral (0.5x long)
     DISTRIBUTION_RISK = "distribution_risk"  # ⚠️ Smart money exiting
     BEAR_CONTINUATION = "bear_continuation"  # 🐻 No buyers, sellers in control
+    BEAR_PROBE = "bear_probe"                # 🔴 Selling + distribution, macro neutral (0.5x short)
     NO_TRADE = "no_trade"                    # 🟡 Chop, conflicts everywhere
 
 
@@ -193,6 +195,24 @@ def classify_market_state(row: pd.Series) -> MarketState:
     mvrv_improving = mvrv_trend or mvrv_weak_up
     if mdia_inflow and (whale_mixed or whale_neutral) and mvrv_improving:
         return MarketState.MOMENTUM_CONTINUATION
+    
+    # === PROBE STATES: Timing/sponsorship align, but macro neutral ===
+    # These are tradeable at 0.5x size with defined-risk strategies only
+    
+    # Define MVRV-LS macro terrain
+    mvrv_bullish = mvrv_call or mvrv_recovery or mvrv_trend or mvrv_weak_up
+    mvrv_bearish = mvrv_put or mvrv_bear or mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn
+    mvrv_neutral = (not mvrv_bullish) and (not mvrv_bearish)
+    
+    # 🎯 BULL PROBE: Timing + sponsorship, macro neutral
+    # MDIA inflow + whales accumulating, MVRV doesn't confirm but isn't hostile
+    if mdia_inflow and whale_sponsored and mvrv_neutral:
+        return MarketState.BULL_PROBE
+    
+    # 🔴 BEAR PROBE: Selling pressure + distribution, macro neutral
+    # MDIA distributing + whales distributing, MVRV neutral (early crack)
+    if (mdia_distrib or not mdia_inflow) and whale_distrib and mvrv_neutral:
+        return MarketState.BEAR_PROBE
     
     # 🟡 NO TRADE: No alignment
     return MarketState.NO_TRADE

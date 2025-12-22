@@ -254,10 +254,12 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
         MarketState.STRONG_BULLISH,
         MarketState.EARLY_RECOVERY,
         MarketState.MOMENTUM_CONTINUATION,
+        MarketState.BULL_PROBE,  # Trade smaller, but still a long state
     }
     short_states = {
         MarketState.DISTRIBUTION_RISK,
         MarketState.BEAR_CONTINUATION,
+        MarketState.BEAR_PROBE,  # Trade smaller, but still a short state
     }
     
     # Neutral overlay for NO_TRADE
