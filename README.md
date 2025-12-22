@@ -19,7 +19,7 @@ Think of it as: **MDIA = ignition, Whales = fuel, MVRV-LS = terrain**
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         DATA LAYER                               │
-│  datafeed/ → Raw on-chain data from Google Sheets / APIs        │
+│  datafeed/ → Raw on-chain data APIs        │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
