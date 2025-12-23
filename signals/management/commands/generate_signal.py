@@ -1,11 +1,11 @@
-# features/management/commands/generate_signal.py
+# signals/management/commands/generate_signal.py
 """
 Generate and persist daily trading signal.
 Designed for cron/scheduled execution.
 """
 from django.core.management.base import BaseCommand
 
-from features.services import SignalService
+from signals.services import SignalService
 
 
 class Command(BaseCommand):

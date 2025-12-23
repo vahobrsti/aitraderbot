@@ -1,4 +1,4 @@
-# features/management/commands/train_models.py
+# ml/management/commands/train_models.py
 """
 Train long/short ML models from feature CSV.
 Supports holdout validation and walk-forward modes.
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand
 
-from features.ml.training import (
+from ml.training import (
     train_long_model_with_holdout,
     train_short_model_with_holdout,
     train_with_walk_forward,

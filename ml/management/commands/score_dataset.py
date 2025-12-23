@@ -1,4 +1,4 @@
-# features/management/commands/score_dataset.py
+# ml/management/commands/score_dataset.py
 """
 Score the full feature dataset using trained ML models.
 Adds p_long, p_short probabilities and ml_*_signal columns.

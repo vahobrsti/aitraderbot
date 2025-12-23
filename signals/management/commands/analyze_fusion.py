@@ -1,4 +1,4 @@
-# features/management/commands/analyze_fusion.py
+# signals/management/commands/analyze_fusion.py
 """
 Django command to analyze signal fusion on feature data.
 Shows market state distribution, confidence levels, and sample trade signals.
@@ -9,14 +9,14 @@ from django.core.management.base import BaseCommand
 from pathlib import Path
 import pandas as pd
 
-from features.signals.fusion import (
+from signals.fusion import (
     fuse_signals, MarketState, Confidence, fuse_dataframe, FusionResult
 )
-from features.signals.options import (
+from signals.options import (
     get_strategy, format_recommendation, generate_trade_signal
 )
-from features.signals.overlays import apply_long_overlays, apply_overlays, get_size_multiplier
-from features.signals.tactical_puts import tactical_put_inside_bull, TacticalPutStrategy
+from signals.overlays import apply_long_overlays, apply_overlays, get_size_multiplier
+from signals.tactical_puts import tactical_put_inside_bull, TacticalPutStrategy
 
 
 class Command(BaseCommand):
@@ -333,7 +333,7 @@ class Command(BaseCommand):
     
     def _show_direction_setups(self, df, direction: str, n: int):
         """Show last N setups filtered by direction after overlay filter."""
-        from features.signals.overlays import apply_overlays
+        from signals.overlays import apply_overlays
         
         long_states = {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION}
         short_states = {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION}

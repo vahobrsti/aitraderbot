@@ -43,6 +43,8 @@ INSTALLED_APPS = [
     'rest_framework.authtoken',
     'datafeed',
     'features',
+    'signals',
+    'ml',
     'api',
 ]
 

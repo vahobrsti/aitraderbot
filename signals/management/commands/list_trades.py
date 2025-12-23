@@ -1,4 +1,4 @@
-# features/management/commands/list_trades.py
+# signals/management/commands/list_trades.py
 """
 List all trade opportunities with dates and direction.
 Combines:
@@ -10,9 +10,9 @@ from django.core.management.base import BaseCommand
 from pathlib import Path
 import pandas as pd
 
-from features.signals.fusion import fuse_signals, add_fusion_features, MarketState, FusionResult, Confidence
-from features.signals.overlays import apply_overlays, get_size_multiplier
-from features.signals.tactical_puts import tactical_put_inside_bull
+from signals.fusion import fuse_signals, add_fusion_features, MarketState, FusionResult, Confidence
+from signals.overlays import apply_overlays, get_size_multiplier
+from signals.tactical_puts import tactical_put_inside_bull
 
 
 class Command(BaseCommand):

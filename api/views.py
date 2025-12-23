@@ -8,7 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from features.models import DailySignal
+from signals.models import DailySignal
 from .serializers import DailySignalSerializer, DailySignalSummarySerializer
 
 

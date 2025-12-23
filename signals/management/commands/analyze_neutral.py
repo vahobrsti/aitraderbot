@@ -1,4 +1,4 @@
-# features/management/commands/analyze_neutral.py
+# signals/management/commands/analyze_neutral.py
 """
 MVRV-LS NEUTRAL Terrain Analysis
 
@@ -20,7 +20,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-from features.signals.fusion import fuse_signals, MarketState
+from signals.fusion import fuse_signals, MarketState
 
 
 class Command(BaseCommand):

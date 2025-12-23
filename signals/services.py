@@ -12,11 +12,11 @@ import pandas as pd
 
 from datafeed.models import RawDailyData
 from features.feature_builder import build_features_and_labels_from_raw
-from features.models import DailySignal
-from features.signals.fusion import fuse_signals, MarketState
-from features.signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier
-from features.signals.tactical_puts import tactical_put_inside_bull
-from features.signals.options import get_strategy_summary
+from signals.models import DailySignal
+from signals.fusion import fuse_signals, MarketState
+from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier
+from signals.tactical_puts import tactical_put_inside_bull
+from signals.options import get_strategy_summary
 
 
 @dataclass

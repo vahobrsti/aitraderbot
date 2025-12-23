@@ -4,7 +4,7 @@ Centralizes all API serialization logic.
 """
 from rest_framework import serializers
 
-from features.models import DailySignal
+from signals.models import DailySignal
 
 
 class DailySignalSerializer(serializers.ModelSerializer):

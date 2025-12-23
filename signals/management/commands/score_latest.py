@@ -1,4 +1,4 @@
-# features/management/commands/score_latest.py
+# signals/management/commands/score_latest.py
 """
 Score the most recent day(s) using trained models and signal fusion.
 Includes tactical puts detection for puts inside bull regimes.
@@ -12,12 +12,12 @@ from django.core.management.base import BaseCommand
 
 from datafeed.models import RawDailyData
 from features.feature_builder import build_features_and_labels_from_raw
-from features.models import DailySignal
-from features.services import SignalService
-from features.signals.fusion import fuse_signals, MarketState, Confidence, FusionResult
-from features.signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier
-from features.signals.tactical_puts import tactical_put_inside_bull, TacticalPutStrategy
-from features.signals.options import get_strategy, generate_trade_signal
+from signals.models import DailySignal
+from signals.services import SignalService
+from signals.fusion import fuse_signals, MarketState, Confidence, FusionResult
+from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier
+from signals.tactical_puts import tactical_put_inside_bull, TacticalPutStrategy
+from signals.options import get_strategy, generate_trade_signal
 
 
 class Command(BaseCommand):
