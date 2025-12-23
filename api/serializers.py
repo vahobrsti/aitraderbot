@@ -32,6 +32,10 @@ class DailySignalSerializer(serializers.ModelSerializer):
             'tactical_put_size',
             'trade_decision',
             'trade_notes',
+            'option_structures',
+            'strike_guidance',
+            'dte_range',
+            'strategy_rationale',
             'created_at',
             'updated_at',
         ]

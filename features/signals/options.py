@@ -200,6 +200,38 @@ def get_strategy(state: MarketState) -> StrategyRecommendation:
     return STRATEGY_MAP[state]
 
 
+def get_strategy_summary(state: MarketState) -> dict:
+    """
+    Get strategy summary as a structured dict for signal pipeline.
+    
+    Returns:
+        dict with keys:
+            - primary_structures: comma-separated list of primary structures
+            - strike_guidance: ATM, OTM, etc.
+            - dte_range: e.g., "45-90d"
+            - rationale: strategy rationale text
+    """
+    strategy = STRATEGY_MAP.get(state)
+    
+    if strategy is None or state == MarketState.NO_TRADE:
+        return {
+            "primary_structures": "",
+            "strike_guidance": "",
+            "dte_range": "",
+            "rationale": "",
+        }
+    
+    structures = ", ".join(s.value for s in strategy.primary_structures)
+    dte_range = f"{strategy.dte.min_dte}-{strategy.dte.max_dte}d"
+    
+    return {
+        "primary_structures": structures,
+        "strike_guidance": strategy.strike_guidance.value,
+        "dte_range": dte_range,
+        "rationale": strategy.rationale,
+    }
+
+
 def get_position_size(state: MarketState, confidence: Confidence, portfolio_value: float) -> float:
     """
     Calculate dollar position size.

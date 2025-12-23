@@ -68,6 +68,31 @@ class DailySignal(models.Model):
         help_text="Additional notes about the trade decision"
     )
 
+    # Option Strategy (from options.py)
+    option_structures = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text="Recommended option structures (e.g., long_call, call_spread)"
+    )
+    strike_guidance = models.CharField(
+        max_length=30,
+        blank=True,
+        default="",
+        help_text="Strike selection guidance (e.g., atm, slight_otm)"
+    )
+    dte_range = models.CharField(
+        max_length=30,
+        blank=True,
+        default="",
+        help_text="Days to expiration range (e.g., 45-90d)"
+    )
+    strategy_rationale = models.TextField(
+        blank=True,
+        default="",
+        help_text="Human-readable strategy rationale"
+    )
+
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

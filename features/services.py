@@ -16,6 +16,7 @@ from features.models import DailySignal
 from features.signals.fusion import fuse_signals, MarketState
 from features.signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier
 from features.signals.tactical_puts import tactical_put_inside_bull
+from features.signals.options import get_strategy_summary
 
 
 @dataclass
@@ -37,6 +38,11 @@ class SignalResult:
     tactical_put_size: float
     trade_decision: str
     trade_notes: str
+    # Option strategy fields
+    option_structures: str
+    strike_guidance: str
+    dte_range: str
+    strategy_rationale: str
 
 
 class SignalService:
@@ -130,11 +136,13 @@ class SignalService:
         # 6) Tactical Put
         tactical_result = tactical_put_inside_bull(fusion_result, row)
         
-        # 7) Determine trade decision
         trade_decision, trade_notes = self._determine_trade_decision(
             fusion_result, size_mult, tactical_result, p_long, p_short,
             signal_option_call, signal_option_put
         )
+        
+        # 8) Get option strategy recommendation
+        strategy_summary = get_strategy_summary(fusion_result.state)
         
         return SignalResult(
             date=latest_date,
@@ -153,6 +161,10 @@ class SignalService:
             tactical_put_size=tactical_result.size_mult if tactical_result.active else 0.0,
             trade_decision=trade_decision,
             trade_notes=trade_notes,
+            option_structures=strategy_summary["primary_structures"],
+            strike_guidance=strategy_summary["strike_guidance"],
+            dte_range=strategy_summary["dte_range"],
+            strategy_rationale=strategy_summary["rationale"],
         )
     
     def _determine_trade_decision(
@@ -227,6 +239,10 @@ class SignalService:
                 'tactical_put_size': result.tactical_put_size,
                 'trade_decision': result.trade_decision,
                 'trade_notes': result.trade_notes,
+                'option_structures': result.option_structures,
+                'strike_guidance': result.strike_guidance,
+                'dte_range': result.dte_range,
+                'strategy_rationale': result.strategy_rationale,
             }
         )
         return signal
