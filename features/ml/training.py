@@ -236,6 +236,7 @@ def train_long_model_with_holdout(
         n_estimators=300,
         max_depth=6,
         min_samples_leaf=20,
+        class_weight='balanced',  # Correct for label imbalance
         n_jobs=-1,
         random_state=42,
     )
@@ -316,6 +317,7 @@ def train_short_model_with_holdout(
         n_estimators=300,
         max_depth=6,
         min_samples_leaf=20,
+        class_weight='balanced',  # Correct for label imbalance
         n_jobs=-1,
         random_state=42,
     )
@@ -394,6 +396,7 @@ def evaluate_fold(df: pd.DataFrame, feature_cols: list[str], label_col: str,
         n_estimators=300,
         max_depth=6,
         min_samples_leaf=20,
+        class_weight='balanced',  # Correct for label imbalance
         n_jobs=-1,
         random_state=42,
     )
@@ -540,6 +543,7 @@ def train_with_walk_forward(
         n_estimators=300,
         max_depth=6,
         min_samples_leaf=20,
+        class_weight='balanced',  # Correct for label imbalance
         n_jobs=-1,
         random_state=42,
     )
