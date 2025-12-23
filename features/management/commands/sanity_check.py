@@ -1,4 +1,8 @@
 # features/management/commands/sanity_check.py
+"""
+Sanity check for feature CSV files.
+Reports label distribution (long/short) and option signal hit rates.
+"""
 
 from pathlib import Path
 
@@ -7,7 +11,7 @@ from django.core.management.base import BaseCommand
 
 
 class Command(BaseCommand):
-    help = "Sanity check feature CSV: label distribution and option signal performance."
+    help = "Sanity check feature CSV: label distribution and option signal hit rates"
 
     def add_arguments(self, parser):
         parser.add_argument(

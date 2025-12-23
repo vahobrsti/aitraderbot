@@ -1,11 +1,18 @@
+# features/management/commands/check_mvrv_thresholds.py
+"""
+Validate MVRV Long/Short Delta Z threshold calibration.
+Target: 25-40% of days flagged as trending (|z| > threshold).
+"""
+
 from django.core.management.base import BaseCommand
 import pandas as pd
 import numpy as np
 from datafeed.models import RawDailyData
 from features.feature_builder import build_features_and_labels_from_raw
 
+
 class Command(BaseCommand):
-    help = "Check if MVRV Delta Z thresholds are reasonable (target: 25-40% in trending buckets)"
+    help = "Validate MVRV-LS Delta Z thresholds (target: 25-40%% trending)"
 
     def handle(self, *args, **options):
         # 1. Fetch Data

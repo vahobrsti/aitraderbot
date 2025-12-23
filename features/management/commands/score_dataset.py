@@ -1,4 +1,8 @@
 # features/management/commands/score_dataset.py
+"""
+Score the full feature dataset using trained ML models.
+Adds p_long, p_short probabilities and ml_*_signal columns.
+"""
 
 from pathlib import Path
 
@@ -8,7 +12,7 @@ from django.core.management.base import BaseCommand
 
 
 class Command(BaseCommand):
-    help = "Score the full feature dataset with trained models and write out probabilities."
+    help = "Score full feature dataset with trained models and output probabilities"
 
     def add_arguments(self, parser):
         parser.add_argument(

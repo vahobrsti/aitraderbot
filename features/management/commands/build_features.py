@@ -1,4 +1,9 @@
 # features/management/commands/build_features.py
+"""
+Build feature dataset from RawDailyData database table.
+Generates features and labels for ML training and saves to CSV.
+"""
+
 
 from django.core.management.base import BaseCommand
 from pathlib import Path

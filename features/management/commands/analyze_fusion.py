@@ -20,7 +20,7 @@ from features.signals.tactical_puts import tactical_put_inside_bull, TacticalPut
 
 
 class Command(BaseCommand):
-    help = "Analyze signal fusion on feature CSV"
+    help = "Analyze signal fusion: market state distribution, overlay stats, tactical puts, and trade signals"
 
     def add_arguments(self, parser):
         parser.add_argument(

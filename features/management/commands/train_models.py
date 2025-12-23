@@ -1,4 +1,9 @@
 # features/management/commands/train_models.py
+"""
+Train long/short ML models from feature CSV.
+Supports holdout validation and walk-forward modes.
+"""
+
 
 from pathlib import Path
 
