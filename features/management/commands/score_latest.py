@@ -12,6 +12,8 @@ from django.core.management.base import BaseCommand
 
 from datafeed.models import RawDailyData
 from features.feature_builder import build_features_and_labels_from_raw
+from features.models import DailySignal
+from features.services import SignalService
 from features.signals.fusion import fuse_signals, MarketState, Confidence, FusionResult
 from features.signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier
 from features.signals.tactical_puts import tactical_put_inside_bull, TacticalPutStrategy
@@ -47,6 +49,18 @@ class Command(BaseCommand):
             "--short_model",
             type=str,
             default="models/short_model.joblib",
+        )
+        parser.add_argument(
+            "--persist",
+            action="store_true",
+            default=True,
+            help="Persist signal to database (default: True)",
+        )
+        parser.add_argument(
+            "--no-persist",
+            action="store_false",
+            dest="persist",
+            help="Don't persist signal to database",
         )
 
     def handle(self, *args, **options):
@@ -102,6 +116,17 @@ class Command(BaseCommand):
         
         # 6) Tactical Put Check
         tactical_result = tactical_put_inside_bull(fusion_result, row)
+
+        # === PERSIST TO DATABASE ===
+        if options["persist"]:
+            service = SignalService(
+                long_model_path=str(long_model_path),
+                short_model_path=str(short_model_path),
+                horizon_days=horizon_days,
+                target_return=target_return,
+            )
+            signal = service.generate_and_persist()
+            self.stdout.write(self.style.SUCCESS(f"✅ Signal persisted: {signal.date}"))
 
         # === OUTPUT ===
         self.stdout.write("")

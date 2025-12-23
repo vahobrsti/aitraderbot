@@ -1,3 +1,4 @@
 from django.shortcuts import render
 
-# Create your views here.
+# Views for features app.
+# REST API views are in the 'api' app.
