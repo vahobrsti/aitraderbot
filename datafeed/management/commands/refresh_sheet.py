@@ -2,7 +2,7 @@
 """
 Force Google Sheet refresh by writing today's UTC date to the control cell.
 
-This triggers SANsheets recalculation without opening a browser.
+This triggers sheet recalculation without opening a browser.
 Key properties:
 - No formula rewriting
 - No UI interaction

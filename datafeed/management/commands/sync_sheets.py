@@ -36,7 +36,7 @@ SHEET_FIELD_MAP = {
 
 
 class Command(BaseCommand):
-    help = "Sync BTC Santiment Google Sheets into raw_daily_data table"
+    help = "Sync Google Sheets data into raw_daily_data table"
 
     def add_arguments(self, parser):
         parser.add_argument(
