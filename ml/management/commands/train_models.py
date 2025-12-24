@@ -56,6 +56,12 @@ class Command(BaseCommand):
             action="store_true",
             help="Use walk-forward validation with 6 rolling folds, then final test on 2025.",
         )
+        parser.add_argument(
+            "--n-features",
+            type=int,
+            default=None,
+            help="Select top N features by importance to reduce overfitting. Default: use all features.",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["features_csv"])
@@ -63,6 +69,7 @@ class Command(BaseCommand):
         mode = FeatureMode(options["mode"])
         decision_lag = options["lag"]
         use_walk_forward = options["walk_forward"]
+        n_features = options["n_features"]
 
         if not csv_path.exists():
             self.stderr.write(self.style.ERROR(f"Features CSV not found: {csv_path}"))
@@ -79,7 +86,7 @@ class Command(BaseCommand):
             train_with_walk_forward(
                 csv_path, long_model_path, 
                 label_col="label_good_move_long",
-                mode=mode, decision_lag=decision_lag
+                mode=mode, decision_lag=decision_lag, n_features=n_features
             )
 
             if not options["no_short"]:
@@ -87,7 +94,7 @@ class Command(BaseCommand):
                 train_with_walk_forward(
                     csv_path, short_model_path,
                     label_col="label_good_move_short",
-                    mode=mode, decision_lag=decision_lag
+                    mode=mode, decision_lag=decision_lag, n_features=n_features
                 )
         else:
             # Standard holdout mode

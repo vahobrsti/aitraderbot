@@ -60,15 +60,51 @@ def get_feature_cols(df: pd.DataFrame, mode: FeatureMode = FeatureMode.HYBRID) -
     Get feature columns based on mode.
     
     This is computed ONCE from the full dataset to ensure consistency.
+    Only includes numeric columns to avoid silent failures.
     """
     exclude_prefixes = PURE_EXCLUDE_PREFIXES if mode == FeatureMode.PURE else HYBRID_EXCLUDE_PREFIXES
     
     feature_cols = [
         c for c in df.columns
-        if c not in LABEL_COLS and not any(c.startswith(p) for p in exclude_prefixes)
+        if c not in LABEL_COLS 
+        and not any(c.startswith(p) for p in exclude_prefixes)
+        and pd.api.types.is_numeric_dtype(df[c])
     ]
     
     return feature_cols
+
+
+def select_top_features(
+    X_train: pd.DataFrame, 
+    y_train: pd.Series, 
+    n_features: int = 50
+) -> list[str]:
+    """
+    Select top N features by Random Forest importance.
+    
+    Uses a quick RF fit to rank features, then returns top N.
+    This reduces overfitting from having too many features.
+    """
+    # Quick RF for importance ranking (use same class_weight as main model)
+    rf = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=4,
+        min_samples_leaf=30,
+        class_weight='balanced',  # Match main model
+        n_jobs=-1,
+        random_state=42,
+    )
+    rf.fit(X_train, y_train)
+    
+    # Rank features
+    importance_df = pd.DataFrame({
+        'feature': X_train.columns,
+        'importance': rf.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    # Return top N feature names
+    top_features = importance_df.head(n_features)['feature'].tolist()
+    return top_features
 
 
 def apply_decision_lag(df: pd.DataFrame, feature_cols: list[str], lag: int = 1) -> pd.DataFrame:
@@ -125,21 +161,23 @@ def print_label_stats(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.
     print()
 
 
-def compute_top_k_precision(y_true: np.ndarray, y_proba: np.ndarray, k_pct: float) -> float:
+def compute_top_k_precision(y_true: np.ndarray, y_proba: np.ndarray, k_pct: float, min_k: int = 25) -> float:
     """
     Compute precision for top k% of predictions.
     
     This is more relevant for sparse trading than overall AUC.
+    Uses min_k to ensure stable metrics on small datasets.
     """
     n = len(y_true)
-    k = max(1, int(n * k_pct / 100))
+    k = max(min_k, int(n * k_pct / 100))  # At least min_k samples
+    k = min(k, n)  # But not more than we have
     
     # Get indices of top k predictions
     top_k_idx = np.argsort(y_proba)[-k:]
     
     # Compute precision on top k
     top_k_true = y_true.iloc[top_k_idx] if hasattr(y_true, 'iloc') else y_true[top_k_idx]
-    precision = top_k_true.sum() / k
+    precision = float(top_k_true.mean())  # Use mean for clarity
     
     return precision
 
@@ -228,11 +266,8 @@ def train_long_model_with_holdout(
     X_val, y_val = split_X_y(val_df, feature_cols, label_col)
     X_test, y_test = split_X_y(test_df, feature_cols, label_col)
 
-    # Train on TRAIN + VAL
-    X_train_val = pd.concat([X_train, X_val])
-    y_train_val = pd.concat([y_train, y_val])
-
-    model = RandomForestClassifier(
+    # Model configuration (reused for both phases)
+    model_params = dict(
         n_estimators=300,
         max_depth=6,
         min_samples_leaf=20,
@@ -240,20 +275,30 @@ def train_long_model_with_holdout(
         n_jobs=-1,
         random_state=42,
     )
-    model.fit(X_train_val, y_train_val)
 
-    # Get predictions
-    y_val_proba = model.predict_proba(X_val)[:, 1]
-    y_test_proba = model.predict_proba(X_test)[:, 1]
+    # PHASE 1: Train on TRAIN only, evaluate on VAL (true holdout)
+    print("\n  [Phase 1] Training on TRAIN, evaluating on VAL (true holdout)...")
+    model_val = RandomForestClassifier(**model_params)
+    model_val.fit(X_train, y_train)
+    y_val_proba = model_val.predict_proba(X_val)[:, 1]
     
-    # Print metrics
+    # PHASE 2: Retrain on TRAIN+VAL, evaluate on TEST (final model)
+    print("  [Phase 2] Retraining on TRAIN+VAL, evaluating on TEST...")
+    X_train_val = pd.concat([X_train, X_val])
+    y_train_val = pd.concat([y_train, y_val])
+    
+    model_final = RandomForestClassifier(**model_params)
+    model_final.fit(X_train_val, y_train_val)
+    y_test_proba = model_final.predict_proba(X_test)[:, 1]
+    
+    # Print metrics (Val is now a TRUE holdout score!)
     val_auc, test_auc = print_model_metrics("LONG", y_val, y_val_proba, y_test, y_test_proba)
 
-    # Save model with correct feature_cols
+    # Save FINAL model (trained on TRAIN+VAL)
     model_out.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(
         {
-            "model": model,
+            "model": model_final,
             "feature_names": feature_cols,  # Now computed from full df
             "feature_mode": mode.value,
             "decision_lag": decision_lag,
@@ -309,11 +354,8 @@ def train_short_model_with_holdout(
     X_val, y_val = split_X_y(val_df, feature_cols, label_col)
     X_test, y_test = split_X_y(test_df, feature_cols, label_col)
 
-    # Train on TRAIN + VAL
-    X_train_val = pd.concat([X_train, X_val])
-    y_train_val = pd.concat([y_train, y_val])
-
-    model = RandomForestClassifier(
+    # Model configuration (reused for both phases)
+    model_params = dict(
         n_estimators=300,
         max_depth=6,
         min_samples_leaf=20,
@@ -321,20 +363,30 @@ def train_short_model_with_holdout(
         n_jobs=-1,
         random_state=42,
     )
-    model.fit(X_train_val, y_train_val)
 
-    # Get predictions
-    y_val_proba = model.predict_proba(X_val)[:, 1]
-    y_test_proba = model.predict_proba(X_test)[:, 1]
+    # PHASE 1: Train on TRAIN only, evaluate on VAL (true holdout)
+    print("\n  [Phase 1] Training on TRAIN, evaluating on VAL (true holdout)...")
+    model_val = RandomForestClassifier(**model_params)
+    model_val.fit(X_train, y_train)
+    y_val_proba = model_val.predict_proba(X_val)[:, 1]
     
-    # Print metrics
+    # PHASE 2: Retrain on TRAIN+VAL, evaluate on TEST (final model)
+    print("  [Phase 2] Retraining on TRAIN+VAL, evaluating on TEST...")
+    X_train_val = pd.concat([X_train, X_val])
+    y_train_val = pd.concat([y_train, y_val])
+    
+    model_final = RandomForestClassifier(**model_params)
+    model_final.fit(X_train_val, y_train_val)
+    y_test_proba = model_final.predict_proba(X_test)[:, 1]
+    
+    # Print metrics (Val is now a TRUE holdout score!)
     val_auc, test_auc = print_model_metrics("SHORT", y_val, y_val_proba, y_test, y_test_proba)
 
-    # Save model with correct feature_cols
+    # Save FINAL model (trained on TRAIN+VAL)
     model_out.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(
         {
-            "model": model,
+            "model": model_final,
             "feature_names": feature_cols,  # Now computed from full df
             "feature_mode": mode.value,
             "decision_lag": decision_lag,
@@ -371,9 +423,13 @@ def get_walk_forward_folds(val_months: int = 6):
 
 
 def evaluate_fold(df: pd.DataFrame, feature_cols: list[str], label_col: str,
-                  train_end: str, val_start: str, val_end: str) -> dict:
+                  train_end: str, val_start: str, val_end: str,
+                  n_features: Optional[int] = None) -> dict:
     """
     Train and evaluate a single walk-forward fold.
+    
+    Args:
+        n_features: If set, select top N features on training data before fitting.
     
     Returns metrics dict for this fold.
     """
@@ -390,6 +446,12 @@ def evaluate_fold(df: pd.DataFrame, feature_cols: list[str], label_col: str,
     
     X_train, y_train = split_X_y(train_df, feature_cols, label_col)
     X_val, y_val = split_X_y(val_df, feature_cols, label_col)
+    
+    # Optional feature selection
+    if n_features and n_features < len(feature_cols):
+        selected_cols = select_top_features(X_train, y_train, n_features)
+        X_train = X_train[selected_cols]
+        X_val = X_val[selected_cols]
     
     # Train model
     model = RandomForestClassifier(
@@ -415,6 +477,7 @@ def evaluate_fold(df: pd.DataFrame, feature_cols: list[str], label_col: str,
         'val_end': val_end,
         'n_train': len(train_df),
         'n_val': len(val_df),
+        'n_features': n_features or len(feature_cols),
         'baseline': baseline,
         'auc': auc,
     }
@@ -434,14 +497,19 @@ def run_walk_forward_validation(
     label_col: str,
     mode: FeatureMode = FeatureMode.HYBRID,
     decision_lag: int = 1,
+    n_features: Optional[int] = None,
 ) -> list[dict]:
     """
     Run walk-forward validation across multiple folds.
     
+    Args:
+        n_features: If set, select top N features per fold to reduce overfitting.
+    
     Returns list of metrics dicts, one per fold.
     """
+    feat_str = f"top {n_features}" if n_features else "all"
     print(f"\n{'='*60}")
-    print(f"WALK-FORWARD VALIDATION | {label_col} | mode={mode.value} | lag={decision_lag}")
+    print(f"WALK-FORWARD VALIDATION | {label_col} | mode={mode.value} | lag={decision_lag} | features={feat_str}")
     print('='*60)
     
     # Load and prepare data
@@ -451,7 +519,7 @@ def run_walk_forward_validation(
     if decision_lag > 0:
         df = apply_decision_lag(df, feature_cols, decision_lag)
     
-    print(f"Using {len(feature_cols)} features")
+    print(f"Available features: {len(feature_cols)} (using {n_features or 'all'})")
     print(f"Data range: {df.index.min().date()} → {df.index.max().date()}")
     
     # Get folds
@@ -462,7 +530,7 @@ def run_walk_forward_validation(
     print("-" * 80)
     
     for i, (train_end, val_start, val_end) in enumerate(folds, 1):
-        metrics = evaluate_fold(df, feature_cols, label_col, train_end, val_start, val_end)
+        metrics = evaluate_fold(df, feature_cols, label_col, train_end, val_start, val_end, n_features)
         
         if metrics is None:
             print(f"  Fold {i}: SKIPPED (no data)")
@@ -501,6 +569,7 @@ def train_with_walk_forward(
     label_col: str,
     mode: FeatureMode = FeatureMode.HYBRID,
     decision_lag: int = 1,
+    n_features: Optional[int] = None,
 ) -> None:
     """
     Full walk-forward training pipeline:
@@ -508,11 +577,14 @@ def train_with_walk_forward(
     2. Train final model on all pre-2025 data
     3. Evaluate once on locked 2025 test set
     4. Save model
+    
+    Args:
+        n_features: If set, select top N features to reduce overfitting.
     """
     name = "LONG" if "long" in label_col else "SHORT"
     
     # Step 1: Walk-forward validation
-    fold_metrics = run_walk_forward_validation(csv_path, label_col, mode, decision_lag)
+    fold_metrics = run_walk_forward_validation(csv_path, label_col, mode, decision_lag, n_features)
     
     # Step 2: Final training on all pre-2025 data
     print(f"\n{'='*60}")
@@ -537,6 +609,14 @@ def train_with_walk_forward(
     
     X_train, y_train = split_X_y(train_df, feature_cols, label_col)
     X_test, y_test = split_X_y(test_df, feature_cols, label_col)
+    
+    # Optional feature selection on full training set
+    if n_features and n_features < len(feature_cols):
+        print(f"Selecting top {n_features} features...")
+        selected_cols = select_top_features(X_train, y_train, n_features)
+        X_train = X_train[selected_cols]
+        X_test = X_test[selected_cols]
+        feature_cols = selected_cols  # Update for saving
     
     # Train final model
     model = RandomForestClassifier(
@@ -578,6 +658,7 @@ def train_with_walk_forward(
             "feature_names": feature_cols,
             "feature_mode": mode.value,
             "decision_lag": decision_lag,
+            "n_features": n_features,
             "test_auc": float(test_auc),
             "walk_forward_metrics": fold_metrics,
         },
