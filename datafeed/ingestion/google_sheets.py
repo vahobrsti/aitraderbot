@@ -3,6 +3,7 @@ from django.conf import settings
 import os
 from pathlib import Path
 import datetime
+import json
 import gspread
 from google.oauth2.service_account import Credentials
 from typing import Dict, Optional
@@ -12,6 +13,9 @@ BASE_DIR = settings.BASE_DIR
 load_dotenv(".env")
 
 SHEET_ID = os.getenv("GSPREAD_SHEET_ID")
+
+# For production: set GSPREAD_CREDS_JSON with the full JSON content
+# For local dev: use GSPREAD_CREDS_FILE or the default path
 DEFAULT_CREDS_PATH = BASE_DIR / "credentials" / "gsheets-service-account.json"
 CREDS_FILE = Path(os.environ.get("GSPREAD_CREDS_FILE", str(DEFAULT_CREDS_PATH)))
 
@@ -24,23 +28,47 @@ SCOPES_READWRITE = ["https://www.googleapis.com/auth/spreadsheets"]
 SCOPES = SCOPES_READONLY
 
 
+def _get_credentials(scopes: list[str]) -> Credentials:
+    """
+    Load Google credentials from environment or file.
+    
+    Priority:
+    1. GSPREAD_CREDS_JSON env var (JSON string) - for production/cloud
+    2. GSPREAD_CREDS_FILE env var or default path - for local development
+    """
+    # Option 1: JSON content in environment variable (production)
+    creds_json = os.environ.get("GSPREAD_CREDS_JSON")
+    if creds_json:
+        try:
+            creds_info = json.loads(creds_json)
+            return Credentials.from_service_account_info(creds_info, scopes=scopes)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in GSPREAD_CREDS_JSON: {e}")
+    
+    # Option 2: File path (local development)
+    if not CREDS_FILE.exists():
+        raise FileNotFoundError(
+            f"Google Sheets credentials not found. Either:\n"
+            f"  1. Set GSPREAD_CREDS_JSON env var with JSON content (production), or\n"
+            f"  2. Place credentials file at: {CREDS_FILE}"
+        )
+    
+    return Credentials.from_service_account_file(str(CREDS_FILE), scopes=scopes)
+
+
 def get_client(readonly: bool = True):
     """
-    Authorize a Google Sheets client using the service account JSON.
+    Authorize a Google Sheets client using service account credentials.
+    
+    Credentials are loaded from:
+    1. GSPREAD_CREDS_JSON env var (JSON string) - for production/cloud
+    2. GSPREAD_CREDS_FILE env var or default path - for local development
     
     Args:
         readonly: If True, use readonly scope. If False, use read/write scope.
     """
-    if not CREDS_FILE.exists():
-        raise FileNotFoundError(
-            f"Google Sheets credentials file not found: {CREDS_FILE}"
-        )
-
     scopes = SCOPES_READONLY if readonly else SCOPES_READWRITE
-    creds = Credentials.from_service_account_file(
-        str(CREDS_FILE),
-        scopes=scopes,
-    )
+    creds = _get_credentials(scopes)
     return gspread.authorize(creds)
 
 
