@@ -1,10 +1,10 @@
 # AI Trader Bot
 
-A Bitcoin options trading signal system using on-chain metrics, whale behavior, and sentiment analysis.
+A Bitcoin options trading signal system using on-chain metrics, whale behavior, sentiment analysis, and machine learning.
 
 ## Overview
 
-This system generates trading signals by fusing three orthogonal market indicators:
+This system generates trading signals by fusing three orthogonal market indicators with ML predictions:
 
 | Indicator | Role | Measures |
 |-----------|------|----------|
@@ -32,19 +32,27 @@ Think of it as: **MDIA = ignition, Whales = fuel, MVRV-LS = terrain**
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
+│                         ML LAYER                                 │
+│  ml/training.py → Model training with walk-forward validation   │
+│  ml/predict.py → Inference for daily scoring                    │
+│  models/ → Trained model artifacts (long_model, short_model)    │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
 │                       SIGNAL LAYER                               │
-│  features/signals/                                               │
+│  signals/                                                        │
 │  ├── fusion.py      → Market state classification (8 states)    │
 │  ├── overlays.py    → Edge/veto modifiers for execution         │
 │  ├── tactical_puts.py → Hedging logic inside bull regimes       │
-│  └── options.py     → Option strategy & strike selection        │
+│  ├── options.py     → Option strategy & strike selection        │
+│  ├── services.py    → SignalService for scoring + persistence   │
+│  └── models.py      → DailySignal model for DB storage          │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │                       API LAYER                                  │
-│  api/ → REST API with token authentication                      │
-│  features/services.py → SignalService for scoring + persistence │
-│  features/models.py → DailySignal model for DB storage          │
+│  api/views.py → REST API endpoints with token authentication    │
+│  api/serializers.py → DRF serializers for signal data           │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
@@ -56,49 +64,26 @@ Think of it as: **MDIA = ignition, Whales = fuel, MVRV-LS = terrain**
 
 ---
 
-## Fusion Engine (How Signals Work)
+## Market Regimes & States
 
-The fusion engine (`features/signals/fusion.py`) is the core decision-making system. It combines regime signals from three orthogonal indicators to classify market state and compute confidence scores.
+### 8 Canonical Market States
 
-### Step 1: Confidence Score Calculation
+The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states using hierarchical rules:
 
-Each indicator contributes to a numeric score:
+| State | Description | Direction | Sizing |
+|-------|-------------|-----------|--------|
+| `STRONG_BULLISH` | All indicators aligned bullish | 🟢 Long | 1.0x |
+| `EARLY_RECOVERY` | Smart money leading, structure turning | 🟢 Long | 1.0x |
+| `MOMENTUM_CONTINUATION` | Trend continuing without strong sponsorship | 🟢 Long | 1.0x |
+| `BULL_PROBE` | Timing + sponsorship, macro neutral | 🟢 Long | 0.35-0.60x |
+| `DISTRIBUTION_RISK` | Smart money exiting, structure cracking | 🔴 Short | 1.0x |
+| `BEAR_CONTINUATION` | No buyers, sellers in control | 🔴 Short | 1.0x |
+| `BEAR_PROBE` | Selling + distribution, macro neutral | 🔴 Short | 0.35-0.60x |
+| `NO_TRADE` | Conflicting signals, stay flat | ⚪ None | 0x |
 
-| Indicator | Condition | Score |
-|-----------|-----------|-------|
-| **MDIA** | `strong_inflow` | +2 |
-| **MDIA** | `inflow` (moderate) | +1 |
-| **MDIA** | `distribution` | -1 |
-| **Whales** | `broad_accum` | +2 |
-| **Whales** | `strategic_accum` | +1 |
-| **Whales** | `strong_distribution` | -2 |
-| **Whales** | `distribution` | -1 |
-| **MVRV-LS** | `call_confirm_recovery` | +2 |
-| **MVRV-LS** | `trend_confirm` | +1 |
-| **MVRV-LS** | `put_confirm` | -2 |
-| **MVRV-LS** | `distribution_warning` | -1 |
-| **Conflicts** | Per conflict detected | -1 |
-
-**Score Range**: -6 to +6 (theoretical)
-
-### Step 2: Score → Confidence Mapping
-
-| Score | Confidence | Position Sizing |
-|-------|------------|-----------------|
-| ≥ +4 | HIGH | Full size (1.0x) |
-| +2 to +3 | MEDIUM | Normal size |
-| < +2 | LOW | Reduced or no trade |
-
-### Step 3: Market State Classification
-
-The fusion engine classifies each day into one of 8 states using hierarchical rules:
+### Classification Hierarchy
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    CLASSIFICATION HIERARCHY                      │
-│  (Most specific rules evaluated first)                          │
-└─────────────────────────────────────────────────────────────────┘
-
 🚀 STRONG_BULLISH
    └─ MDIA strong_inflow + Whale sponsored + MVRV call_confirm
 
@@ -124,24 +109,82 @@ The fusion engine classifies each day into one of 8 states using hierarchical ru
    └─ No alignment (fallback)
 ```
 
-### State Summary
+---
 
-| State | Description | Trade |
-|-------|-------------|-------|
-| `STRONG_BULLISH` | All indicators aligned bullish | 🟢 Long 1.0x |
-| `EARLY_RECOVERY` | Smart money leading, structure turning | 🟢 Long 1.0x |
-| `MOMENTUM_CONTINUATION` | Trend continuing without strong sponsorship | 🟢 Long 1.0x |
-| `BULL_PROBE` | Timing + sponsorship, macro neutral | 🟢 Long 0.35-0.60x |
-| `DISTRIBUTION_RISK` | Smart money exiting, structure cracking | 🔴 Short 1.0x |
-| `BEAR_CONTINUATION` | No buyers, sellers in control | 🔴 Short 1.0x |
-| `BEAR_PROBE` | Selling + distribution, macro neutral | 🔴 Short 0.35-0.60x |
-| `NO_TRADE` | Conflicting signals, stay flat | ⚪ No trade |
+## Scoring System
+
+### Confidence Score Calculation
+
+Each indicator contributes to a numeric score (-6 to +6 range):
+
+| Indicator | Condition | Score |
+|-----------|-----------|-------|
+| **MDIA** | `strong_inflow` | +2 |
+| **MDIA** | `inflow` (moderate) | +1 |
+| **MDIA** | `distribution` | -1 |
+| **Whales** | `broad_accum` | +2 |
+| **Whales** | `strategic_accum` | +1 |
+| **Whales** | `strong_distribution` | -2 |
+| **Whales** | `distribution` | -1 |
+| **MVRV-LS** | `call_confirm_recovery` | +2 |
+| **MVRV-LS** | `trend_confirm` | +1 |
+| **MVRV-LS** | `put_confirm` | -2 |
+| **MVRV-LS** | `distribution_warning` | -1 |
+| **Conflicts** | Per conflict detected | -1 |
+
+### Score → Confidence Mapping
+
+| Score | Confidence | Position Sizing |
+|-------|------------|-----------------|
+| ≥ +4 | HIGH | Full size (1.0x) |
+| +2 to +3 | MEDIUM | Normal size |
+| < +2 | LOW | Reduced or no trade |
+
+### Score Thresholds for Trade Entry
+
+| State | Min Score | Effect |
+|-------|-----------|--------|
+| BULL_PROBE | ≥ +2 | Gates weak probes |
+| BEAR_PROBE | ≤ -2 | Gates weak shorts |
+| HIGH confidence | ≥ +4 | Full sizing |
+| MEDIUM confidence | +2 to +3 | Normal sizing |
+
+---
+
+## ML Training Pipeline
+
+The ML layer (`ml/training.py`) provides two training approaches:
+
+### Holdout Training
+- **Train**: Up to 2023-12-31
+- **Validation**: 2024-01-01 to 2024-12-31
+- **Test**: 2025-01-01 onwards
+
+### Walk-Forward Validation
+Rolling validation with 6-month windows for stability assessment:
+- Trains on expanding window
+- Validates on next 6 months
+- Reports Top 5% precision and AUC per fold
+- Final model trained on all pre-2025 data
+
+### Feature Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `PURE` | Raw numeric features only | Baseline ML |
+| `HYBRID` | Raw + handcrafted regimes | Production (default) |
+
+### Model Artifacts
+
+Saved to `models/` directory:
+- `long_model.joblib` - Long position classifier
+- `short_model.joblib` - Short position classifier
 
 ---
 
 ## Overlays (Execution Modifiers)
 
-Overlays (`features/signals/overlays.py`) modify **how hard** you press a trade. They never flip direction—only amplify or reduce conviction.
+Overlays (`signals/overlays.py`) modify **how hard** you press a trade. They never flip direction—only amplify or reduce conviction.
 
 ### Long Overlays (Sentiment + MVRV Composite)
 
@@ -183,9 +226,90 @@ Uses a blended "near-peak score" from `mvrv_60d_pct_rank` and `mvrv_60d_dist_fro
 
 ---
 
+## REST API
+
+### Endpoints
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/v1/health/` | GET | ❌ No | Health check |
+| `/api/v1/signals/` | GET | ✅ Token | List signals (paginated, summary view) |
+| `/api/v1/signals/latest/` | GET | ✅ Token | Latest signal (full detail) |
+| `/api/v1/signals/<date>/` | GET | ✅ Token | Signal by date (YYYY-MM-DD format) |
+
+### Authentication
+
+All authenticated endpoints require Bearer token in the `Authorization` header:
+
+```bash
+# Health check (no auth)
+curl http://localhost:8000/api/v1/health/
+
+# Get latest signal (auth required)
+curl -H "Authorization: Token YOUR_API_TOKEN" \
+     http://localhost:8000/api/v1/signals/latest/
+
+# Get signals list
+curl -H "Authorization: Token YOUR_API_TOKEN" \
+     http://localhost:8000/api/v1/signals/
+
+# Get signal for specific date
+curl -H "Authorization: Token YOUR_API_TOKEN" \
+     http://localhost:8000/api/v1/signals/2024-11-06/
+```
+
+### API Response Fields
+
+**Full signal response** (`/latest/` and `/<date>/`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `date` | string | Signal date (YYYY-MM-DD) |
+| `p_long` | float | ML probability for long position |
+| `p_short` | float | ML probability for short position |
+| `signal_option_call` | int | Call signal (0/1) |
+| `signal_option_put` | int | Put signal (0/1) |
+| `fusion_state` | string | Market state (e.g., `strong_bullish`) |
+| `fusion_confidence` | string | Confidence level (HIGH/MEDIUM/LOW) |
+| `fusion_score` | int | Numeric fusion score (-6 to +6) |
+| `overlay_reason` | string | Explanation from overlay logic |
+| `size_multiplier` | float | Position size multiplier |
+| `dte_multiplier` | float | DTE adjustment multiplier |
+| `tactical_put_active` | bool | Whether tactical put is triggered |
+| `tactical_put_strategy` | string | Strategy type if tactical put active |
+| `tactical_put_size` | float | Tactical put sizing |
+| `trade_decision` | string | Final decision (CALL/PUT/TACTICAL_PUT/NO_TRADE) |
+| `trade_notes` | string | Additional notes |
+| `option_structures` | string | Recommended structures (e.g., `long_call`) |
+| `strike_guidance` | string | Strike selection (e.g., `atm`, `slight_otm`) |
+| `dte_range` | string | DTE range (e.g., `45-90d`) |
+| `strategy_rationale` | string | Human-readable strategy explanation |
+
+**Summary response** (`/signals/` list):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `date` | string | Signal date |
+| `p_long` | float | ML probability for long |
+| `p_short` | float | ML probability for short |
+| `fusion_state` | string | Market state |
+| `fusion_score` | int | Fusion score |
+| `trade_decision` | string | Final trade decision |
+
+### Creating API Tokens
+
+```bash
+# Create a new API token for a user
+python manage.py create_api_token --username telegram_bot
+
+# Token is printed to console - save it securely
+```
+
+---
+
 ## Commands
 
-### Core Commands
+### Daily Operations
 
 ```bash
 # Build feature CSV from raw data
@@ -194,31 +318,41 @@ python manage.py build_features
 # Generate and persist today's signal
 python manage.py generate_signal --verbose
 
-# Score latest day with full output
+# Score latest day with full output (no persistence)
 python manage.py score_latest
 
 # List all trade opportunities
 python manage.py list_trades --year 2024
 ```
 
-### API Commands
+### Training
 
 ```bash
-# Create API token for Telegram bot
-python manage.py create_api_token --username telegram_bot
+# Train ML models (holdout validation)
+python manage.py train_models
 
+# Train with walk-forward validation
+python manage.py train_walk_forward
+```
+
+### Data Sync
+
+```bash
+# Sync data from Google Sheets
+python manage.py sync_sheets
+```
+
+### API Server
+
+```bash
 # Start API server
 python manage.py runserver
+
+# Create API token
+python manage.py create_api_token --username telegram_bot
 ```
 
-### Training Commands
-
-```bash
-# Train ML models
-python manage.py train_models
-```
-
-### Diagnostic Commands
+### Diagnostics
 
 ```bash
 # Analyze why days are NO_TRADE
@@ -229,22 +363,6 @@ python manage.py analyze_fusion
 
 # Analyze MVRV-LS neutral terrain
 python manage.py analyze_neutral
-```
-
----
-
-## REST API
-
-| Endpoint | Auth | Description |
-|----------|------|-------------|
-| `GET /api/v1/health/` | ❌ | Health check |
-| `GET /api/v1/signals/` | ✅ Token | List signals (paginated) |
-| `GET /api/v1/signals/latest/` | ✅ Token | Latest signal |
-| `GET /api/v1/signals/<date>/` | ✅ Token | Signal by date |
-
-**Authentication:**
-```bash
-curl -H "Authorization: Token YOUR_TOKEN" http://localhost:8000/api/v1/signals/latest/
 ```
 
 ---
@@ -261,14 +379,21 @@ curl -H "Authorization: Token YOUR_TOKEN" http://localhost:8000/api/v1/signals/l
 | BULL_PROBE | 5 days |
 | BEAR_PROBE | 5 days |
 
-### Score Thresholds
+### Environment Variables
 
-| State | Min Score | Effect |
-|-------|-----------|--------|
-| BULL_PROBE | ≥ +2 | Gates weak probes |
-| BEAR_PROBE | ≤ -2 | Gates weak shorts |
-| HIGH confidence | ≥ +4 | Full sizing |
-| MEDIUM confidence | +2 to +3 | Normal sizing |
+Create a `.env` file with:
+
+```bash
+# Database
+DATABASE_URL=sqlite:///db.sqlite3
+
+# Google Sheets credentials path
+GOOGLE_SHEETS_CREDENTIALS=/path/to/service-account.json
+
+# Django settings
+SECRET_KEY=your-secret-key
+DEBUG=False
+```
 
 ---
 
@@ -277,13 +402,17 @@ curl -H "Authorization: Token YOUR_TOKEN" http://localhost:8000/api/v1/signals/l
 | File | Purpose |
 |------|---------|
 | `features/feature_builder.py` | Feature engineering (MDIA, MVRV, Whales, Sentiment) |
-| `features/signals/fusion.py` | Market state classification engine |
-| `features/signals/overlays.py` | Edge amplifiers and veto gates |
-| `features/signals/tactical_puts.py` | Hedge puts inside bull regimes |
-| `features/signals/options.py` | Option strategy selection |
-| `features/services.py` | SignalService for scoring + persistence |
-| `features/models.py` | DailySignal model |
+| `signals/fusion.py` | Market state classification engine |
+| `signals/overlays.py` | Edge amplifiers and veto gates |
+| `signals/tactical_puts.py` | Hedge puts inside bull regimes |
+| `signals/options.py` | Option strategy selection |
+| `signals/services.py` | SignalService for scoring + persistence |
+| `signals/models.py` | DailySignal Django model |
+| `ml/training.py` | ML training pipeline with walk-forward validation |
+| `ml/predict.py` | Model inference for daily scoring |
 | `api/views.py` | REST API endpoints |
+| `api/serializers.py` | DRF serializers |
+| `api/urls.py` | API URL routing |
 
 ---
 
@@ -309,6 +438,12 @@ signal_option_put  = 0
    LONG EDGE (FULL): Fear + MVRV undervalued rising
    Size Multiplier: 1.25
    DTE Multiplier: 1.50
+
+--- OPTION STRATEGY ---
+   Structures: long_call
+   Strike: atm
+   DTE: 45-90d
+   Rationale: High conviction bullish setup
 
 ============================================================
 TRADE DECISIONS
@@ -336,11 +471,47 @@ pip install -r requirements.txt
 # Set up database
 python manage.py migrate
 
+# Sync data from Google Sheets
+python manage.py sync_sheets
+
 # Build features
 python manage.py build_features
 
 # Train models
 python manage.py train_models
+
+# Start API server
+python manage.py runserver
+```
+
+---
+
+## Project Structure
+
+```
+aibot/
+├── aitrader/           # Django project settings
+├── api/                # REST API app
+│   ├── views.py        # API endpoints
+│   ├── serializers.py  # DRF serializers
+│   └── urls.py         # URL routing
+├── datafeed/           # Data ingestion
+│   └── ingestion/      # Google Sheets sync
+├── features/           # Feature engineering
+│   └── feature_builder.py
+├── ml/                 # Machine learning
+│   ├── training.py     # Model training
+│   └── predict.py      # Inference
+├── signals/            # Signal generation
+│   ├── fusion.py       # Market state classifier
+│   ├── overlays.py     # Edge/veto logic
+│   ├── tactical_puts.py
+│   ├── options.py
+│   ├── services.py     # SignalService
+│   └── models.py       # DailySignal model
+├── models/             # Trained model artifacts
+├── credentials/        # Service account credentials
+└── manage.py
 ```
 
 ---
@@ -352,6 +523,7 @@ python manage.py train_models
 3. **Probes are smaller**: Macro-neutral trades use defined risk at 0.5x
 4. **Overlays never override fusion**: They amplify or reduce, not flip
 5. **Clustering prevention**: 7-day cooldown collapses events into single trades
+6. **ML + Rules hybrid**: ML for probability, rules for regime classification
 
 ---
 
