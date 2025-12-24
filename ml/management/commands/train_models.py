@@ -1,7 +1,7 @@
 # ml/management/commands/train_models.py
 """
 Train long/short ML models from feature CSV.
-Supports holdout validation and walk-forward modes.
+Supports holdout validation, walk-forward, and production modes.
 """
 
 
@@ -13,6 +13,7 @@ from ml.training import (
     train_long_model_with_holdout,
     train_short_model_with_holdout,
     train_with_walk_forward,
+    train_production_model,
     FeatureMode,
 )
 
@@ -57,6 +58,11 @@ class Command(BaseCommand):
             help="Use walk-forward validation with 6 rolling folds, then final test on 2025.",
         )
         parser.add_argument(
+            "--production",
+            action="store_true",
+            help="Train on ALL available data (including 2025) for deployment. No holdout.",
+        )
+        parser.add_argument(
             "--n-features",
             type=int,
             default=None,
@@ -69,6 +75,7 @@ class Command(BaseCommand):
         mode = FeatureMode(options["mode"])
         decision_lag = options["lag"]
         use_walk_forward = options["walk_forward"]
+        use_production = options["production"]
         n_features = options["n_features"]
 
         if not csv_path.exists():
@@ -80,7 +87,26 @@ class Command(BaseCommand):
         long_model_path = out_dir / "long_model.joblib"
         short_model_path = out_dir / "short_model.joblib"
 
-        if use_walk_forward:
+        if use_production:
+            # Production mode: train on ALL data
+            self.stdout.write(self.style.WARNING("PRODUCTION MODE: Training on ALL data (no holdout)"))
+            
+            self.stdout.write(self.style.MIGRATE_HEADING("Training LONG production model..."))
+            train_production_model(
+                csv_path, long_model_path,
+                label_col="label_good_move_long",
+                mode=mode, decision_lag=decision_lag, n_features=n_features
+            )
+
+            if not options["no_short"]:
+                self.stdout.write(self.style.MIGRATE_HEADING("Training SHORT production model..."))
+                train_production_model(
+                    csv_path, short_model_path,
+                    label_col="label_good_move_short",
+                    mode=mode, decision_lag=decision_lag, n_features=n_features
+                )
+
+        elif use_walk_forward:
             # Walk-forward validation mode
             self.stdout.write(self.style.MIGRATE_HEADING("WALK-FORWARD: Training LONG model..."))
             train_with_walk_forward(
@@ -106,3 +132,4 @@ class Command(BaseCommand):
                 train_short_model_with_holdout(csv_path, short_model_path, mode=mode, decision_lag=decision_lag)
 
         self.stdout.write(self.style.SUCCESS("Model training completed."))
+

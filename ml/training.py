@@ -666,3 +666,96 @@ def train_with_walk_forward(
     )
     print(f"\n[{name}] Saved model to {model_out}")
 
+
+# ============================================================================
+# PRODUCTION TRAINING (all data, no holdout)
+# ============================================================================
+
+def train_production_model(
+    csv_path: Path,
+    model_out: Path,
+    label_col: str,
+    mode: FeatureMode = FeatureMode.HYBRID,
+    decision_lag: int = 1,
+    n_features: Optional[int] = None,
+) -> None:
+    """
+    Train a production model on ALL available data.
+    
+    Use this for deployment after you've validated your approach
+    with walk-forward testing. No holdout = use all information.
+    """
+    from datetime import datetime
+    
+    name = "LONG" if "long" in label_col else "SHORT"
+    
+    print(f"\n{'='*60}")
+    print(f"PRODUCTION MODEL | {name} | Train on ALL data")
+    print('='*60)
+    
+    # Load and prepare data
+    df = load_feature_dataset(csv_path)
+    feature_cols = get_feature_cols(df, mode)
+    
+    if decision_lag > 0:
+        df = apply_decision_lag(df, feature_cols, decision_lag)
+    
+    # Use ALL data for training
+    df = drop_na_for_task(df, feature_cols, label_col)
+    
+    print(f"Training period: {df.index.min().date()} → {df.index.max().date()}")
+    print(f"Total rows: {len(df)}")
+    print(f"Positive rate: {df[label_col].mean():.3f}")
+    print(f"Available features: {len(feature_cols)}")
+    
+    X, y = split_X_y(df, feature_cols, label_col)
+    
+    # Optional feature selection
+    if n_features and n_features < len(feature_cols):
+        print(f"Selecting top {n_features} features...")
+        selected_cols = select_top_features(X, y, n_features)
+        X = X[selected_cols]
+        feature_cols = selected_cols
+        print(f"Using {len(feature_cols)} features")
+    
+    # Train final production model
+    model = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=6,
+        min_samples_leaf=20,
+        class_weight='balanced',
+        n_jobs=-1,
+        random_state=42,
+    )
+    model.fit(X, y)
+    
+    # Feature importance summary
+    importance_df = pd.DataFrame({
+        'feature': feature_cols,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    print(f"\n--- Top 10 Features ---")
+    for _, row in importance_df.head(10).iterrows():
+        print(f"  {row['importance']:.4f}  {row['feature']}")
+    
+    # Save model with metadata
+    model_out.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(
+        {
+            "model": model,
+            "feature_names": feature_cols,
+            "feature_mode": mode.value,
+            "decision_lag": decision_lag,
+            "n_features": n_features,
+            "training_mode": "production",
+            "train_start": str(df.index.min().date()),
+            "train_end": str(df.index.max().date()),
+            "train_rows": len(df),
+            "positive_rate": float(df[label_col].mean()),
+            "trained_at": datetime.now().isoformat(),
+            "feature_importances": importance_df.head(20).to_dict('records'),
+        },
+        model_out,
+    )
+    print(f"\n[{name}] Saved PRODUCTION model to {model_out}")
