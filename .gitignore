@@ -58,3 +58,4 @@ htmlcov/
 pytest_cache/
 .pytest_cache/
 .cache/
+features_14d_5pct.csv
