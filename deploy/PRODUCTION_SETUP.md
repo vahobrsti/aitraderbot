@@ -5,6 +5,9 @@
 These steps are needed immediately after the VPS setup script completes:
 
 ```bash
+# Switch to deploy user first!
+sudo su - deploy
+
 # 1. Update .env.production values
 #    - Add GSPREAD_SHEET_ID
 #    - Verify all credentials are correct
@@ -35,6 +38,8 @@ sudo systemctl start gunicorn
 ## 🔧 One-Time Setup (Run After First Deployment)
 
 ```bash
+# Make sure you're the deploy user
+sudo su - deploy
 cd /var/www/app
 source venv/bin/activate
 

@@ -171,6 +171,9 @@ chown ${PROJECT_USER}:${PROJECT_USER} ${PROJECT_DIR}
 log_info "Cloning repository from ${REPO_URL}..."
 sudo -u ${PROJECT_USER} git clone ${REPO_URL} ${PROJECT_DIR}
 
+# Fix git ownership for deploy user
+sudo -u ${PROJECT_USER} git config --global --add safe.directory ${PROJECT_DIR}
+
 # Create virtual environment
 sudo -u ${PROJECT_USER} python3 -m venv ${VENV_DIR}
 
