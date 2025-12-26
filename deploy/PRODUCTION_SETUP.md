@@ -79,17 +79,17 @@ Add these lines:
 # AI Trader Bot - Daily Pipeline (UTC times)
 # ============================================
 
-# 6:00 AM - Refresh Google Sheet
-0 6 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py refresh_sheet >> /var/www/app/logs/cron.log 2>&1
+# 00:05 - Refresh Google Sheet
+5 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py refresh_sheet >> /var/www/app/logs/cron.log 2>&1
 
-# 6:05 AM - Sync sheet data to database (last 14 days)
-5 6 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py sync_sheets >> /var/www/app/logs/cron.log 2>&1
+# 00:10 - Sync sheet data to database (last 14 days)
+10 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py sync_sheets >> /var/www/app/logs/cron.log 2>&1
 
-# 6:10 AM - Rebuild features
-10 6 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py build_features >> /var/www/app/logs/cron.log 2>&1
+# 00:15 - Rebuild features
+15 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py build_features >> /var/www/app/logs/cron.log 2>&1
 
-# 6:15 AM - Generate daily trading signal
-15 6 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py generate_signal >> /var/www/app/logs/cron.log 2>&1
+# 00:20 - Generate daily trading signal
+20 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py generate_signal >> /var/www/app/logs/cron.log 2>&1
 
 # ============================================
 # Weekly Model Retraining (Sundays 3 AM UTC)
