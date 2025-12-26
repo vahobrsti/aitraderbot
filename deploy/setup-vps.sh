@@ -167,7 +167,8 @@ log_info "Step 6: Setting up project..."
 mkdir -p ${PROJECT_DIR}
 chown ${PROJECT_USER}:${PROJECT_USER} ${PROJECT_DIR}
 
-# NOTE: Clone manually or uncomment below after setting REPO_URL
+# Clone repository
+log_info "Cloning repository from ${REPO_URL}..."
 sudo -u ${PROJECT_USER} git clone ${REPO_URL} ${PROJECT_DIR}
 
 # Create virtual environment
@@ -398,16 +399,15 @@ echo "============================================================"
 echo "NEXT STEPS"
 echo "============================================================"
 echo ""
-echo "  1. Clone your repo to ${PROJECT_DIR}"
-echo "  2. Update values in ${PROJECT_DIR}/.env.production"
+echo "  1. Update values in ${PROJECT_DIR}/.env.production"
 echo "     - Add GSPREAD_SHEET_ID"
 echo "     - Copy gspread credentials to ${GSPREAD_CREDS_FILE}"
-echo "  3. Run: source ${VENV_DIR}/bin/activate"
-echo "  4. Run: pip install -r requirements.txt"
-echo "  5. Run: python manage.py migrate"
-echo "  6. Run: python manage.py collectstatic"
-echo "  7. Run: sudo systemctl start gunicorn.socket"
-echo "  8. Point your DNS A record to this server's IP"
+echo "  2. Run: source ${VENV_DIR}/bin/activate"
+echo "  3. Run: pip install -r requirements.txt"
+echo "  4. Run: python manage.py migrate"
+echo "  5. Run: python manage.py collectstatic"
+echo "  6. Run: sudo systemctl start gunicorn.socket"
+echo "  7. Point your DNS A record to this server's IP"
 echo ""
 echo "============================================================"
 echo "USEFUL COMMANDS"
