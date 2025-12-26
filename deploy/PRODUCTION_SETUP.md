@@ -1,74 +1,70 @@
 # AI Trader Bot - Production Setup Guide
 
-## 🚀 After Running setup-vps.sh
-
-These steps are needed immediately after the VPS setup script completes:
+## 🚀 Step 1: After Running setup-vps.sh (From Your Local Machine)
 
 ```bash
-# Switch to deploy user first!
-sudo su - deploy
+# Copy Google Sheets credentials to the server
+scp credentials/gsheets-service-account.json root@your-server:/var/www/app/credentials/
+```
 
-# 1. Update .env.production values
+---
+
+## 🔧 Step 2: On the VPS (Initial Setup)
+
+```bash
+# Switch to deploy user
+sudo su - deploy
+cd /var/www/app
+source venv/bin/activate
+
+# 1. Update .env.production
+nano .env.production
 #    - Add GSPREAD_SHEET_ID
 #    - Verify all credentials are correct
 
-# 2. Copy Google Sheets credentials to the server
-scp credentials/gsheets-service-account.json deploy@your-server:/var/www/app/credentials/
-
-# 3. On the VPS, activate virtual environment
-cd /var/www/app
-source venv/bin/activate
-
-# 4. Install Python dependencies
+# 2. Install Python dependencies
 pip install -r requirements.txt
 
-# 5. Run database migrations
+# 3. Run database migrations
 python manage.py migrate
 
-# 6. Collect static files
+# 4. Collect static files
 python manage.py collectstatic --noinput
 
-# 7. Start Gunicorn
-sudo systemctl start gunicorn.socket
-sudo systemctl start gunicorn
-```
-
----
-
-## 🔧 One-Time Setup (Run After First Deployment)
-
-```bash
-# Make sure you're the deploy user
-sudo su - deploy
-cd /var/www/app
-source venv/bin/activate
-
-# 1. Full sync of all historical data
+# 5. Full sync of all historical data
 python manage.py sync_sheets --full-sync
 
-# 2. Build features from synced data
+# 6. Build features from synced data
 python manage.py build_features
 
-# 3. Train production models
+# 7. Train production models
 python manage.py train_models --production --mode hybrid --lag 1
 
-# 4. Generate initial signal
+# 8. Generate initial signal
 python manage.py generate_signal
 
-# 5. Create API token for Telegram bot
+# 9. Create API token for Telegram bot
 python manage.py create_api_token
 
-# 6. Start Gunicorn
+# 10. Start Gunicorn
 sudo systemctl start gunicorn.socket
 sudo systemctl start gunicorn
+
+# 11. Verify everything works
+curl https://options.somimobile.com/api/v1/health/
 ```
 
 ---
 
-## ⏰ Daily Cron Jobs
+## ⏰ Step 3: Set Up Daily Cron Jobs
 
-Edit crontab as the `deploy` user:
 ```bash
+# Install cron if not present
+sudo apt install cron
+sudo systemctl enable cron
+sudo systemctl start cron
+
+# Edit crontab as deploy user
 sudo su - deploy
 crontab -e
 ```
