@@ -51,8 +51,7 @@ python manage.py train_models --production --mode hybrid --lag 1
 python manage.py generate_signal
 
 # 5. Create API token for Telegram bot
-python manage.py createsuperuser  # Create admin user first
-python manage.py drf_create_token <username>
+python manage.py create_api_token
 
 # 6. Start Gunicorn
 sudo systemctl start gunicorn.socket
