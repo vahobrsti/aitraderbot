@@ -24,6 +24,7 @@ class DailySignalSerializer(serializers.ModelSerializer):
             'fusion_state',
             'fusion_confidence',
             'fusion_score',
+            'score_components',  # NEW: breakdown of MDIA/Whale/MVRV-LS contributions
             'overlay_reason',
             'size_multiplier',
             'dte_multiplier',
@@ -32,6 +33,10 @@ class DailySignalSerializer(serializers.ModelSerializer):
             'tactical_put_size',
             'trade_decision',
             'trade_notes',
+            'no_trade_reasons',   # NEW: list of veto codes  
+            'decision_trace',     # NEW: step-by-step decision gates
+            'effective_size',     # NEW: final computed size (0 on NO_TRADE)
+            'effective_dte_range', # NEW: final DTE range (empty on NO_TRADE)
             'option_structures',
             'strike_guidance',
             'dte_range',

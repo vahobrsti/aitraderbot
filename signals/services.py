@@ -43,6 +43,12 @@ class SignalResult:
     strike_guidance: str
     dte_range: str
     strategy_rationale: str
+    # NO_TRADE diagnostics
+    no_trade_reasons: list
+    decision_trace: list
+    score_components: dict
+    effective_size: float
+    effective_dte_range: str
 
 
 class SignalService:
@@ -136,13 +142,24 @@ class SignalService:
         # 6) Tactical Put
         tactical_result = tactical_put_inside_bull(fusion_result, row)
         
-        trade_decision, trade_notes = self._determine_trade_decision(
-            fusion_result, size_mult, tactical_result, p_long, p_short,
-            signal_option_call, signal_option_put
+        trade_decision, trade_notes, no_trade_reasons, decision_trace = self._determine_trade_decision(
+            fusion_result, size_mult, dte_mult, tactical_result, p_long, p_short,
+            signal_option_call, signal_option_put, overlay
         )
         
         # 8) Get option strategy recommendation
         strategy_summary = get_strategy_summary(fusion_result.state)
+        
+        # Compute effective values (0 on NO_TRADE)
+        if trade_decision == "NO_TRADE":
+            effective_size = 0.0
+            effective_dte_range = ""
+            # Override multipliers to 0.0 for NO_TRADE
+            size_mult = 0.0
+            dte_mult = 0.0
+        else:
+            effective_size = size_mult
+            effective_dte_range = strategy_summary["dte_range"]
         
         return SignalResult(
             date=latest_date,
@@ -165,51 +182,88 @@ class SignalService:
             strike_guidance=strategy_summary["strike_guidance"],
             dte_range=strategy_summary["dte_range"],
             strategy_rationale=strategy_summary["rationale"],
+            no_trade_reasons=no_trade_reasons,
+            decision_trace=decision_trace,
+            score_components=fusion_result.components,
+            effective_size=effective_size,
+            effective_dte_range=effective_dte_range,
         )
     
     def _determine_trade_decision(
-        self, fusion_result, size_mult, tactical_result,
-        p_long, p_short, signal_option_call, signal_option_put
-    ) -> tuple[str, str]:
-        """Determine final trade decision and notes."""
-        notes_parts = []
+        self, fusion_result, size_mult, dte_mult, tactical_result,
+        p_long, p_short, signal_option_call, signal_option_put, overlay
+    ) -> tuple[str, str, list, list]:
+        """
+        Determine final trade decision, notes, and diagnostics.
+        
+        Returns:
+            Tuple of (decision, notes, no_trade_reasons, decision_trace)
+        """
+        no_trade_reasons = []
+        decision_trace = []
+        
+        # Build decision trace step by step
+        fusion_step = f"fusion={fusion_result.state.value}(score={fusion_result.score},conf={fusion_result.confidence.value})"
+        decision_trace.append(fusion_step)
         
         # Check for tactical put first
         if tactical_result.active:
-            return "TACTICAL_PUT", tactical_result.reason
+            decision_trace.append(f"tactical_put=active(strategy={tactical_result.strategy.value}) -> TRADE")
+            return "TACTICAL_PUT", tactical_result.reason, [], decision_trace
+        else:
+            decision_trace.append("tactical_put=inactive")
+        
+        # Check fusion state
+        if fusion_result.state == MarketState.NO_TRADE:
+            no_trade_reasons.append("FUSION_STATE_NO_TRADE")
+            decision_trace.append("fusion=no_trade -> stop")
+            return "NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, decision_trace
+        
+        # Check confidence
+        if fusion_result.confidence.value == "low":
+            no_trade_reasons.append("CONFIDENCE_TOO_LOW")
+        
+        # Check overlay
+        overlay_step = f"overlay(size={size_mult},dte={dte_mult},reason={overlay.reason[:30]})"
+        decision_trace.append(overlay_step)
+        
+        if size_mult == 0:
+            no_trade_reasons.append("OVERLAY_VETO")
+            decision_trace.append("size_mult=0 -> stop")
+            return "NO_TRADE", "Overlay vetoed (size_mult=0)", no_trade_reasons, decision_trace
         
         # Check fusion-based trades
-        if fusion_result.state != MarketState.NO_TRADE and size_mult > 0:
-            is_long = fusion_result.state in {
-                MarketState.STRONG_BULLISH,
-                MarketState.EARLY_RECOVERY,
-                MarketState.MOMENTUM_CONTINUATION
-            }
-            is_short = fusion_result.state in {
-                MarketState.DISTRIBUTION_RISK,
-                MarketState.BEAR_CONTINUATION
-            }
-            
-            if is_long:
-                notes_parts.append(f"Fusion: {fusion_result.state.value}")
-                return "CALL", "; ".join(notes_parts)
-            
-            if is_short:
-                notes_parts.append(f"Fusion: {fusion_result.state.value}")
-                return "PUT", "; ".join(notes_parts)
+        is_long = fusion_result.state in {
+            MarketState.STRONG_BULLISH,
+            MarketState.EARLY_RECOVERY,
+            MarketState.MOMENTUM_CONTINUATION
+        }
+        is_short = fusion_result.state in {
+            MarketState.DISTRIBUTION_RISK,
+            MarketState.BEAR_CONTINUATION
+        }
+        
+        if is_long:
+            decision_trace.append(f"state={fusion_result.state.value} -> CALL")
+            return "CALL", f"Fusion: {fusion_result.state.value}", [], decision_trace
+        
+        if is_short:
+            decision_trace.append(f"state={fusion_result.state.value} -> PUT")
+            return "PUT", f"Fusion: {fusion_result.state.value}", [], decision_trace
         
         # Check probes
-        if fusion_result.state == MarketState.BULL_PROBE and size_mult > 0:
-            return "CALL", f"Bull probe, score={fusion_result.score}"
+        if fusion_result.state == MarketState.BULL_PROBE:
+            decision_trace.append(f"bull_probe(score={fusion_result.score}) -> CALL")
+            return "CALL", f"Bull probe, score={fusion_result.score}", [], decision_trace
         
-        if fusion_result.state == MarketState.BEAR_PROBE and size_mult > 0:
-            return "PUT", f"Bear probe, score={fusion_result.score}"
+        if fusion_result.state == MarketState.BEAR_PROBE:
+            decision_trace.append(f"bear_probe(score={fusion_result.score}) -> PUT")
+            return "PUT", f"Bear probe, score={fusion_result.score}", [], decision_trace
         
-        # No trade
-        if size_mult == 0:
-            return "NO_TRADE", "Overlay vetoed (size_mult=0)"
-        
-        return "NO_TRADE", f"State: {fusion_result.state.value}"
+        # Catch-all: if we get here, it's a state we don't trade
+        no_trade_reasons.append("STATE_NOT_TRADEABLE")
+        decision_trace.append(f"state={fusion_result.state.value} -> no action")
+        return "NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, decision_trace
     
     def persist_signal(self, result: SignalResult) -> DailySignal:
         """
@@ -243,6 +297,11 @@ class SignalService:
                 'strike_guidance': result.strike_guidance,
                 'dte_range': result.dte_range,
                 'strategy_rationale': result.strategy_rationale,
+                'no_trade_reasons': result.no_trade_reasons,
+                'decision_trace': result.decision_trace,
+                'score_components': result.score_components,
+                'effective_size': result.effective_size,
+                'effective_dte_range': result.effective_dte_range,
             }
         )
         return signal

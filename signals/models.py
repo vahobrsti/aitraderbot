@@ -67,6 +67,33 @@ class DailySignal(models.Model):
         default="",
         help_text="Additional notes about the trade decision"
     )
+    
+    # NO_TRADE Diagnostics
+    no_trade_reasons = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of reason codes for NO_TRADE (e.g., FUSION_STATE_NO_TRADE, CONFIDENCE_TOO_LOW)"
+    )
+    decision_trace = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Step-by-step decision gates (fusion → overlay → ml → final)"
+    )
+    score_components = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Breakdown of score: {mdia: '+2 (strong_inflow)', whale: '+1 (strategic)', mvrv_ls: '0 (neutral)', conflicts: '-1'}"
+    )
+    effective_size = models.FloatField(
+        default=0.0,
+        help_text="Final computed position size (0 on NO_TRADE)"
+    )
+    effective_dte_range = models.CharField(
+        max_length=30,
+        blank=True,
+        default="",
+        help_text="Final DTE range to use (empty on NO_TRADE)"
+    )
 
     # Option Strategy (from options.py)
     option_structures = models.CharField(
