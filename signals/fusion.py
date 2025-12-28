@@ -65,53 +65,53 @@ def compute_confidence_score(row: pd.Series) -> tuple[int, dict]:
     # MDIA contribution
     if row.get('mdia_regime_strong_inflow', 0) == 1:
         score += 2
-        components['mdia'] = '+2 (strong_inflow)'
+        components['mdia'] = {'score': 2, 'label': 'strong_inflow'}
     elif row.get('mdia_regime_inflow', 0) == 1:
         score += 1
-        components['mdia'] = '+1 (inflow)'
+        components['mdia'] = {'score': 1, 'label': 'inflow'}
     elif row.get('mdia_regime_distribution', 0) == 1:
         score -= 1
-        components['mdia'] = '-1 (distribution)'
+        components['mdia'] = {'score': -1, 'label': 'distribution'}
     else:
-        components['mdia'] = '0 (neutral)'
+        components['mdia'] = {'score': 0, 'label': 'neutral'}
     
     # Whale contribution
     if row.get('whale_regime_broad_accum', 0) == 1:
         score += 2
-        components['whale'] = '+2 (broad_accum)'
+        components['whale'] = {'score': 2, 'label': 'broad_accum'}
     elif row.get('whale_regime_strategic_accum', 0) == 1:
         score += 1
-        components['whale'] = '+1 (strategic)'
+        components['whale'] = {'score': 1, 'label': 'strategic'}
     elif row.get('whale_regime_distribution_strong', 0) == 1:
         score -= 2
-        components['whale'] = '-2 (strong_distrib)'
+        components['whale'] = {'score': -2, 'label': 'strong_distrib'}
     elif row.get('whale_regime_distribution', 0) == 1:
         score -= 1
-        components['whale'] = '-1 (distribution)'
+        components['whale'] = {'score': -1, 'label': 'distribution'}
     else:
-        components['whale'] = '0 (neutral)'
+        components['whale'] = {'score': 0, 'label': 'neutral'}
     
     # MVRV LS contribution
     # NOTE: Check recovery FIRST because it's a subset of call_confirm
     # (both require strong_uptrend, but recovery also requires level < 0)
     if row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1:
         score += 2  # Recovery is actually the best asymmetric setup
-        components['mvrv_ls'] = '+2 (early_recovery)'
+        components['mvrv_ls'] = {'score': 2, 'label': 'early_recovery'}
     elif row.get('mvrv_ls_regime_call_confirm_trend', 0) == 1:
         score += 1  # Trend continuation is good but less special
-        components['mvrv_ls'] = '+1 (trend_confirm)'
+        components['mvrv_ls'] = {'score': 1, 'label': 'trend_confirm'}
     elif row.get('mvrv_ls_regime_call_confirm', 0) == 1:
         # Fallback: call_confirm is true but neither recovery nor trend flagged
         score += 1
-        components['mvrv_ls'] = '+1 (call_confirm fallback)'
+        components['mvrv_ls'] = {'score': 1, 'label': 'call_confirm_fallback'}
     elif row.get('mvrv_ls_regime_put_confirm', 0) == 1:
         score -= 2
-        components['mvrv_ls'] = '-2 (put_confirm)'
+        components['mvrv_ls'] = {'score': -2, 'label': 'put_confirm'}
     elif row.get('mvrv_ls_regime_distribution_warning', 0) == 1:
         score -= 1
-        components['mvrv_ls'] = '-1 (distribution_warning)'
+        components['mvrv_ls'] = {'score': -1, 'label': 'distribution_warning'}
     else:
-        components['mvrv_ls'] = '0 (neutral)'
+        components['mvrv_ls'] = {'score': 0, 'label': 'neutral'}
     
     # Conflict penalty
     conflicts = 0
@@ -124,7 +124,7 @@ def compute_confidence_score(row: pd.Series) -> tuple[int, dict]:
     
     if conflicts > 0:
         score -= conflicts
-        components['conflicts'] = f'-{conflicts} (regime conflicts)'
+        components['conflicts'] = {'score': -conflicts, 'label': 'regime_conflicts'}
     
     return score, components
 

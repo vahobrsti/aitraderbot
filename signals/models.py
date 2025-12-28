@@ -82,17 +82,24 @@ class DailySignal(models.Model):
     score_components = models.JSONField(
         default=dict,
         blank=True,
-        help_text="Breakdown of score: {mdia: '+2 (strong_inflow)', whale: '+1 (strategic)', mvrv_ls: '0 (neutral)', conflicts: '-1'}"
+        help_text="Breakdown of score: {mdia: {score: 2, label: 'strong_inflow'}, ...}"
     )
     effective_size = models.FloatField(
         default=0.0,
         help_text="Final computed position size (0 on NO_TRADE)"
     )
-    effective_dte_range = models.CharField(
+    
+    # Versioning for reproducibility
+    decision_version = models.CharField(
         max_length=30,
         blank=True,
         default="",
-        help_text="Final DTE range to use (empty on NO_TRADE)"
+        help_text="Version of decision logic (e.g., 2025-12-28.1)"
+    )
+    model_versions = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Model versions used: {long: 'filename', short: 'filename'}"
     )
 
     # Option Strategy (from options.py)

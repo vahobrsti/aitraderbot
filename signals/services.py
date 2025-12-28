@@ -48,7 +48,9 @@ class SignalResult:
     decision_trace: list
     score_components: dict
     effective_size: float
-    effective_dte_range: str
+    # Versioning
+    decision_version: str
+    model_versions: dict
 
 
 class SignalService:
@@ -153,13 +155,18 @@ class SignalService:
         # Compute effective values (0 on NO_TRADE)
         if trade_decision == "NO_TRADE":
             effective_size = 0.0
-            effective_dte_range = ""
             # Override multipliers to 0.0 for NO_TRADE
             size_mult = 0.0
             dte_mult = 0.0
         else:
             effective_size = size_mult
-            effective_dte_range = strategy_summary["dte_range"]
+        
+        # Build model version info
+        model_versions = {
+            'long': self.long_model_path.name,
+            'short': self.short_model_path.name,
+        }
+        decision_version = "2025-12-28.1"
         
         return SignalResult(
             date=latest_date,
@@ -186,7 +193,8 @@ class SignalService:
             decision_trace=decision_trace,
             score_components=fusion_result.components,
             effective_size=effective_size,
-            effective_dte_range=effective_dte_range,
+            decision_version=decision_version,
+            model_versions=model_versions,
         )
     
     def _determine_trade_decision(
@@ -216,7 +224,7 @@ class SignalService:
         # Check fusion state
         if fusion_result.state == MarketState.NO_TRADE:
             no_trade_reasons.append("FUSION_STATE_NO_TRADE")
-            decision_trace.append("fusion=no_trade -> stop")
+            decision_trace.append("stop_reason=FUSION_STATE_NO_TRADE")
             return "NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, decision_trace
         
         # Check confidence
@@ -229,7 +237,7 @@ class SignalService:
         
         if size_mult == 0:
             no_trade_reasons.append("OVERLAY_VETO")
-            decision_trace.append("size_mult=0 -> stop")
+            decision_trace.append("stop_reason=OVERLAY_VETO")
             return "NO_TRADE", "Overlay vetoed (size_mult=0)", no_trade_reasons, decision_trace
         
         # Check fusion-based trades
@@ -262,7 +270,7 @@ class SignalService:
         
         # Catch-all: if we get here, it's a state we don't trade
         no_trade_reasons.append("STATE_NOT_TRADEABLE")
-        decision_trace.append(f"state={fusion_result.state.value} -> no action")
+        decision_trace.append("stop_reason=STATE_NOT_TRADEABLE")
         return "NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, decision_trace
     
     def persist_signal(self, result: SignalResult) -> DailySignal:
@@ -301,7 +309,8 @@ class SignalService:
                 'decision_trace': result.decision_trace,
                 'score_components': result.score_components,
                 'effective_size': result.effective_size,
-                'effective_dte_range': result.effective_dte_range,
+                'decision_version': result.decision_version,
+                'model_versions': result.model_versions,
             }
         )
         return signal
