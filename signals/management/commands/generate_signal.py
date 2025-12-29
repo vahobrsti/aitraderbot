@@ -93,7 +93,7 @@ class Command(BaseCommand):
             return
         
         try:
-            from telegram_bot.notifier import TelegramNotifier
+            from notifications.notifier import TelegramNotifier
             notifier = TelegramNotifier()
             success = notifier.send_from_model(signal)
             

@@ -5,7 +5,7 @@ Usage: python manage.py notify_signal [--verbose]
 from django.core.management.base import BaseCommand
 
 from signals.models import DailySignal
-from telegram_bot.notifier import TelegramNotifier
+from notifications.notifier import TelegramNotifier
 
 
 class Command(BaseCommand):
@@ -46,7 +46,7 @@ class Command(BaseCommand):
             
             if options["force"] and signal.trade_decision == "NO_TRADE":
                 # For testing, temporarily override the decision check
-                from telegram_bot.notifier import SignalMessage
+                from notifications.notifier import SignalMessage
                 msg = SignalMessage(
                     date=str(signal.date),
                     trade_decision=signal.trade_decision,

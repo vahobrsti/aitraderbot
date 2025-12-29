@@ -46,7 +46,7 @@ INSTALLED_APPS = [
     'signals',
     'ml',
     'api',
-    'telegram_bot',
+    'notifications',
 ]
 
 MIDDLEWARE = [
