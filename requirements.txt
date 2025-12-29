@@ -35,6 +35,9 @@ djangorestframework==3.15.2
 # Production Server
 gunicorn==23.0.0
 
+# Telegram Bot
+python-telegram-bot==21.10
+
 # Utilities
 python-dateutil==2.9.0.post0
 pytz==2025.2

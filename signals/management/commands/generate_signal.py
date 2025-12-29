@@ -41,6 +41,11 @@ class Command(BaseCommand):
             action="store_true",
             help="Print detailed output",
         )
+        parser.add_argument(
+            "--notify",
+            action="store_true",
+            help="Send Telegram notification (only for non-NO_TRADE signals)",
+        )
 
     def handle(self, *args, **options):
         service = SignalService(
@@ -71,7 +76,41 @@ class Command(BaseCommand):
                 self.stdout.write(
                     f"OK: {signal.date} | {signal.fusion_state} | {signal.trade_decision}"
                 )
+            
+            # Send Telegram notification if requested
+            if options["notify"]:
+                self._send_telegram_notification(signal, options["verbose"])
                 
         except Exception as e:
             self.stderr.write(self.style.ERROR(f"Error: {e}"))
             raise
+
+    def _send_telegram_notification(self, signal, verbose: bool):
+        """Send Telegram notification for non-NO_TRADE signals."""
+        if signal.trade_decision == "NO_TRADE":
+            if verbose:
+                self.stdout.write("Skipping Telegram notification (NO_TRADE)")
+            return
+        
+        try:
+            from telegram_bot.notifier import TelegramNotifier
+            notifier = TelegramNotifier()
+            success = notifier.send_from_model(signal)
+            
+            if success:
+                self.stdout.write(
+                    self.style.SUCCESS(f"✓ Telegram notification sent")
+                )
+            else:
+                self.stderr.write(
+                    self.style.WARNING("Telegram notification failed")
+                )
+        except ValueError as e:
+            self.stderr.write(
+                self.style.WARNING(f"Telegram not configured: {e}")
+            )
+        except Exception as e:
+            self.stderr.write(
+                self.style.ERROR(f"Telegram error: {e}")
+            )
+
