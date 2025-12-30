@@ -313,11 +313,13 @@ def print_model_metrics(name: str, y_val: pd.Series, y_val_proba: np.ndarray,
         val_lift = val_prec / val_baseline if val_baseline > 0 else 0
         test_lift = test_prec / test_baseline if test_baseline > 0 else 0
         
-        # Show if min_k was triggered
-        val_note = f"k={val_k}" if val_k != int(len(y_val) * k / 100) else ""
-        test_note = f"k={test_k}" if test_k != int(len(y_test) * k / 100) else ""
+        # Show actual % when min_k was triggered (honest labeling)
+        val_actual_pct = 100 * val_k / len(y_val)
+        test_actual_pct = 100 * test_k / len(y_test)
+        val_label = f"Top{k}%" if abs(val_actual_pct - k) < 0.1 else f"Top{val_actual_pct:.0f}%"
+        test_label = f"Top{k}%" if abs(test_actual_pct - k) < 0.1 else f"Top{test_actual_pct:.0f}%"
         
-        print(f"  Top {k:2d}%: Val={val_prec:.3f} (lift={val_lift:.2f}x{val_note})  Test={test_prec:.3f} (lift={test_lift:.2f}x{test_note})")
+        print(f"  {val_label:>6}: Val={val_prec:.3f} (lift={val_lift:.2f}x, n={val_k})  {test_label:>6}: Test={test_prec:.3f} (lift={test_lift:.2f}x, n={test_k})")
     
     # Hit rate at high probability threshold
     print(f"\n  --- Threshold Hit Rates (coverage + precision) ---")
@@ -397,10 +399,12 @@ def get_calibration_method(n_samples: int) -> str:
     """
     Choose calibration method based on sample size.
     
-    - sigmoid (Platt scaling): better for small samples, less prone to overfitting
-    - isotonic: more flexible but needs more data (1500+ samples)
+    NOTE: Always use sigmoid (Platt scaling) because isotonic collapses under 
+    regime shift (test probs bunch up into step functions). Sigmoid is more 
+    robust for time-series with distribution drift.
     """
-    return "sigmoid" if n_samples < 1500 else "isotonic"
+    # Always sigmoid - isotonic overfits and collapses when test regime differs
+    return "sigmoid"
 
 
 def get_time_series_cv(n_splits: int = 5, gap: int = DEFAULT_LABEL_HORIZON_DAYS) -> tuple:
@@ -557,6 +561,32 @@ def train_binary_model_with_holdout(
         'q95': float(np.quantile(y_trainval_proba, 0.95)),
         'q99': float(np.quantile(y_trainval_proba, 0.99)),
     }
+    
+    # Store TEST proba percentiles for debugging (spot collapse instantly)
+    test_proba_summary = {
+        "min": float(np.min(y_test_proba)),
+        "p10": float(np.quantile(y_test_proba, 0.10)),
+        "p25": float(np.quantile(y_test_proba, 0.25)),
+        "p50": float(np.quantile(y_test_proba, 0.50)),
+        "p75": float(np.quantile(y_test_proba, 0.75)),
+        "p90": float(np.quantile(y_test_proba, 0.90)),
+        "p95": float(np.quantile(y_test_proba, 0.95)),
+        "p99": float(np.quantile(y_test_proba, 0.99)),
+        "max": float(np.max(y_test_proba)),
+    }
+    
+    # Store TRAIN+VAL proba percentiles for comparison (did test collapse relative to trainval?)
+    trainval_proba_summary = {
+        "min": float(np.min(y_trainval_proba)),
+        "p10": float(np.quantile(y_trainval_proba, 0.10)),
+        "p25": float(np.quantile(y_trainval_proba, 0.25)),
+        "p50": float(np.quantile(y_trainval_proba, 0.50)),
+        "p75": float(np.quantile(y_trainval_proba, 0.75)),
+        "p90": float(np.quantile(y_trainval_proba, 0.90)),
+        "p95": float(np.quantile(y_trainval_proba, 0.95)),
+        "p99": float(np.quantile(y_trainval_proba, 0.99)),
+        "max": float(np.max(y_trainval_proba)),
+    }
 
     # Save FINAL model (trained on TRAIN+VAL, calibrated) with rich artifacts
     model_out.parent.mkdir(parents=True, exist_ok=True)
@@ -576,6 +606,8 @@ def train_binary_model_with_holdout(
             "test_base_rate": float(y_test.mean()),
             "thresholds_summary": compute_threshold_metrics(y_test, y_test_proba),
             "proba_quantiles": quantiles,  # For production top-K cutoffs
+            "test_proba_summary": test_proba_summary,  # For spotting calibration collapse
+            "trainval_proba_summary": trainval_proba_summary,  # For comparing test vs trainval
             "feature_importance": importance_df.head(50).to_dict('records'),
             "trained_at": datetime.now().isoformat(),
         },
@@ -754,9 +786,14 @@ def evaluate_fold(
         metrics[f'top_{k}_k_actual'] = k_actual
     
     # Coverage at thresholds
-    for thresh in [0.5, 0.6, 0.7]:
-        coverage = (y_val_proba >= thresh).mean()
-        metrics[f'coverage_{thresh}'] = coverage
+    # Quantile coverage (stable across folds)
+    # Instead of fixed thresholds (which drift), we check precision of top buckets
+    # Note: coverage is by definition (100-q)% for these, so we just store the threshold value
+    # to see if the model's confidence is drifting
+    metrics['thresh_q90'] = float(np.quantile(y_val_proba, 0.90))
+    metrics['thresh_q95'] = float(np.quantile(y_val_proba, 0.95))
+    metrics['thresh_q99'] = float(np.quantile(y_val_proba, 0.99))
+
     
     return metrics
 
@@ -850,11 +887,13 @@ def run_walk_forward_validation(
             std_lift = np.std([m[f'top_{k}_lift'] for m in all_metrics])
             print(f"  Avg Top {k:2d}%: prec={avg_prec:.3f} lift={avg_lift:.2f}x (±{std_lift:.2f})")
         
-        # Coverage summary
-        print("\n  --- Avg Coverage @ Thresholds ---")
-        for thresh in [0.5, 0.6, 0.7]:
-            avg_cov = np.mean([m[f'coverage_{thresh}'] for m in all_metrics])
-            print(f"  P>={thresh}: {avg_cov:.1%} of days signaled")
+        
+        # Coverage summary (using dynamic quantiles instead of fixed thresholds)
+        print("\n  --- Avg Quantile Thresholds (Model Confidence) ---")
+        for q in ['q90', 'q95', 'q99']:
+            avg_thresh = np.mean([m[f'thresh_{q}'] for m in all_metrics])
+            std_thresh = np.std([m[f'thresh_{q}'] for m in all_metrics])
+            print(f"  {q}: avg_thresh={avg_thresh:.3f} (±{std_thresh:.3f})")
     
     return all_metrics
 
