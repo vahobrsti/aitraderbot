@@ -4,7 +4,8 @@ Train long/short ML models from feature CSV.
 Supports holdout validation, walk-forward, and production modes.
 """
 
-
+import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
@@ -16,6 +17,30 @@ from ml.training import (
     train_production_model,
     FeatureMode,
 )
+
+S3_BUCKET = "aioptionstradermodel"
+
+
+def backup_models_to_s3(out_dir: Path, stdout_write) -> None:
+    """Backup existing models to S3 before overwriting."""
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    
+    for model_name in ["long_model.joblib", "short_model.joblib"]:
+        local_path = out_dir / model_name
+        if local_path.exists():
+            s3_key = f"models/{model_name.replace('.joblib', '')}_{timestamp}.joblib"
+            s3_uri = f"s3://{S3_BUCKET}/{s3_key}"
+            
+            result = subprocess.run(
+                ["aws", "s3", "cp", str(local_path), s3_uri],
+                capture_output=True,
+                text=True,
+            )
+            
+            if result.returncode == 0:
+                stdout_write(f"✓ Backed up {model_name} → {s3_uri}")
+            else:
+                stdout_write(f"✗ Failed to backup {model_name}: {result.stderr}")
 
 
 class Command(BaseCommand):
@@ -90,6 +115,10 @@ class Command(BaseCommand):
         if use_production:
             # Production mode: train on ALL data
             self.stdout.write(self.style.WARNING("PRODUCTION MODE: Training on ALL data (no holdout)"))
+            
+            # Backup existing models to S3 before overwriting
+            self.stdout.write("Backing up existing models to S3...")
+            backup_models_to_s3(out_dir, self.stdout.write)
             
             self.stdout.write(self.style.MIGRATE_HEADING("Training LONG production model..."))
             train_production_model(
