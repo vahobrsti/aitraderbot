@@ -180,7 +180,37 @@ STRATEGY_MAP = {
         rationale="No buyers, sellers in control. Directional downside with protection.",
     ),
     
-    # 🟡 NO TRADE
+    # � BULL PROBE (Exploratory Long)
+    MarketState.BULL_PROBE: StrategyRecommendation(
+        market_state=MarketState.BULL_PROBE,
+        primary_structures=[
+            OptionStructure.CALL_SPREAD,
+        ],
+        secondary_structures=[
+            OptionStructure.CALL_DIAGONAL,
+        ],
+        strike_guidance=StrikeSelection.ATM,
+        dte=DTEGuidance(min_dte=30, max_dte=60, optimal_dte=45),
+        sizing=PositionSizing(high_confidence=0.02, medium_confidence=0.015, low_confidence=0.0),
+        rationale="Early signs of buying. Small probe position with defined risk.",
+    ),
+    
+    # 🔍 BEAR PROBE (Exploratory Short)
+    MarketState.BEAR_PROBE: StrategyRecommendation(
+        market_state=MarketState.BEAR_PROBE,
+        primary_structures=[
+            OptionStructure.PUT_SPREAD,
+        ],
+        secondary_structures=[
+            OptionStructure.PUT_DIAGONAL,
+        ],
+        strike_guidance=StrikeSelection.ATM,
+        dte=DTEGuidance(min_dte=30, max_dte=60, optimal_dte=45),
+        sizing=PositionSizing(high_confidence=0.02, medium_confidence=0.015, low_confidence=0.0),
+        rationale="Early signs of distribution. Small probe position with defined risk.",
+    ),
+    
+    # �🟡 NO TRADE
     MarketState.NO_TRADE: StrategyRecommendation(
         market_state=MarketState.NO_TRADE,
         primary_structures=[
