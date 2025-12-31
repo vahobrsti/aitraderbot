@@ -46,17 +46,30 @@ class Command(BaseCommand):
             action="store_true",
             help="Send Telegram notification (only for non-NO_TRADE signals)",
         )
+        parser.add_argument(
+            "--date",
+            type=str,
+            default=None,
+            help="Target date (YYYY-MM-DD) - defaults to latest available",
+        )
 
     def handle(self, *args, **options):
+        from datetime import datetime
+        
         service = SignalService(
             long_model_path=options["long_model"],
             short_model_path=options["short_model"],
             horizon_days=options["horizon"],
             target_return=options["target_return"],
         )
+        
+        # Parse optional date
+        target_date = None
+        if options["date"]:
+            target_date = datetime.strptime(options["date"], "%Y-%m-%d").date()
 
         try:
-            signal = service.generate_and_persist()
+            signal = service.generate_and_persist(target_date)
             
             if options["verbose"]:
                 self.stdout.write(f"\n{'='*50}")
@@ -86,8 +99,13 @@ class Command(BaseCommand):
             raise
 
     def _send_telegram_notification(self, signal, verbose: bool):
-        """Send Telegram notification for non-NO_TRADE signals."""
-        if signal.trade_decision == "NO_TRADE":
+        """Send Telegram notification for tradeable or vetoed signals."""
+        # Check if overlay vetoed (fusion wanted to trade but overlay said no)
+        no_trade_reasons = signal.no_trade_reasons or []
+        is_overlay_veto = "OVERLAY_VETO" in no_trade_reasons
+        
+        # Skip NO_TRADE unless it's a vetoed signal
+        if signal.trade_decision == "NO_TRADE" and not is_overlay_veto:
             if verbose:
                 self.stdout.write("Skipping Telegram notification (NO_TRADE)")
             return

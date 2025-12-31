@@ -32,6 +32,9 @@ class SignalMessage:
     strategy_rationale: str
     tactical_put_active: bool = False
     tactical_put_strategy: str = ""
+    overlay_veto: bool = False
+    overlay_reason: str = ""
+    score_components: dict = None  # MDIA, Whales, MVRV breakdown
 
 
 class TelegramNotifier:
@@ -84,37 +87,54 @@ class TelegramNotifier:
         decision_emoji = self._get_decision_emoji(signal.trade_decision)
         confidence_emoji = self._get_confidence_emoji(signal.fusion_confidence)
         
-        # Header
-        msg = f"{decision_emoji} *{signal.trade_decision}* Signal\n"
-        msg += f"📅 {signal.date}\n\n"
+        # Header - different for vetoed signals
+        if signal.overlay_veto:
+            msg = f"⛔ *SIGNAL VETOED*\n"
+            msg += f"📅 {signal.date}\n\n"
+            msg += f"⚠️ *Veto Reason:* `{signal.overlay_reason}`\n\n"
+        else:
+            msg = f"{decision_emoji} *{signal.trade_decision}* Signal\n"
+            msg += f"📅 {signal.date}\n\n"
         
         # Market State
         msg += f"*Fusion State:* `{signal.fusion_state}`\n"
-        msg += f"*Score:* {signal.fusion_score:+d} {confidence_emoji} ({signal.fusion_confidence})\n\n"
+        msg += f"*Score:* {signal.fusion_score:+d} {confidence_emoji} ({signal.fusion_confidence})\n"
+        
+        # Score breakdown (if available)
+        if signal.score_components:
+            mdia = signal.score_components.get('mdia', {})
+            whale = signal.score_components.get('whale', {})
+            mvrv = signal.score_components.get('mvrv_ls', {})
+            msg += f"  • MDIA: `{mdia.get('score', 0):+d}` ({mdia.get('label', 'n/a')})\n"
+            msg += f"  • Whales: `{whale.get('score', 0):+d}` ({whale.get('label', 'n/a')})\n"
+            msg += f"  • MVRV: `{mvrv.get('score', 0):+d}` ({mvrv.get('label', 'n/a')})\n"
+        msg += "\n"
         
         # ML Probabilities
         msg += f"*ML Probabilities:*\n"
         msg += f"  📈 Long: `{signal.p_long:.1%}`\n"
         msg += f"  📉 Short: `{signal.p_short:.1%}`\n\n"
         
-        # Position Sizing
-        msg += f"*Size Multiplier:* `{signal.size_multiplier:.2f}x`\n\n"
+        # Position Sizing (skip for vetoed)
+        if not signal.overlay_veto:
+            msg += f"*Size Multiplier:* `{signal.size_multiplier:.2f}x`\n\n"
         
         # Tactical Put (if active)
         if signal.tactical_put_active:
             msg += f"🛡️ *Tactical Put:* `{signal.tactical_put_strategy}`\n\n"
         
-        # Option Strategy
-        if signal.option_structures:
-            msg += f"*Strategy:* `{signal.option_structures}`\n"
-        if signal.strike_guidance:
-            msg += f"*Strike:* `{signal.strike_guidance}`\n"
-        if signal.dte_range:
-            msg += f"*DTE:* `{signal.dte_range}`\n"
-        
-        # Rationale
-        if signal.strategy_rationale:
-            msg += f"\n💡 _{signal.strategy_rationale}_"
+        # Option Strategy (skip for vetoed)
+        if not signal.overlay_veto:
+            if signal.option_structures:
+                msg += f"*Strategy:* `{signal.option_structures}`\n"
+            if signal.strike_guidance:
+                msg += f"*Strike:* `{signal.strike_guidance}`\n"
+            if signal.dte_range:
+                msg += f"*DTE:* `{signal.dte_range}`\n"
+            
+            # Rationale
+            if signal.strategy_rationale:
+                msg += f"\n💡 _{signal.strategy_rationale}_"
         
         return msg
     
@@ -138,7 +158,8 @@ class TelegramNotifier:
         Returns:
             True if sent successfully, False otherwise.
         """
-        if signal.trade_decision == "NO_TRADE":
+        # Skip NO_TRADE unless it's a vetoed signal (fusion wanted to trade)
+        if signal.trade_decision == "NO_TRADE" and not signal.overlay_veto:
             return False
         
         message = self._format_message(signal)
@@ -152,8 +173,12 @@ class TelegramNotifier:
             daily_signal: DailySignal model instance
             
         Returns:
-            True if sent, False if NO_TRADE or error.
+            True if sent, False if NO_TRADE (non-vetoed) or error.
         """
+        # Check if this is an overlay veto (OVERLAY_VETO in no_trade_reasons)
+        no_trade_reasons = daily_signal.no_trade_reasons or []
+        overlay_veto = "OVERLAY_VETO" in no_trade_reasons
+        
         signal = SignalMessage(
             date=str(daily_signal.date),
             trade_decision=daily_signal.trade_decision,
@@ -169,5 +194,8 @@ class TelegramNotifier:
             strategy_rationale=daily_signal.strategy_rationale,
             tactical_put_active=daily_signal.tactical_put_active,
             tactical_put_strategy=daily_signal.tactical_put_strategy,
+            overlay_veto=overlay_veto,
+            overlay_reason=daily_signal.overlay_reason if overlay_veto else "",
+            score_components=daily_signal.score_components or {},
         )
         return self.send_signal(signal)
