@@ -9,6 +9,7 @@ Combines:
 from django.core.management.base import BaseCommand
 from pathlib import Path
 import pandas as pd
+import joblib
 
 from signals.fusion import fuse_signals, add_fusion_features, MarketState, FusionResult, Confidence
 from signals.overlays import apply_overlays, get_size_multiplier
@@ -31,18 +32,71 @@ class Command(BaseCommand):
             default=None,
             help="Filter to specific year (e.g., 2024)",
         )
+        parser.add_argument(
+            "--no-overlay",
+            action="store_true",
+            help="Disable overlay filtering - show all fusion-qualified trades",
+        )
+        parser.add_argument(
+            "--no-cooldown",
+            action="store_true",
+            help="Disable cooldown - show every signal switch",
+        )
+        parser.add_argument(
+            "--long-model",
+            type=str,
+            default="models/long_model.joblib",
+            help="Path to long model",
+        )
+        parser.add_argument(
+            "--short-model",
+            type=str,
+            default="models/short_model.joblib",
+            help="Path to short model",
+        )
+        parser.add_argument(
+            "--type",
+            type=str,
+            choices=["long", "short", "all"],
+            default="all",
+            help="Filter by trade type: long, short, or all (default: all)",
+        )
+        parser.add_argument(
+            "--probability",
+            type=int,
+            default=0,
+            help="Minimum ML probability threshold (0-100). Filters p_long for longs, p_short for shorts.",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["csv"])
         year = options.get("year")
+        no_overlay = options.get("no_overlay", False)
+        no_cooldown = options.get("no_cooldown", False)
+        long_model_path = Path(options["long_model"])
+        short_model_path = Path(options["short_model"])
+        trade_type_filter = options.get("type", "all")
+        prob_threshold = options.get("probability", 0) / 100.0  # Convert to decimal
 
         if not csv_path.exists():
             self.stderr.write(f"CSV not found: {csv_path}")
             return
 
+        # Load ML models
+        long_bundle = joblib.load(long_model_path)
+        short_bundle = joblib.load(short_model_path)
+        long_model = long_bundle["model"]
+        long_feats = long_bundle["feature_names"]
+        short_model = short_bundle["model"]
+        short_feats = short_bundle["feature_names"]
+
         # Load and prepare data
         df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
         df = add_fusion_features(df)
+        
+        # Pre-compute ML probabilities for all rows
+        df["p_long"] = long_model.predict_proba(df[long_feats])[:, 1]
+        df["p_short"] = short_model.predict_proba(df[short_feats])[:, 1]
         
         if year:
             df = df.loc[f'{year}-01-01':f'{year}-12-31']
@@ -66,9 +120,18 @@ class Command(BaseCommand):
         
         for i, (date, row) in enumerate(df.iterrows()):
             result = fuse_signals(row)
-            overlay = apply_overlays(result, row)
-            size_mult = get_size_multiplier(overlay)
             date_str = date.strftime('%Y-%m-%d')
+            
+            # Handle overlay bypass
+            if no_overlay:
+                size_mult = 1.0
+                long_veto = False
+                short_veto = False
+            else:
+                overlay = apply_overlays(result, row)
+                size_mult = get_size_multiplier(overlay)
+                long_veto = overlay.long_veto_strength >= 2
+                short_veto = overlay.short_veto_strength >= 2
             
             is_bull_probe = result.state == MarketState.BULL_PROBE
             is_bear_probe = result.state == MarketState.BEAR_PROBE
@@ -81,24 +144,25 @@ class Command(BaseCommand):
             if is_bear_probe and result.score > -2:
                 continue  # skip weak bear probes
             
-            # Cooldown checks
-            # Core LONG trades
-            if is_long_state and last_long_date is not None:
-                if (date - last_long_date).days < core_cooldown_days:
-                    continue  # skip clustered longs
-            
-            # Core SHORT trades
-            if is_short_state and last_short_date is not None:
-                if (date - last_short_date).days < core_cooldown_days:
-                    continue  # skip clustered shorts
-            
-            # Probe cooldowns (existing)
-            if is_bull_probe and last_long_date is not None:
-                if (date - last_long_date).days < probe_cooldown_days:
-                    continue
-            if is_bear_probe and last_short_date is not None:
-                if (date - last_short_date).days < probe_cooldown_days:
-                    continue
+            # Cooldown checks (skip if --no-cooldown)
+            if not no_cooldown:
+                # Core LONG trades
+                if is_long_state and last_long_date is not None:
+                    if (date - last_long_date).days < core_cooldown_days:
+                        continue  # skip clustered longs
+                
+                # Core SHORT trades
+                if is_short_state and last_short_date is not None:
+                    if (date - last_short_date).days < core_cooldown_days:
+                        continue  # skip clustered shorts
+                
+                # Probe cooldowns
+                if is_bull_probe and last_long_date is not None:
+                    if (date - last_long_date).days < probe_cooldown_days:
+                        continue
+                if is_bear_probe and last_short_date is not None:
+                    if (date - last_short_date).days < probe_cooldown_days:
+                        continue
             
             # Score-based probe sizing (instead of flat 0.5)
             if is_bull_probe:
@@ -121,9 +185,9 @@ class Command(BaseCommand):
             
             # LONG trades
             if result.state in long_states and size_mult > 0:
-                if overlay.long_veto_strength < 2:  # simplified veto check
+                if not long_veto:  # simplified veto check
                     edge_label = ""
-                    if overlay.long_edge_active:
+                    if not no_overlay and overlay.long_edge_active:
                         edge_label = " +EDGE" if overlay.edge_strength == 2 else " +edge"
                     trade_type = 'BULL_PROBE' if is_bull_probe else 'LONG'
                     all_trades.append({
@@ -133,6 +197,8 @@ class Command(BaseCommand):
                         'state': result.state.value,
                         'size': size_mult,
                         'confidence': result.confidence.value,
+                        'p_long': row['p_long'],
+                        'p_short': row['p_short'],
                         'notes': f"score={result.score:+d}{edge_label}",
                     })
                     # Update cooldown tracker
@@ -140,7 +206,7 @@ class Command(BaseCommand):
             
             # SHORT trades (from short states)
             if result.state in short_states and size_mult > 0:
-                if overlay.short_veto_strength < 2:  # simplified veto check
+                if not short_veto:  # simplified veto check
                     trade_type = 'BEAR_PROBE' if is_bear_probe else 'PRIMARY_SHORT'
                     all_trades.append({
                         'date': date_str,
@@ -149,6 +215,8 @@ class Command(BaseCommand):
                         'state': result.state.value,
                         'size': size_mult,
                         'confidence': result.confidence.value,
+                        'p_long': row['p_long'],
+                        'p_short': row['p_short'],
                         'notes': f"score={result.score:+d}",
                     })
                     # Update cooldown tracker
@@ -157,8 +225,8 @@ class Command(BaseCommand):
             # === TACTICAL PUTS (inside bull regimes) ===
             # Apply cooldown to tactical puts too
             if result.state in long_states:
-                # Skip if within cooldown
-                if last_tactical_date is not None and (date - last_tactical_date).days < tactical_cooldown_days:
+                # Skip if within cooldown (unless --no-cooldown)
+                if not no_cooldown and last_tactical_date is not None and (date - last_tactical_date).days < tactical_cooldown_days:
                     continue
                     
                 tactical = tactical_put_inside_bull(result, row)
@@ -171,12 +239,30 @@ class Command(BaseCommand):
                         'state': result.state.value,
                         'size': tactical.size_mult,
                         'confidence': 'tactical',
+                        'p_long': row['p_long'],
+                        'p_short': row['p_short'],
                         'notes': f"{str_label} (hedge inside bull)",
                     })
                     last_tactical_date = date
         
         # Sort by date
         all_trades.sort(key=lambda x: x['date'])
+        
+        # Apply type and probability filters
+        if trade_type_filter != "all":
+            if trade_type_filter == "long":
+                all_trades = [t for t in all_trades if t['direction'] == 'LONG']
+            else:  # short
+                all_trades = [t for t in all_trades if t['direction'] in ('SHORT', 'PUT')]
+        
+        if prob_threshold > 0:
+            filtered = []
+            for t in all_trades:
+                if t['direction'] == 'LONG' and t['p_long'] >= prob_threshold:
+                    filtered.append(t)
+                elif t['direction'] in ('SHORT', 'PUT') and t['p_short'] >= prob_threshold:
+                    filtered.append(t)
+            all_trades = filtered
         
         # Print summary
         self.stdout.write("=" * 90)
@@ -199,15 +285,15 @@ class Command(BaseCommand):
         self.stdout.write(f"TOTAL:               {len(all_trades):3d}")
         
         # Print all trades
-        self.stdout.write("\n" + "-" * 90)
-        self.stdout.write(f"{'Date':12s} | {'Type':14s} | {'Dir':8s} | {'State':20s} | {'Size':5s} | Notes")
-        self.stdout.write("-" * 90)
+        self.stdout.write("\n" + "-" * 120)
+        self.stdout.write(f"{'Date':12s} | {'Type':14s} | {'Dir':8s} | {'State':20s} | {'Size':5s} | {'p_long':6s} | {'p_short':7s} | Notes")
+        self.stdout.write("-" * 120)
         
         for t in all_trades:
             dir_emoji = "🟢" if t['direction'] == 'LONG' else "🔴"
             self.stdout.write(
                 f"{t['date']:12s} | {t['type']:14s} | {dir_emoji} {t['direction']:5s} | "
-                f"{t['state']:20s} | {t['size']:.2f}  | {t['notes']}"
+                f"{t['state']:20s} | {t['size']:.2f}  | {t['p_long']:.2f}   | {t['p_short']:.2f}    | {t['notes']}"
             )
         
         self.stdout.write("-" * 90)
