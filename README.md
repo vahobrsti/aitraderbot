@@ -315,11 +315,11 @@ python manage.py create_api_token --username telegram_bot
 # Build feature CSV from raw data
 python manage.py build_features
 
-# Generate and persist today's signal
+# Generate and persist today's signal (with verbose output)
 python manage.py generate_signal --verbose
 
-# Score latest day with full output (no persistence)
-python manage.py score_latest
+# Generate signal without persistence (dry run)
+python manage.py generate_signal --verbose --no-persist
 
 # List all trade opportunities
 python manage.py list_trades --year 2024
