@@ -52,6 +52,18 @@ class Command(BaseCommand):
             default=None,
             help="Target date (YYYY-MM-DD) - defaults to latest available",
         )
+        parser.add_argument(
+            "--persist",
+            action="store_true",
+            default=True,
+            help="Persist signal to database (default: True)",
+        )
+        parser.add_argument(
+            "--no-persist",
+            action="store_false",
+            dest="persist",
+            help="Don't persist signal to database (dry run)",
+        )
 
     def handle(self, *args, **options):
         from datetime import datetime
@@ -69,7 +81,28 @@ class Command(BaseCommand):
             target_date = datetime.strptime(options["date"], "%Y-%m-%d").date()
 
         try:
-            signal = service.generate_and_persist(target_date)
+            # Generate signal
+            result = service.generate_signal(target_date)
+            
+            # Persist if requested
+            if options["persist"]:
+                signal = service.persist_signal(result)
+            else:
+                # Create a mock object with the same attributes for output
+                from types import SimpleNamespace
+                signal = SimpleNamespace(
+                    date=result.date,
+                    p_long=result.p_long,
+                    p_short=result.p_short,
+                    fusion_state=result.fusion_state,
+                    fusion_score=result.fusion_score,
+                    trade_decision=result.trade_decision,
+                    size_multiplier=result.size_multiplier,
+                    tactical_put_active=result.tactical_put_active,
+                    tactical_put_strategy=result.tactical_put_strategy,
+                    no_trade_reasons=result.no_trade_reasons,
+                )
+                self.stdout.write(self.style.WARNING("[DRY RUN] Signal not persisted"))
             
             if options["verbose"]:
                 self.stdout.write(f"\n{'='*50}")

@@ -122,8 +122,8 @@ tail -f /var/www/app/logs/cron.log
 # Check database row count
 python manage.py shell -c "from datafeed.models import RawDailyData; print(f'Rows: {RawDailyData.objects.count()}')"
 
-# View latest signal
-python manage.py score_latest
+# View latest signal (verbose output)
+python manage.py generate_signal --verbose
 
 # Restart Gunicorn after code changes
 sudo systemctl restart gunicorn
