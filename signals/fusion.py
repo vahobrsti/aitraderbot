@@ -114,13 +114,14 @@ def compute_confidence_score(row: pd.Series) -> tuple[int, dict]:
         components['mvrv_ls'] = {'score': 0, 'label': 'neutral'}
     
     # Conflict penalty
+    # NOTE: Only mega whale and MVRV conflicts apply penalty
+    # Small whale conflicts ignored - mega whales have more market impact
     conflicts = 0
     if row.get('mvrv_ls_conflict', 0) == 1:
         conflicts += 1
     if row.get('whale_mega_conflict', 0) == 1:
         conflicts += 1
-    if row.get('whale_small_conflict', 0) == 1:
-        conflicts += 1
+    # Removed: whale_small_conflict penalty
     
     if conflicts > 0:
         score -= conflicts
