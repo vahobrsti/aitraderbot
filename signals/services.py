@@ -51,6 +51,8 @@ class SignalResult:
     # Versioning
     decision_version: str
     model_versions: dict
+    # Short signal source tracking
+    short_source: Optional[str] = None  # 'rule' or 'score' for short setups
 
 
 class SignalService:
@@ -195,6 +197,7 @@ class SignalService:
             effective_size=effective_size,
             decision_version=decision_version,
             model_versions=model_versions,
+            short_source=fusion_result.short_source,
         )
     
     def _determine_trade_decision(
@@ -256,8 +259,9 @@ class SignalService:
             return "CALL", f"Fusion: {fusion_result.state.value}", [], decision_trace
         
         if is_short:
-            decision_trace.append(f"state={fusion_result.state.value} -> PUT")
-            return "PUT", f"Fusion: {fusion_result.state.value}", [], decision_trace
+            source_label = f"[{fusion_result.short_source}]" if fusion_result.short_source else ""
+            decision_trace.append(f"state={fusion_result.state.value} {source_label} -> PUT")
+            return "PUT", f"Fusion: {fusion_result.state.value} {source_label}".strip(), [], decision_trace
         
         # Check probes
         if fusion_result.state == MarketState.BULL_PROBE:
@@ -265,8 +269,9 @@ class SignalService:
             return "CALL", f"Bull probe, score={fusion_result.score}", [], decision_trace
         
         if fusion_result.state == MarketState.BEAR_PROBE:
-            decision_trace.append(f"bear_probe(score={fusion_result.score}) -> PUT")
-            return "PUT", f"Bear probe, score={fusion_result.score}", [], decision_trace
+            source_label = f"[{fusion_result.short_source}]" if fusion_result.short_source else ""
+            decision_trace.append(f"bear_probe(score={fusion_result.score}) {source_label} -> PUT")
+            return "PUT", f"Bear probe, score={fusion_result.score} {source_label}".strip(), [], decision_trace
         
         # Catch-all: if we get here, it's a state we don't trade
         no_trade_reasons.append("STATE_NOT_TRADEABLE")

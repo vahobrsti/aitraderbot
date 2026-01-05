@@ -502,6 +502,10 @@ def build_features_and_labels_from_raw(
     # High values (near peak) = shorts more reliable
     mvrv_60d = df["mvrv_usd_60d"]
     
+    # IMPORTANT: Include raw MVRV-60d for absolute level veto
+    # When mvrv_60d < 1.0, short-term holders are at a loss - shorting is dangerous
+    feats["mvrv_60d"] = mvrv_60d
+    
     # Feature 1: mvrv_usd_60d percentile over last 60 days (0-1 scale)
     # High percentile = near recent high = shorts more reliable
     feats["mvrv_60d_pct_rank"] = mvrv_60d.rolling(60, min_periods=20).apply(

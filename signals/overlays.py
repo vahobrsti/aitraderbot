@@ -197,11 +197,22 @@ def compute_short_overlay(row: pd.Series, is_confirmed_bear: bool) -> tuple[int,
     - <= 0.35: Soft veto (shorts less reliable) - only for DISTRIBUTION_RISK
     - <= 0.25: Hard veto (shorts unreliable)
     
+    ABSOLUTE LEVEL CHECK (mvrv_60d):
+    - mvrv_60d < 1.0: HARD VETO - short-term holders underwater, shorting is dangerous
+    
     For DISTRIBUTION_RISK: fail-closed (require score >= 0.35 to trade)
     For BEAR_CONTINUATION: fail-open (only hard veto, structure confirms bear)
     
     Returns (edge_strength, veto_strength, reason)
     """
+    # === ABSOLUTE LEVEL CHECK (Priority) ===
+    # When MVRV-60d < 1.0, short-term holders are at a loss - shorting is dangerous
+    mvrv_60d_raw = row.get("mvrv_60d", None)
+    if mvrv_60d_raw is not None and not pd.isna(mvrv_60d_raw):
+        if mvrv_60d_raw < 0.95:
+            return 0, 2, f"HARD: MVRV-60d < 0.95 (holders underwater: {mvrv_60d_raw:.2f})"
+    
+    # === RELATIVE NEAR-PEAK SCORE (Secondary) ===
     score = compute_near_peak_score(row)
     
     # Handle missing data
