@@ -551,7 +551,33 @@ class Command(BaseCommand):
         self.stdout.write(f"├── Whale:    {components.get('whale', {}).get('score', 0):+d} ({components.get('whale', {}).get('label', 'neutral')})")
         self.stdout.write(f"├── MVRV-LS:  {components.get('mvrv_ls', {}).get('score', 0):+d} ({components.get('mvrv_ls', {}).get('label', 'neutral')})")
         conflicts = components.get('conflicts', {}).get('score', 0)
-        self.stdout.write(f"└── Conflicts: {conflicts}")
+        # Show conflict detail
+        mega_conflict = row.get('whale_mega_conflict', 0) == 1
+        mvrv_conflict = row.get('mvrv_ls_conflict', 0) == 1
+        small_conflict = row.get('whale_small_conflict', 0) == 1
+        conflict_detail = []
+        if mega_conflict:
+            conflict_detail.append("mega_whale")
+        if mvrv_conflict:
+            conflict_detail.append("mvrv_ls")
+        if small_conflict:
+            conflict_detail.append("small_whale(ignored)")
+        conflict_str = ", ".join(conflict_detail) if conflict_detail else "none"
+        self.stdout.write(f"└── Conflicts: {conflicts} [{conflict_str}]")
+        
+        # === SHORT SOURCE (if applicable) ===
+        if result.short_source:
+            self.stdout.write(f"\n📊 SHORT SOURCE: {result.short_source.upper()}")
+            if result.short_source == 'score':
+                # Show weighted short score details
+                short_score_info = components.get('short_score', {})
+                short_score_val = short_score_info.get('score', 0)
+                short_comps = short_score_info.get('components', {})
+                self.stdout.write(f"   Weighted Short Score: {short_score_val:+.1f}")
+                self.stdout.write(f"   ├── MDIA:    {short_comps.get('mdia', {}).get('score', 0):+.1f} ({short_comps.get('mdia', {}).get('label', 'neutral')})")
+                self.stdout.write(f"   ├── Whale:   {short_comps.get('whale', {}).get('score', 0):+.1f} ({short_comps.get('whale', {}).get('label', 'neutral')}) [1.5x weight]")
+                self.stdout.write(f"   ├── MVRV-LS: {short_comps.get('mvrv_ls', {}).get('score', 0):+.1f} ({short_comps.get('mvrv_ls', {}).get('label', 'neutral')})")
+                self.stdout.write(f"   └── Note: Score-based catches distribution tops rules miss")
         
         # === MDIA BREAKDOWN ===
         self.stdout.write("\n" + "─" * 70)
@@ -563,7 +589,7 @@ class Command(BaseCommand):
         mdia_buckets = []
         for h in mdia_horizons:
             bucket_col = f'mdia_bucket_{h}d'
-            z_col = f'mdia_delta_z_{h}d'
+            z_col = f'mdia_slope_z_{h}d'
             if bucket_col in row:
                 bucket = int(row.get(bucket_col, 0))
                 z = row.get(z_col, 0)
