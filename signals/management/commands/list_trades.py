@@ -208,6 +208,8 @@ class Command(BaseCommand):
             if result.state in short_states and size_mult > 0:
                 if not short_veto:  # simplified veto check
                     trade_type = 'BEAR_PROBE' if is_bear_probe else 'PRIMARY_SHORT'
+                    # Include short_source in notes
+                    source_label = f"[{result.short_source}]" if result.short_source else ""
                     all_trades.append({
                         'date': date_str,
                         'type': trade_type,
@@ -217,7 +219,7 @@ class Command(BaseCommand):
                         'confidence': result.confidence.value,
                         'p_long': row['p_long'],
                         'p_short': row['p_short'],
-                        'notes': f"score={result.score:+d}",
+                        'notes': f"score={result.score:+d} {source_label}".strip(),
                     })
                     # Update cooldown tracker
                     last_short_date = date
