@@ -4,6 +4,7 @@ Train long/short ML models from feature CSV.
 Supports holdout validation, walk-forward, and production modes.
 """
 
+import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -20,10 +21,41 @@ from ml.training import (
 
 S3_BUCKET = "aioptionstradermodel"
 
+# Common AWS CLI installation paths (for cron environments with minimal PATH)
+AWS_CLI_PATHS = [
+    "/usr/local/bin/aws",
+    "/usr/bin/aws",
+    "/home/ubuntu/.local/bin/aws",
+    "/root/.local/bin/aws",
+]
+
+
+def find_aws_cli() -> str:
+    """Find the AWS CLI binary, checking PATH and common locations."""
+    # First try PATH (works in interactive shells)
+    aws_path = shutil.which("aws")
+    if aws_path:
+        return aws_path
+    
+    # Fall back to common installation paths (for cron)
+    for path in AWS_CLI_PATHS:
+        if Path(path).exists():
+            return path
+    
+    raise FileNotFoundError(
+        "AWS CLI not found. Install it or add its path to AWS_CLI_PATHS."
+    )
+
 
 def backup_models_to_s3(out_dir: Path, stdout_write) -> None:
     """Backup existing models to S3 before overwriting."""
     timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    
+    try:
+        aws_cli = find_aws_cli()
+    except FileNotFoundError as e:
+        stdout_write(f"⚠ Skipping S3 backup: {e}")
+        return
     
     for model_name in ["long_model.joblib", "short_model.joblib"]:
         local_path = out_dir / model_name
@@ -32,7 +64,7 @@ def backup_models_to_s3(out_dir: Path, stdout_write) -> None:
             s3_uri = f"s3://{S3_BUCKET}/{s3_key}"
             
             result = subprocess.run(
-                ["aws", "s3", "cp", str(local_path), s3_uri],
+                [aws_cli, "s3", "cp", str(local_path), s3_uri],
                 capture_output=True,
                 text=True,
             )
