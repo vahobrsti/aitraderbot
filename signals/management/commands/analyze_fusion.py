@@ -623,6 +623,8 @@ class Command(BaseCommand):
         self.stdout.write("\n" + "─" * 70)
         self.stdout.write("WHALE BREAKDOWN (Smart Money Intent)")
         self.stdout.write("─" * 70)
+        mvrv_val = row.get('mvrv_60d', 0.0)
+        self.stdout.write(f"Context: MVRV-60d = {mvrv_val:.2f} (used for profit-taking logic)")
         
         whale_horizons = [1, 2, 4, 7]
         
@@ -662,6 +664,7 @@ class Command(BaseCommand):
         level = row.get('mvrv_ls_level', 0)
         pct = row.get('mvrv_ls_roll_pct_365d', 0.5)
         level_labels = {-2: 'extreme_negative', -1: 'negative', 0: 'neutral', 1: 'positive', 2: 'extreme_positive'}
+        mvrv_val = row.get('mvrv_60d', 0.0)
         self.stdout.write(f"Level: {int(level)} ({level_labels.get(int(level), 'unknown')}) | Percentile: {pct*100:.0f}%")
         
         # Trend buckets
