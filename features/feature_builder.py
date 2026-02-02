@@ -623,8 +623,25 @@ def build_features_and_labels_from_raw(
             # Directional bucket: +1 (accum), 0 (flat), -1 (distrib)
             thresh = whale_thresholds[h]
             bucket = pd.Series(0, index=df.index)
-            bucket.loc[delta_z > thresh] = 1   # Accumulation
-            bucket.loc[delta_z < -thresh] = -1  # Distribution
+            
+            # Standard Z-score logic
+            is_strong_z = delta_z > thresh
+            
+            # Enhanced Logic: If MVRV-60d < 1.0 (Undervalued), lower threshold or accept positive Z
+            # Logic: If whales are buying (Z > 0) AND price is cheap (MVRV < 1), count it!
+            if group == 'mega':
+                # For Mega whales, be more sensitive at bottoms
+                is_cheap_accum = (df['mvrv_usd_60d'] < 1.0) & (delta_z > 0.2) # >0.2 to avoid pure noise
+                bucket.loc[is_strong_z | is_cheap_accum] = 1
+                
+                # Check for PROFIT TAKING (selling when in profit)
+                is_strong_distrib = delta_z < -thresh
+                # REQUIRE STRONGER SELLING: -0.65 (was -0.2) to filter out minor trimming
+                is_profit_distrib = (df['mvrv_usd_60d'] > 1.1) & (delta_z < -0.65)
+                bucket.loc[is_strong_distrib | is_profit_distrib] = -1
+            else:
+                bucket.loc[is_strong_z] = 1
+                bucket.loc[delta_z < -thresh] = -1
             
             feats[f'whale_{group}_bucket_{h}d'] = bucket.astype(int)
             group_buckets[group][h] = bucket

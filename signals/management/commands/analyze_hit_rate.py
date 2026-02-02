@@ -58,6 +58,18 @@ class Command(BaseCommand):
             default="models/short_model.joblib",
             help="Path to short model",
         )
+        parser.add_argument(
+            "--type",
+            type=str,
+            default=None,
+            help="Filter by trade type: LONG, BULL_PROBE, PRIMARY_SHORT, BEAR_PROBE, TACTICAL_PUT",
+        )
+        parser.add_argument(
+            "--source",
+            type=str,
+            default=None,
+            help="Filter by source: rule, score, tactical",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["csv"])
@@ -66,6 +78,8 @@ class Command(BaseCommand):
         no_cooldown = options.get("no_cooldown", False)
         long_model_path = Path(options["long_model"])
         short_model_path = Path(options["short_model"])
+        type_filter = options.get("type")
+        source_filter = options.get("source")
 
         if not csv_path.exists():
             self.stderr.write(f"CSV not found: {csv_path}")
@@ -124,6 +138,10 @@ class Command(BaseCommand):
         self.stdout.write(f"Years: {years_to_analyze}")
         self.stdout.write(f"Overlay: {'OFF' if no_overlay else 'ON'}")
         self.stdout.write(f"Cooldown: {'OFF' if no_cooldown else 'ON'}")
+        if type_filter:
+            self.stdout.write(f"Type Filter: {type_filter}")
+        if source_filter:
+            self.stdout.write(f"Source Filter: {source_filter}")
         self.stdout.write("")
 
         for year in years_to_analyze:
@@ -263,6 +281,16 @@ class Command(BaseCommand):
             return
 
         trades_df = pd.DataFrame(all_trades)
+        
+        # Apply filters
+        if type_filter:
+            trades_df = trades_df[trades_df["type"] == type_filter]
+        if source_filter:
+            trades_df = trades_df[trades_df["source"] == source_filter]
+        
+        if len(trades_df) == 0:
+            self.stdout.write("No trades match the specified filters.")
+            return
 
         # === SUMMARY BY YEAR ===
         self.stdout.write(f"\n{'=' * 100}")
