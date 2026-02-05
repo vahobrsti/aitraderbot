@@ -33,7 +33,7 @@ class Command(BaseCommand):
             "--target_return",
             type=float,
             default=0.05,
-            help="Target return threshold (e.g. 0.05 = +5%)",
+            help="Target return threshold (e.g. 0.05 = +5%%)",
         )
 
     def handle(self, *args, **options):
