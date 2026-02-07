@@ -70,6 +70,12 @@ class Command(BaseCommand):
             default=None,
             help="Filter by source: rule, score, tactical",
         )
+        parser.add_argument(
+            "--direction",
+            type=str,
+            default=None,
+            help="Filter by direction: LONG, SHORT, PUT",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["csv"])
@@ -80,6 +86,7 @@ class Command(BaseCommand):
         short_model_path = Path(options["short_model"])
         type_filter = options.get("type")
         source_filter = options.get("source")
+        direction_filter = options.get("direction")
 
         if not csv_path.exists():
             self.stderr.write(f"CSV not found: {csv_path}")
@@ -142,6 +149,8 @@ class Command(BaseCommand):
             self.stdout.write(f"Type Filter: {type_filter}")
         if source_filter:
             self.stdout.write(f"Source Filter: {source_filter}")
+        if direction_filter:
+            self.stdout.write(f"Direction Filter: {direction_filter}")
         self.stdout.write("")
 
         for year in years_to_analyze:
@@ -287,6 +296,8 @@ class Command(BaseCommand):
             trades_df = trades_df[trades_df["type"] == type_filter]
         if source_filter:
             trades_df = trades_df[trades_df["source"] == source_filter]
+        if direction_filter:
+            trades_df = trades_df[trades_df["direction"] == direction_filter]
         
         if len(trades_df) == 0:
             self.stdout.write("No trades match the specified filters.")

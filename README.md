@@ -109,6 +109,23 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
    └─ No alignment (fallback)
 ```
 
+### Hybrid Classification for Shorts
+
+Short setups use a **hybrid approach** to catch distribution tops that rule-based logic misses:
+
+1. **Rule-based shorts**: Traditional logic (BEAR_CONTINUATION, DISTRIBUTION_RISK, BEAR_PROBE)
+2. **Score-based shorts**: When rules return NO_TRADE, check weighted short score
+
+**Score-based Short Detection** uses `MEGA_WHALE_WEIGHT = 1.5` to amplify mega whale distribution signals:
+
+| Short Score | State | Notes |
+|-------------|-------|-------|
+| ≤ -3.5 | BEAR_CONTINUATION | Strong distribution |
+| -3.5 to -2.5 | DISTRIBUTION_RISK | Moderate distribution |
+| -2.5 to -2.0 | BEAR_PROBE | Weak but tradeable |
+
+The `short_source` field tracks origin: `'rule'` or `'score'`. Use `analyze_fusion --explain` to see breakdown.
+
 ---
 
 ## Scoring System
@@ -130,7 +147,11 @@ Each indicator contributes to a numeric score (-6 to +6 range):
 | **MVRV-LS** | `trend_confirm` | +1 |
 | **MVRV-LS** | `put_confirm` | -2 |
 | **MVRV-LS** | `distribution_warning` | -1 |
-| **Conflicts** | Per conflict detected | -1 |
+| **Conflicts** | Mega whale or MVRV conflict | -1 each |
+
+> **Note**: Small whale conflicts (`whale_small_conflict`) are **not penalized**. 
+> Mega whales (100-10k BTC) have significantly more market impact than small whales (1-100 BTC).
+> When small whales show mixed signals but mega whales have clear direction, trust the mega whales.
 
 ### Score → Confidence Mapping
 
