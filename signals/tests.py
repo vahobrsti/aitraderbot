@@ -36,7 +36,9 @@ def make_row(**kwargs) -> pd.Series:
         # MDIA regimes
         'mdia_regime_strong_inflow': 0,
         'mdia_regime_inflow': 0,
+        # 'mdia_regime_distribution' is legacy alias for 'aging'
         'mdia_regime_distribution': 0,
+        'mdia_regime_aging': 0,
         # Whale regimes
         'whale_regime_broad_accum': 0,
         'whale_regime_strategic_accum': 0,
@@ -148,7 +150,8 @@ class TestMarketStateClassification(SimpleTestCase):
     def test_bear_continuation(self):
         """BEAR_CONTINUATION: No inflow + whale distrib + MVRV bear."""
         row = make_row(
-            mdia_regime_distribution=1,
+            # Using aging (neutral) instead of inflow
+            mdia_regime_aging=1,
             whale_regime_distribution=1,
             mvrv_ls_regime_put_confirm=1,
         )
@@ -163,10 +166,10 @@ class TestMarketStateClassification(SimpleTestCase):
         self.assertEqual(classify_market_state(row), MarketState.DISTRIBUTION_RISK)
     
     def test_bear_probe(self):
-        """BEAR_PROBE: MDIA distrib + whale distrib + MVRV neutral."""
+        """BEAR_PROBE: MDIA aging + whale STRONG distrib + MVRV neutral."""
         row = make_row(
-            mdia_regime_distribution=1,
-            whale_regime_distribution=1,
+            mdia_regime_aging=1,  # Rising MDIA = Aging (Neutral)
+            whale_regime_distribution_strong=1,
             # MVRV neutral (nothing set)
         )
         self.assertEqual(classify_market_state(row), MarketState.BEAR_PROBE)
@@ -205,14 +208,16 @@ class TestConfidenceScore(SimpleTestCase):
     
     def test_max_bearish_score(self):
         """Maximum bearish score: -5 (distrib + strong_distrib + put_confirm)."""
+    def test_max_bearish_score(self):
+        """Maximum bearish score: -4 (whales + MVRV only, MDIA is neutral)."""
         row = make_row(
-            mdia_regime_distribution=1,
+            mdia_regime_aging=1,  # Neutral (0)
             whale_regime_distribution_strong=1,
             mvrv_ls_regime_put_confirm=1,
         )
         score, components = compute_confidence_score(row)
-        self.assertEqual(score, -5)
-        self.assertEqual(components['mdia']['score'], -1)
+        self.assertEqual(score, -4)  # MDIA is 0 (neutral)
+        self.assertEqual(components['mdia']['score'], 0) # MDIA is neutral in fusion.py
         self.assertEqual(components['whale']['score'], -2)
         self.assertEqual(components['mvrv_ls']['score'], -2)
     

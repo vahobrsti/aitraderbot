@@ -185,22 +185,27 @@ def compute_near_peak_score(row: pd.Series) -> Optional[float]:
     return near_peak_score
 
 
-def compute_short_overlay(row: pd.Series, is_confirmed_bear: bool) -> tuple[int, int, str]:
+def compute_short_overlay(row: pd.Series, is_confirmed_bear: bool, is_bear_probe: bool = False) -> tuple[int, int, str]:
     """
     Compute short overlay using blended near_peak_score.
     
     Edge and veto are MUTUALLY EXCLUSIVE (no mixed states).
     
-    Thresholds:
+    Thresholds (standard):
     - >= 0.85: Full edge (shorts very reliable)
     - >= 0.75: Partial edge (shorts reliable)
-    - <= 0.35: Soft veto (shorts less reliable) - only for DISTRIBUTION_RISK
+    - <= 0.35: Soft veto (shorts less reliable) - DISTRIBUTION_RISK
     - <= 0.25: Hard veto (shorts unreliable)
+    
+    BEAR_PROBE stricter thresholds:
+    - <= 0.45: Soft veto (require higher conviction for probes)
+    - <= 0.30: Hard veto (tighter than standard)
     
     ABSOLUTE LEVEL CHECK (mvrv_60d):
     - mvrv_60d < 1.0: HARD VETO - short-term holders underwater, shorting is dangerous
     
     For DISTRIBUTION_RISK: fail-closed (require score >= 0.35 to trade)
+    For BEAR_PROBE: fail-closed, stricter (require score >= 0.45 to trade)
     For BEAR_CONTINUATION: fail-open (only hard veto, structure confirms bear)
     
     Returns (edge_strength, veto_strength, reason)
@@ -221,7 +226,7 @@ def compute_short_overlay(row: pd.Series, is_confirmed_bear: bool) -> tuple[int,
             # BEAR_CONTINUATION: fail-open (structure confirms bear)
             return 0, 0, "Missing MVRV-60d data (fail-open in confirmed bear)"
         else:
-            # DISTRIBUTION_RISK: fail-closed (conservative)
+            # DISTRIBUTION_RISK / BEAR_PROBE: fail-closed (conservative)
             return 0, 2, "HARD: Missing MVRV-60d data (fail-closed)"
     
     # Edge/veto logic (mutually exclusive)
@@ -231,20 +236,28 @@ def compute_short_overlay(row: pd.Series, is_confirmed_bear: bool) -> tuple[int,
     if score >= 0.75:
         return 1, 0, f"PARTIAL EDGE: MVRV-60d elevated (score={score:.2f})"
     
-    # Below 0.75: check for vetoes
-    if score <= 0.25:
-        # Hard veto applies to both states
-        if is_confirmed_bear:
-            return 0, 2, f"HARD: MVRV-60d far from peak even in bear (score={score:.2f})"
-        else:
-            return 0, 2, f"HARD: MVRV-60d far from peak (score={score:.2f})"
+    # Below 0.75: check for vetoes (thresholds differ by state)
     
-    if score <= 0.35:
-        # Soft veto only for DISTRIBUTION_RISK
-        if not is_confirmed_bear:
-            return 0, 1, f"SOFT: MVRV-60d not near peak (score={score:.2f})"
+    # BEAR_PROBE: stricter thresholds
+    if is_bear_probe:
+        if score <= 0.40:
+            return 0, 2, f"HARD: MVRV-60d too low for probe (score={score:.2f})"
+        if score <= 0.50:
+            return 0, 1, f"SOFT: MVRV-60d not elevated enough for probe (score={score:.2f})"
+    else:
+        # DISTRIBUTION_RISK / BEAR_CONTINUATION: standard thresholds
+        if score <= 0.25:
+            if is_confirmed_bear:
+                return 0, 2, f"HARD: MVRV-60d far from peak even in bear (score={score:.2f})"
+            else:
+                return 0, 2, f"HARD: MVRV-60d far from peak (score={score:.2f})"
+        
+        if score <= 0.35:
+            # Soft veto only for DISTRIBUTION_RISK
+            if not is_confirmed_bear:
+                return 0, 1, f"SOFT: MVRV-60d not near peak (score={score:.2f})"
     
-    # No edge, no veto (0.35 < score < 0.75)
+    # No edge, no veto
     return 0, 0, f"No short overlay active (score={score:.2f})"
 
 
@@ -342,9 +355,11 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
     # === SHORT STATE OVERLAYS (MVRV-60d ONLY, blended score) ===
     if fusion_result.state in short_states:
         is_confirmed_bear = fusion_result.state == MarketState.BEAR_CONTINUATION
+        is_bear_probe = fusion_result.state == MarketState.BEAR_PROBE
         
         # Compute overlay using blended score (edge/veto mutually exclusive)
-        short_edge_str, veto_str, reason = compute_short_overlay(row, is_confirmed_bear)
+        # BEAR_PROBE uses stricter thresholds (soft veto at 0.45, hard at 0.30)
+        short_edge_str, veto_str, reason = compute_short_overlay(row, is_confirmed_bear, is_bear_probe)
         
         # Determine score_adjustment and flags
         score_adj = 0

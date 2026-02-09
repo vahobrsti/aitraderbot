@@ -1,44 +1,43 @@
-# Core
+anyio==4.12.0
+asgiref==3.9.1
+cachetools==6.2.2
+certifi==2025.11.12
+charset-normalizer==3.4.4
 Django==4.2.23
-python-dotenv==1.2.1
-
-# Database
-psycopg2-binary==2.9.9
-psycopg==3.2.13
-psycopg-binary==3.2.13
-
-# Data Processing
-pandas==2.3.3
-numpy==2.0.2
-pyarrow==21.0.0
-scipy==1.13.1
-
-# Machine Learning
-scikit-learn==1.6.1
-lightgbm==4.6.0
-joblib==1.5.2
-
-# Google Sheets Integration
-gspread==6.2.1
+djangorestframework==3.15.2
+exceptiongroup==1.3.1
 google-auth==2.41.1
 google-auth-oauthlib==1.2.3
-
-# HTTP & Networking
+gspread==6.2.1
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.11
+iso8601==2.1.0
+joblib==1.5.2
+lightgbm==4.6.0
+numpy==2.0.2
+oauthlib==3.3.1
+pandas==2.3.3
+psycopg==3.2.13
+psycopg-binary==3.2.13
+psycopg2-binary==2.9.9
+pyarrow==21.0.0
+pyasn1==0.6.1
+pyasn1_modules==0.4.2
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.1
+python-telegram-bot==21.10
+pytz==2025.2
 requests==2.32.5
 requests-oauthlib==2.0.0
-urllib3==2.5.0
-certifi==2025.11.12
-
-# REST API
-djangorestframework==3.15.2
-
-# Production Server
-gunicorn==23.0.0
-
-# Telegram Bot
-python-telegram-bot==21.10
-
-# Utilities
-python-dateutil==2.9.0.post0
-pytz==2025.2
+rsa==4.9.1
+sanpy==0.12.3
+scikit-learn==1.6.1
+scipy==1.13.1
+six==1.17.0
+sqlparse==0.5.3
+threadpoolctl==3.6.0
+typing_extensions==4.15.0
 tzdata==2025.2
+urllib3==2.5.0
