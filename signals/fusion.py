@@ -63,16 +63,18 @@ def compute_confidence_score(row: pd.Series) -> tuple[int, dict]:
     score = 0
     components = {}
     
-    # MDIA contribution
+    # MDIA contribution (data-aligned: bullish or neutral, NEVER bearish)
+    # Empirical finding: MDIA rising is "less bullish", not "bearish"
+    # Let whales + MVRV decide bearishness
     if row.get('mdia_regime_strong_inflow', 0) == 1:
         score += 2
         components['mdia'] = {'score': 2, 'label': 'strong_inflow'}
     elif row.get('mdia_regime_inflow', 0) == 1:
         score += 1
         components['mdia'] = {'score': 1, 'label': 'inflow'}
-    elif row.get('mdia_regime_distribution', 0) == 1:
-        score -= 1
-        components['mdia'] = {'score': -1, 'label': 'distribution'}
+    elif row.get('mdia_regime_aging', 0) == 1:
+        # Aging = trend-unfriendly, but NOT bearish (no penalty)
+        components['mdia'] = {'score': 0, 'label': 'aging'}
     else:
         components['mdia'] = {'score': 0, 'label': 'neutral'}
     
@@ -170,16 +172,17 @@ def compute_short_score(row: pd.Series) -> tuple[float, dict]:
     score = 0.0
     components = {}
     
-    # MDIA contribution (unchanged from original)
+    # MDIA contribution (data-aligned: bullish or neutral, NEVER bearish)
+    # Empirical finding: MDIA rising is "less bullish", not "bearish"
     if row.get('mdia_regime_strong_inflow', 0) == 1:
         score += 2
         components['mdia'] = {'score': 2, 'label': 'strong_inflow'}
     elif row.get('mdia_regime_inflow', 0) == 1:
         score += 1
         components['mdia'] = {'score': 1, 'label': 'inflow'}
-    elif row.get('mdia_regime_distribution', 0) == 1:
-        score -= 1
-        components['mdia'] = {'score': -1, 'label': 'distribution'}
+    elif row.get('mdia_regime_aging', 0) == 1:
+        # Aging = trend-unfriendly, but NOT bearish (no penalty)
+        components['mdia'] = {'score': 0, 'label': 'aging'}
     else:
         components['mdia'] = {'score': 0, 'label': 'neutral'}
     
@@ -241,10 +244,12 @@ def score_to_short_state(score: float) -> Optional[MarketState]:
     Map weighted short score to bearish market state.
     Returns None if score is not bearish enough.
     
-    Thresholds (tuned for ~85% hit rate in 2025 analysis):
+    Thresholds:
     - BEAR_CONTINUATION: score <= -3.5
     - DISTRIBUTION_RISK: -3.5 < score <= -2.5
     - BEAR_PROBE: -2.5 < score <= -2.0
+    
+    Note: BEAR_PROBE uses stricter overlay filtering (see overlays.py)
     """
     if score <= -3.5:
         return MarketState.BEAR_CONTINUATION
@@ -265,7 +270,8 @@ def classify_market_state(row: pd.Series) -> MarketState:
     # Helper lookups
     mdia_strong = row.get('mdia_regime_strong_inflow', 0) == 1
     mdia_inflow = row.get('mdia_regime_inflow', 0) == 1 or mdia_strong
-    mdia_distrib = row.get('mdia_regime_distribution', 0) == 1
+    mdia_aging = row.get('mdia_regime_aging', 0) == 1
+    # NOTE: mdia_aging is "trend-unfriendly" NOT "bearish" - don't use for short triggers
     
     whale_broad = row.get('whale_regime_broad_accum', 0) == 1
     whale_strategic = row.get('whale_regime_strategic_accum', 0) == 1
@@ -299,10 +305,12 @@ def classify_market_state(row: pd.Series) -> MarketState:
         return MarketState.EARLY_RECOVERY
     
     # 🐻 BEAR CONTINUATION: No buyers, sellers in control
-    if (mdia_distrib or not mdia_inflow) and whale_distrib and (mvrv_put or mvrv_bear):
+    # NOTE: mdia_aging removed - MDIA is NOT a bear signal, only whales + MVRV decide
+    if not mdia_inflow and whale_distrib and (mvrv_put or mvrv_bear):
         return MarketState.BEAR_CONTINUATION
     
     # ⚠️ DISTRIBUTION RISK: Smart money exiting, structure cracking
+    # Uses whales + MVRV only - MDIA is not a bear trigger
     if whale_distrib and not mdia_strong and (mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn):
         return MarketState.DISTRIBUTION_RISK
     
@@ -326,8 +334,9 @@ def classify_market_state(row: pd.Series) -> MarketState:
         return MarketState.BULL_PROBE
     
     # 🔴 BEAR PROBE: Selling pressure + distribution, macro neutral
-    # Require explicit MDIA distribution (not just absence of inflow)
-    if mdia_distrib and whale_distrib and mvrv_neutral:
+    # Require STRONG whale distribution to reduce false positives
+    whale_distrib_strong = row.get('whale_regime_distribution_strong', 0) == 1
+    if whale_distrib_strong and mvrv_neutral:
         return MarketState.BEAR_PROBE
     
     # 🟡 NO TRADE: No alignment
