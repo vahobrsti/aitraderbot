@@ -103,7 +103,7 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
    └─ MDIA inflow + Whale sponsored + MVRV neutral
 
 🔴 BEAR_PROBE (0.5x sizing)
-   └─ MDIA distrib + Whale distrib + MVRV neutral
+   └─ Whale STRONG distrib + MVRV neutral (MDIA ignored)
 
 🟡 NO_TRADE
    └─ No alignment (fallback)
@@ -138,7 +138,7 @@ Each indicator contributes to a numeric score (-6 to +6 range):
 |-----------|-----------|-------|
 | **MDIA** | `strong_inflow` | +2 |
 | **MDIA** | `inflow` (moderate) | +1 |
-| **MDIA** | `distribution` | -1 |
+| **MDIA** | `aging` (rising) | 0 (Neutral) |
 | **Whales** | `broad_accum` | +2 |
 | **Whales** | `strategic_accum` | +1 |
 | **Whales** | `strong_distribution` | -2 |
