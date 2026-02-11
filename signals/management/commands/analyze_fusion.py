@@ -581,7 +581,7 @@ class Command(BaseCommand):
         
         # === MDIA BREAKDOWN ===
         self.stdout.write("\n" + "─" * 70)
-        self.stdout.write("MDIA BREAKDOWN (Inflow Detection)")
+        self.stdout.write("MDIA BREAKDOWN (Capital Flow / Aging)")
         self.stdout.write("─" * 70)
         
         # Get MDIA buckets if available
@@ -594,7 +594,7 @@ class Command(BaseCommand):
                 bucket = int(row.get(bucket_col, 0))
                 z = row.get(z_col, 0)
                 z_str = f"z={z:6.2f}" if not pd.isna(z) else "z=  N/A"
-                label = "inflow" if bucket <= -1 else ("outflow" if bucket >= 1 else "neutral")
+                label = "inflow" if bucket <= -1 else ("aging" if bucket >= 1 else "neutral")
                 self.stdout.write(f"Bucket {h}d: {fmt_bucket(bucket):>3} ({label:8}) {z_str}")
                 mdia_buckets.append(bucket)
         
@@ -606,14 +606,14 @@ class Command(BaseCommand):
             # Current regime determination
             strong_inflow = row.get('mdia_regime_strong_inflow', 0) == 1
             inflow = row.get('mdia_regime_inflow', 0) == 1
-            distrib = row.get('mdia_regime_distribution', 0) == 1
+            aging = row.get('mdia_regime_aging', 0) == 1
             
             if strong_inflow:
                 self.stdout.write("→ Current Regime: STRONG_INFLOW (+2)")
             elif inflow:
                 self.stdout.write("→ Current Regime: INFLOW (+1)")
-            elif distrib:
-                self.stdout.write("→ Current Regime: DISTRIBUTION (-1)")
+            elif aging:
+                self.stdout.write("→ Current Regime: AGING (0, trend-unfriendly, not bearish)")
             else:
                 self.stdout.write("→ Current Regime: NEUTRAL (0)")
         else:
@@ -663,9 +663,16 @@ class Command(BaseCommand):
         # Level info
         level = row.get('mvrv_ls_level', 0)
         pct = row.get('mvrv_ls_roll_pct_365d', 0.5)
-        level_labels = {-2: 'extreme_negative', -1: 'negative', 0: 'neutral', 1: 'positive', 2: 'extreme_positive'}
+        z_365 = row.get('mvrv_ls_z_score_365d', 0.0)
+        level_labels = {
+            -2: 'capitulation',
+            -1: 'late_bear/recovery',
+             0: 'neutral',
+             1: 'expansion',
+             2: 'overheated'
+        }
         mvrv_val = row.get('mvrv_60d', 0.0)
-        self.stdout.write(f"Level: {int(level)} ({level_labels.get(int(level), 'unknown')}) | Percentile: {pct*100:.0f}%")
+        self.stdout.write(f"Level: {int(level)} ({level_labels.get(int(level), 'unknown')}) | Z-365d: {z_365:.2f} | Percentile: {pct*100:.0f}%")
         
         # Trend buckets
         self.stdout.write("\nTrend Buckets:")
