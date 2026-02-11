@@ -20,6 +20,12 @@ class Command(BaseCommand):
             default="features_14d_5pct.csv",
             help="Path to the feature CSV file.",
         )
+        parser.add_argument(
+            "--year",
+            type=int,
+            default=None,
+            help="Filter to a specific year (e.g., 2024)",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["csv"])
@@ -30,6 +36,11 @@ class Command(BaseCommand):
 
         # --- Your original pandas code starts here ---
         df = pd.read_csv(csv_path, parse_dates=["date"], index_col="date")
+
+        year = options.get("year")
+        if year:
+            df = df.loc[f'{year}-01-01':f'{year}-12-31']
+            self.stdout.write(f"Filtered to year {year}: {len(df)} rows\n")
 
         self.stdout.write(self.style.MIGRATE_HEADING("Basic info"))
         self.stdout.write(f"Shape: {df.shape}")
