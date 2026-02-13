@@ -107,6 +107,12 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
 
 🟡 NO_TRADE
    └─ No alignment (fallback)
+
+📗 OPTION_CALL (0.5x sizing, rule-based fallback)
+   └─ MVRV cheap (2+ flags) + Sentiment fear — fires on ANY fusion state
+
+📕 OPTION_PUT (0.5x sizing, rule-based fallback)
+   └─ MVRV overheated + Sentiment greed + Whale distrib — fires on ANY fusion state
 ```
 
 ### Hybrid Classification for Shorts
@@ -125,6 +131,24 @@ Short setups use a **hybrid approach** to catch distribution tops that rule-base
 | -2.5 to -2.0 | BEAR_PROBE | Weak but tradeable |
 
 The `short_source` field tracks origin: `'rule'` or `'score'`. Use `analyze_fusion --explain` to see breakdown.
+
+### Option Signal Fallback
+
+When fusion returns `NO_TRADE` (or any state), **rule-based option signals** can still fire as supplementary trades:
+
+| Signal | Direction | Conditions | Sizing |
+|--------|-----------|------------|--------|
+| `OPTION_CALL` | 🟢 Long | MVRV cheap (2+ of: undervalued_90d, new_low_180d, near_bottom) + Sentiment fear (sent_norm < -1.0) | 0.50x |
+| `OPTION_PUT` | 🔴 Short | MVRV overheated (60d_pct > 0.80) + Sentiment greed (sent_norm > 1.0) + Whale distribution | 0.50x |
+
+Key design decisions:
+- **Independent of fusion**: Option signals fire based on `signal_option_call` / `signal_option_put` features from `interactions.py`, regardless of fusion state
+- **7-day cooldown**: Prevents rapid consecutive option signals
+- **Overlay filtered**: Subject to the same overlay veto logic (size_mult == 0 blocks the trade)
+- **In production** (`services.py`): Only promoted to actual trade when fusion = NO_TRADE (fusion takes priority)
+- **In analysis** (`analyze_hit_rate`): Tracked independently alongside fusion trades (like TACTICAL_PUT)
+
+Use `analyze_fusion --explain --date YYYY-MM-DD` to see both fusion state and option signal status.
 
 ---
 
@@ -237,13 +261,15 @@ Uses a blended "near-peak score" from `mvrv_60d_pct_rank` and `mvrv_60d_dist_fro
 
 ## Trade Types
 
-| Type | Direction | Sizing | Strategy |
-|------|-----------|--------|----------|
-| LONG | 🟢 Long | 1.0x | Calls |
-| BULL_PROBE | 🟢 Long | 0.35-0.60x | Call spread (defined risk) |
-| PRIMARY_SHORT | 🔴 Short | 1.0x | Puts |
-| BEAR_PROBE | 🔴 Short | 0.35-0.60x | Put spread (defined risk) |
-| TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Hedge inside bull regimes |
+| Type | Direction | Sizing | Source | Strategy |
+|------|-----------|--------|--------|----------|
+| LONG | 🟢 Long | 1.0x | Fusion | Calls |
+| BULL_PROBE | 🟢 Long | 0.35-0.60x | Fusion | Call spread (defined risk) |
+| PRIMARY_SHORT | 🔴 Short | 1.0x | Fusion | Puts |
+| BEAR_PROBE | 🔴 Short | 0.35-0.60x | Fusion | Put spread (defined risk) |
+| TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Fusion | Hedge inside bull regimes |
+| OPTION_CALL | 🟢 Long | 0.50x | Rule | MVRV cheap + fear fallback |
+| OPTION_PUT | 🔴 Short | 0.50x | Rule | MVRV hot + greed fallback |
 
 ---
 
@@ -299,7 +325,7 @@ curl -H "Authorization: Token YOUR_API_TOKEN" \
 | `tactical_put_active` | bool | Whether tactical put is triggered |
 | `tactical_put_strategy` | string | Strategy type if tactical put active |
 | `tactical_put_size` | float | Tactical put sizing |
-| `trade_decision` | string | Final decision (CALL/PUT/TACTICAL_PUT/NO_TRADE) |
+| `trade_decision` | string | Final decision (CALL/PUT/TACTICAL_PUT/OPTION_CALL/OPTION_PUT/NO_TRADE) |
 | `trade_notes` | string | Additional notes |
 | `option_structures` | string | Recommended structures (e.g., `long_call`) |
 | `strike_guidance` | string | Strike selection (e.g., `atm`, `slight_otm`) |
@@ -379,8 +405,18 @@ python manage.py create_api_token --username telegram_bot
 # Analyze why days are NO_TRADE
 python manage.py diagnose_notrade --year 2024
 
-# Deep dive into fusion engine behavior
+# Deep dive into fusion engine behavior (includes option signal stats)
 python manage.py analyze_fusion
+python manage.py analyze_fusion --direction all --year 2025  # shows OPTION_CALL/PUT in setups
+
+# Explain a specific date (fusion + option signals)
+python manage.py analyze_fusion --explain --date 2025-05-05
+
+# Backtest hit rates (includes OPTION_CALL/OPTION_PUT)
+python manage.py analyze_hit_rate --year 2025
+
+# Sanity check option signals with MVRV flags
+python manage.py sanity_check --year 2025 --cooldown 7
 
 # Analyze MVRV-LS neutral terrain
 python manage.py analyze_neutral
@@ -399,6 +435,8 @@ python manage.py analyze_neutral
 | TACTICAL_PUT | 7 days |
 | BULL_PROBE | 5 days |
 | BEAR_PROBE | 5 days |
+| OPTION_CALL | 7 days |
+| OPTION_PUT | 7 days |
 
 ### Environment Variables
 
@@ -429,6 +467,7 @@ DEBUG=False
 | `signals/options.py` | Option strategy selection |
 | `signals/services.py` | SignalService for scoring + persistence |
 | `signals/models.py` | DailySignal Django model |
+| `features/metrics/interactions.py` | Option signal rules (MVRV cheap/hot + sentiment) |
 | `ml/training.py` | ML training pipeline with walk-forward validation |
 | `ml/predict.py` | Model inference for daily scoring |
 | `api/views.py` | REST API endpoints |
@@ -579,6 +618,7 @@ A **7-day GLOBAL cooldown** (blocking ALL trades after any trade) prevents clust
 4. **Overlays never override fusion**: They amplify or reduce, not flip
 5. **Clustering prevention**: 7-day cooldown collapses events into single trades
 6. **ML + Rules hybrid**: ML for probability, rules for regime classification
+7. **Fallback signals**: Option signals fire when fusion has no view, catching extremes fusion misses
 
 ---
 
