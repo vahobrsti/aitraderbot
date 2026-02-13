@@ -35,6 +35,8 @@ class SignalMessage:
     overlay_veto: bool = False
     overlay_reason: str = ""
     score_components: dict = None  # MDIA, Whales, MVRV breakdown
+    signal_option_call: int = 0
+    signal_option_put: int = 0
 
 
 class TelegramNotifier:
@@ -138,6 +140,31 @@ class TelegramNotifier:
         
         return msg
     
+    def _format_option_signal_message(self, signal: SignalMessage) -> str:
+        """Format a standalone option signal notification (call/put from interaction rules)."""
+        parts = []
+        
+        if signal.signal_option_call == 1:
+            parts.append("📗 *OPTION SIGNAL: CALL*")
+            parts.append("Rule: `MVRV cheap + Sentiment fear`")
+            parts.append(f"Historical hit rate: ~72%")
+        
+        if signal.signal_option_put == 1:
+            parts.append("📕 *OPTION SIGNAL: PUT*")
+            parts.append("Rule: `MVRV overheated + Sentiment greed`")
+        
+        parts.append(f"📅 {signal.date}")
+        parts.append("")
+        parts.append(f"*Fusion State:* `{signal.fusion_state}`")
+        parts.append(f"*Score:* {signal.fusion_score:+d} ({signal.fusion_confidence})")
+        parts.append("")
+        parts.append(f"📈 p\_long: `{signal.p_long:.1%}`")
+        parts.append(f"📉 p\_short: `{signal.p_short:.1%}`")
+        parts.append("")
+        parts.append("_Rule-based signal (not fusion). Use as supplementary alert._")
+        
+        return "\n".join(parts)
+    
     async def _send_async(self, message: str) -> bool:
         """Async send message via Telegram API."""
         try:
@@ -158,12 +185,26 @@ class TelegramNotifier:
         Returns:
             True if sent successfully, False otherwise.
         """
-        # Skip NO_TRADE unless it's a vetoed signal (fusion wanted to trade)
-        if signal.trade_decision == "NO_TRADE" and not signal.overlay_veto:
+        has_option_signal = (signal.signal_option_call == 1 or signal.signal_option_put == 1)
+        
+        # Skip NO_TRADE unless it's a vetoed signal or an option signal fired
+        if signal.trade_decision == "NO_TRADE" and not signal.overlay_veto and not has_option_signal:
             return False
         
-        message = self._format_message(signal)
-        return asyncio.run(self._send_async(message))
+        # If fusion produced a trade, send the normal message
+        if signal.trade_decision != "NO_TRADE" or signal.overlay_veto:
+            message = self._format_message(signal)
+            result = asyncio.run(self._send_async(message))
+        else:
+            result = True  # No fusion message needed
+        
+        # Additionally send option signal alert if fired
+        if has_option_signal:
+            option_msg = self._format_option_signal_message(signal)
+            option_result = asyncio.run(self._send_async(option_msg))
+            result = result and option_result
+        
+        return result
     
     def send_from_model(self, daily_signal) -> bool:
         """
@@ -197,5 +238,7 @@ class TelegramNotifier:
             overlay_veto=overlay_veto,
             overlay_reason=daily_signal.overlay_reason if overlay_veto else "",
             score_components=daily_signal.score_components or {},
+            signal_option_call=daily_signal.signal_option_call,
+            signal_option_put=daily_signal.signal_option_put,
         )
         return self.send_signal(signal)

@@ -11,11 +11,13 @@ def calculate(df: pd.DataFrame) -> pd.DataFrame:
     #   - Sentiment is Negative
     
     # Assuming MVRV Composite module ran first
-    mvrv_is_cheap = (
-        (df.get('mvrv_comp_undervalued_90d', 0) == 1) |
-        (df.get('mvrv_comp_new_low_180d', 0) == 1) |
-        (df.get('mvrv_comp_near_bottom_any', 0) == 1)
+    # Require 2+ cheap flags (sweet spot: 67.6% hit rate vs 61.1% with any 1)
+    mvrv_cheap_count = (
+        df.get('mvrv_comp_undervalued_90d', 0).astype(int) +
+        df.get('mvrv_comp_new_low_180d', 0).astype(int) +
+        df.get('mvrv_comp_near_bottom_any', 0).astype(int)
     )
+    mvrv_is_cheap = (mvrv_cheap_count >= 2)
     
     # Assuming Sentiment module ran first
     # Using 'sentiment_norm' which should be present
