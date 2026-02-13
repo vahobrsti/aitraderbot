@@ -3,7 +3,7 @@ Service layer for signal generation and persistence.
 Encapsulates ML scoring, fusion engine, and database operations.
 """
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +17,10 @@ from signals.fusion import fuse_signals, MarketState
 from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier
 from signals.tactical_puts import tactical_put_inside_bull
 from signals.options import get_strategy_summary
+
+# Option signal constants
+OPTION_SIGNAL_COOLDOWN_DAYS = 7
+OPTION_SIGNAL_SIZE_MULT = 0.50
 
 
 @dataclass
@@ -146,20 +150,28 @@ class SignalService:
         # 6) Tactical Put
         tactical_result = tactical_put_inside_bull(fusion_result, row)
         
+        # 7) Option signal cooldown check
+        option_call_ok = signal_option_call == 1 and self._check_option_cooldown(latest_date, "OPTION_CALL")
+        option_put_ok = signal_option_put == 1 and self._check_option_cooldown(latest_date, "OPTION_PUT")
+        
         trade_decision, trade_notes, no_trade_reasons, decision_trace = self._determine_trade_decision(
             fusion_result, size_mult, dte_mult, tactical_result, p_long, p_short,
-            signal_option_call, signal_option_put, overlay
+            signal_option_call, signal_option_put, overlay,
+            option_call_ok=option_call_ok, option_put_ok=option_put_ok,
         )
         
         # 8) Get option strategy recommendation
         strategy_summary = get_strategy_summary(fusion_result.state)
         
-        # Compute effective values (0 on NO_TRADE)
+        # Compute effective values
         if trade_decision == "NO_TRADE":
             effective_size = 0.0
-            # Override multipliers to 0.0 for NO_TRADE
             size_mult = 0.0
             dte_mult = 0.0
+        elif trade_decision in ("OPTION_CALL", "OPTION_PUT"):
+            # Option signals use reduced sizing
+            effective_size = OPTION_SIGNAL_SIZE_MULT
+            size_mult = OPTION_SIGNAL_SIZE_MULT
         else:
             effective_size = size_mult
         
@@ -200,12 +212,33 @@ class SignalService:
             short_source=fusion_result.short_source,
         )
     
+    def _check_option_cooldown(self, current_date, decision_type: str) -> bool:
+        """
+        Check if enough days have passed since last OPTION_CALL/OPTION_PUT trade.
+        Returns True if cooldown has passed (OK to trade).
+        """
+        cutoff = current_date - timedelta(days=OPTION_SIGNAL_COOLDOWN_DAYS)
+        last_signal = (
+            DailySignal.objects
+            .filter(trade_decision=decision_type, date__gte=cutoff, date__lt=current_date)
+            .order_by("-date")
+            .first()
+        )
+        return last_signal is None
+
     def _determine_trade_decision(
         self, fusion_result, size_mult, dte_mult, tactical_result,
-        p_long, p_short, signal_option_call, signal_option_put, overlay
+        p_long, p_short, signal_option_call, signal_option_put, overlay,
+        option_call_ok=False, option_put_ok=False,
     ) -> tuple[str, str, list, list]:
         """
         Determine final trade decision, notes, and diagnostics.
+        
+        Priority:
+            1. Tactical Put
+            2. Fusion state (CALL/PUT/probes)
+            3. Option signal fallback (when fusion=NO_TRADE, with cooldown + overlay)
+            4. NO_TRADE
         
         Returns:
             Tuple of (decision, notes, no_trade_reasons, decision_trace)
@@ -224,58 +257,87 @@ class SignalService:
         else:
             decision_trace.append("tactical_put=inactive")
         
-        # Check fusion state
-        if fusion_result.state == MarketState.NO_TRADE:
-            no_trade_reasons.append("FUSION_STATE_NO_TRADE")
-            decision_trace.append("stop_reason=FUSION_STATE_NO_TRADE")
+        # Check fusion state — if fusion has a directional view, use it
+        if fusion_result.state != MarketState.NO_TRADE:
+            # Check confidence
+            if fusion_result.confidence.value == "low":
+                no_trade_reasons.append("CONFIDENCE_TOO_LOW")
+            
+            # Check overlay
+            overlay_step = f"overlay(size={size_mult},dte={dte_mult},reason={overlay.reason[:30]})"
+            decision_trace.append(overlay_step)
+            
+            if size_mult == 0:
+                no_trade_reasons.append("OVERLAY_VETO")
+                decision_trace.append("stop_reason=OVERLAY_VETO")
+                return "NO_TRADE", "Overlay vetoed (size_mult=0)", no_trade_reasons, decision_trace
+            
+            # Check fusion-based trades
+            is_long = fusion_result.state in {
+                MarketState.STRONG_BULLISH,
+                MarketState.EARLY_RECOVERY,
+                MarketState.MOMENTUM_CONTINUATION
+            }
+            is_short = fusion_result.state in {
+                MarketState.DISTRIBUTION_RISK,
+                MarketState.BEAR_CONTINUATION
+            }
+            
+            if is_long:
+                decision_trace.append(f"state={fusion_result.state.value} -> CALL")
+                return "CALL", f"Fusion: {fusion_result.state.value}", [], decision_trace
+            
+            if is_short:
+                source_label = f"[{fusion_result.short_source}]" if fusion_result.short_source else ""
+                decision_trace.append(f"state={fusion_result.state.value} {source_label} -> PUT")
+                return "PUT", f"Fusion: {fusion_result.state.value} {source_label}".strip(), [], decision_trace
+            
+            # Check probes
+            if fusion_result.state == MarketState.BULL_PROBE:
+                decision_trace.append(f"bull_probe(score={fusion_result.score}) -> CALL")
+                return "CALL", f"Bull probe, score={fusion_result.score}", [], decision_trace
+            
+            if fusion_result.state == MarketState.BEAR_PROBE:
+                source_label = f"[{fusion_result.short_source}]" if fusion_result.short_source else ""
+                decision_trace.append(f"bear_probe(score={fusion_result.score}) {source_label} -> PUT")
+                return "PUT", f"Bear probe, score={fusion_result.score} {source_label}".strip(), [], decision_trace
+            
+            # Catch-all for non-tradeable fusion states
+            no_trade_reasons.append("STATE_NOT_TRADEABLE")
+            decision_trace.append("stop_reason=STATE_NOT_TRADEABLE")
             return "NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, decision_trace
         
-        # Check confidence
-        if fusion_result.confidence.value == "low":
-            no_trade_reasons.append("CONFIDENCE_TOO_LOW")
+        # --- Fusion is NO_TRADE — check option signal fallback ---
+        decision_trace.append("fusion=NO_TRADE")
         
-        # Check overlay
-        overlay_step = f"overlay(size={size_mult},dte={dte_mult},reason={overlay.reason[:30]})"
-        decision_trace.append(overlay_step)
+        # Option CALL fallback
+        if option_call_ok:
+            # Apply overlay check
+            if size_mult == 0:
+                decision_trace.append("option_call=fired but overlay_veto -> NO_TRADE")
+                no_trade_reasons.append("FUSION_STATE_NO_TRADE")
+                no_trade_reasons.append("OPTION_CALL_OVERLAY_VETO")
+                return "NO_TRADE", "Option call fired but overlay vetoed", no_trade_reasons, decision_trace
+            decision_trace.append(f"option_call=fired(cooldown_ok) -> OPTION_CALL (size={OPTION_SIGNAL_SIZE_MULT})")
+            return "OPTION_CALL", "Rule: MVRV cheap (2+ flags) + Sentiment fear", [], decision_trace
+        elif signal_option_call == 1:
+            decision_trace.append("option_call=fired but cooldown_active -> skip")
         
-        if size_mult == 0:
-            no_trade_reasons.append("OVERLAY_VETO")
-            decision_trace.append("stop_reason=OVERLAY_VETO")
-            return "NO_TRADE", "Overlay vetoed (size_mult=0)", no_trade_reasons, decision_trace
+        # Option PUT fallback
+        if option_put_ok:
+            if size_mult == 0:
+                decision_trace.append("option_put=fired but overlay_veto -> NO_TRADE")
+                no_trade_reasons.append("FUSION_STATE_NO_TRADE")
+                no_trade_reasons.append("OPTION_PUT_OVERLAY_VETO")
+                return "NO_TRADE", "Option put fired but overlay vetoed", no_trade_reasons, decision_trace
+            decision_trace.append(f"option_put=fired(cooldown_ok) -> OPTION_PUT (size={OPTION_SIGNAL_SIZE_MULT})")
+            return "OPTION_PUT", "Rule: MVRV overheated + Sentiment greed + Whale distrib", [], decision_trace
+        elif signal_option_put == 1:
+            decision_trace.append("option_put=fired but cooldown_active -> skip")
         
-        # Check fusion-based trades
-        is_long = fusion_result.state in {
-            MarketState.STRONG_BULLISH,
-            MarketState.EARLY_RECOVERY,
-            MarketState.MOMENTUM_CONTINUATION
-        }
-        is_short = fusion_result.state in {
-            MarketState.DISTRIBUTION_RISK,
-            MarketState.BEAR_CONTINUATION
-        }
-        
-        if is_long:
-            decision_trace.append(f"state={fusion_result.state.value} -> CALL")
-            return "CALL", f"Fusion: {fusion_result.state.value}", [], decision_trace
-        
-        if is_short:
-            source_label = f"[{fusion_result.short_source}]" if fusion_result.short_source else ""
-            decision_trace.append(f"state={fusion_result.state.value} {source_label} -> PUT")
-            return "PUT", f"Fusion: {fusion_result.state.value} {source_label}".strip(), [], decision_trace
-        
-        # Check probes
-        if fusion_result.state == MarketState.BULL_PROBE:
-            decision_trace.append(f"bull_probe(score={fusion_result.score}) -> CALL")
-            return "CALL", f"Bull probe, score={fusion_result.score}", [], decision_trace
-        
-        if fusion_result.state == MarketState.BEAR_PROBE:
-            source_label = f"[{fusion_result.short_source}]" if fusion_result.short_source else ""
-            decision_trace.append(f"bear_probe(score={fusion_result.score}) {source_label} -> PUT")
-            return "PUT", f"Bear probe, score={fusion_result.score} {source_label}".strip(), [], decision_trace
-        
-        # Catch-all: if we get here, it's a state we don't trade
-        no_trade_reasons.append("STATE_NOT_TRADEABLE")
-        decision_trace.append("stop_reason=STATE_NOT_TRADEABLE")
+        # Default NO_TRADE
+        no_trade_reasons.append("FUSION_STATE_NO_TRADE")
+        decision_trace.append("stop_reason=FUSION_STATE_NO_TRADE")
         return "NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, decision_trace
     
     def persist_signal(self, result: SignalResult) -> DailySignal:

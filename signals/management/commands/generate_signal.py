@@ -94,6 +94,8 @@ class Command(BaseCommand):
                     date=result.date,
                     p_long=result.p_long,
                     p_short=result.p_short,
+                    signal_option_call=result.signal_option_call,
+                    signal_option_put=result.signal_option_put,
                     fusion_state=result.fusion_state,
                     fusion_score=result.fusion_score,
                     trade_decision=result.trade_decision,
@@ -116,6 +118,9 @@ class Command(BaseCommand):
                 self.stdout.write(f"Size Mult:      {signal.size_multiplier:.2f}")
                 if signal.tactical_put_active:
                     self.stdout.write(f"Tactical Put:   {signal.tactical_put_strategy}")
+                if hasattr(signal, 'signal_option_call'):
+                    self.stdout.write(f"Option Call:    {signal.signal_option_call}")
+                    self.stdout.write(f"Option Put:     {signal.signal_option_put}")
                 self.stdout.write(f"{'='*50}\n")
             else:
                 # Minimal output for cron
@@ -137,8 +142,12 @@ class Command(BaseCommand):
         no_trade_reasons = signal.no_trade_reasons or []
         is_overlay_veto = "OVERLAY_VETO" in no_trade_reasons
         
-        # Skip NO_TRADE unless it's a vetoed signal
-        if signal.trade_decision == "NO_TRADE" and not is_overlay_veto:
+        # Check if option signal fired
+        has_option_signal = getattr(signal, 'signal_option_call', 0) == 1 or getattr(signal, 'signal_option_put', 0) == 1
+        is_option_trade = signal.trade_decision in ("OPTION_CALL", "OPTION_PUT")
+        
+        # Skip NO_TRADE unless it's a vetoed signal or an option signal fired
+        if signal.trade_decision == "NO_TRADE" and not is_overlay_veto and not has_option_signal:
             if verbose:
                 self.stdout.write("Skipping Telegram notification (NO_TRADE)")
             return
