@@ -118,6 +118,8 @@ class Command(BaseCommand):
         long_trades_after = 0
         short_trades_after = 0
         tactical_put_count = 0
+        option_call_count = 0
+        option_put_count = 0
 
         for idx, row in df.iterrows():
             result = fuse_signals(row)
@@ -166,6 +168,12 @@ class Command(BaseCommand):
                 # Count surviving trades (no hard veto)
                 if overlay.short_veto_strength < 2:
                     short_trades_after += 1
+            
+            # Track option signals (fire on any fusion state)
+            if int(row.get('signal_option_call', 0)) == 1:
+                option_call_count += 1
+            if int(row.get('signal_option_put', 0)) == 1:
+                option_put_count += 1
 
         total = len(df)
         
@@ -221,6 +229,10 @@ class Command(BaseCommand):
         self.stdout.write(f"Fusion shorts passed overlay: {short_trades_after}")
         self.stdout.write(f"Tactical puts in bull regime: {tactical_put_count}")
         self.stdout.write(f"TOTAL SHORT OPPS: {total_short_opps} ({total_short_opps/years:.1f}/year)")
+        
+        self.stdout.write(f"\n--- OPTION SIGNALS (Rule-based) ---")
+        self.stdout.write(f"OPTION_CALL (MVRV cheap + fear):  {option_call_count} ({option_call_count/years:.1f}/year)")
+        self.stdout.write(f"OPTION_PUT  (MVRV hot + greed):   {option_put_count} ({option_put_count/years:.1f}/year)")
         
         # === TACTICAL PUTS LIST ===
         self.stdout.write("\n" + "=" * 60)
@@ -278,20 +290,48 @@ class Command(BaseCommand):
         trade_signals = []
         for idx, row in df.iterrows():
             result = fuse_signals(row)
+            date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
+            
             if result.state != MarketState.NO_TRADE:
-                date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
                 trade_signals.append({
                     'date': date_str,
                     'state': result.state.value,
                     'confidence': result.confidence.value,
                     'score': result.score,
+                    'type': 'fusion',
+                })
+            
+            # Option signals (tracked independently)
+            if int(row.get('signal_option_call', 0)) == 1:
+                trade_signals.append({
+                    'date': date_str,
+                    'state': result.state.value,
+                    'confidence': result.confidence.value,
+                    'score': result.score,
+                    'type': 'OPTION_CALL',
+                })
+            if int(row.get('signal_option_put', 0)) == 1:
+                trade_signals.append({
+                    'date': date_str,
+                    'state': result.state.value,
+                    'confidence': result.confidence.value,
+                    'score': result.score,
+                    'type': 'OPTION_PUT',
                 })
         
         self.stdout.write(f"\nTotal trade signals: {len(trade_signals)}")
         
-        for sig in trade_signals[-50:]:  # Show last 50 trade signals
-            dir_emoji = "🟢" if sig['state'] in ['strong_bullish', 'early_recovery', 'momentum'] else "🔴"
-            self.stdout.write(f"  {sig['date']} {dir_emoji} {sig['state']:20s} | {sig['confidence']:6s} | score: {sig['score']:+d}")
+        for sig in trade_signals[-50:]:
+            if sig['type'] == 'OPTION_CALL':
+                dir_emoji = "📗"
+            elif sig['type'] == 'OPTION_PUT':
+                dir_emoji = "📕"
+            elif sig['state'] in ['strong_bullish', 'early_recovery', 'momentum']:
+                dir_emoji = "🟢"
+            else:
+                dir_emoji = "🔴"
+            type_label = f"[{sig['type']:12s}]" if sig['type'] != 'fusion' else " " * 14
+            self.stdout.write(f"  {sig['date']} {dir_emoji} {type_label} {sig['state']:20s} | {sig['confidence']:6s} | score: {sig['score']:+d}")
         
         if len(trade_signals) > 50:
             self.stdout.write(f"  ... (showing last 50 of {len(trade_signals)})")
@@ -418,7 +458,7 @@ class Command(BaseCommand):
                         'type': 'TACTICAL_PUT',
                     })
             
-            elif direction == "all" and result.state != MarketState.NO_TRADE:
+            elif direction == "all":
                 # Apply all filters
                 is_long = result.state in long_states
                 is_short = result.state in short_states
@@ -457,11 +497,33 @@ class Command(BaseCommand):
                         'overlay': overlay_status,
                         'type': 'PRIMARY_SHORT',
                     })
+                
+                # Option signals (tracked for all states)
+                if int(row.get('signal_option_call', 0)) == 1:
+                    setups.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'overlay': 'MVRV cheap + fear',
+                        'type': 'OPTION_CALL',
+                    })
+                if int(row.get('signal_option_put', 0)) == 1:
+                    setups.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'overlay': 'MVRV hot + greed',
+                        'type': 'OPTION_PUT',
+                    })
         
         # Count by type
         primary_short_count = sum(1 for s in setups if s['type'] == 'PRIMARY_SHORT')
         tactical_put_count = sum(1 for s in setups if s['type'] == 'TACTICAL_PUT')
         long_count = sum(1 for s in setups if s['type'] in ('LONG', 'long'))
+        option_call_count = sum(1 for s in setups if s['type'] == 'OPTION_CALL')
+        option_put_count = sum(1 for s in setups if s['type'] == 'OPTION_PUT')
         
         # Print results
         dir_emoji = "🟢" if direction == "long" else "🔴" if direction == "short" else "⚪"
@@ -471,14 +533,18 @@ class Command(BaseCommand):
         if direction == "short":
             self.stdout.write(f"\nPRIMARY_SHORT (from short states): {primary_short_count}")
             self.stdout.write(f"TACTICAL_PUT (from bull states):   {tactical_put_count}")
+            self.stdout.write(f"OPTION_PUT (rule-based):           {option_put_count}")
             self.stdout.write(f"TOTAL SHORT-RELATED ACTIONS:       {len(setups)}")
         elif direction == "long":
             self.stdout.write(f"\nTotal long setups: {long_count}")
             if tactical_put_count > 0:
                 self.stdout.write(f"(also {tactical_put_count} tactical puts shown)")
+            if option_call_count > 0:
+                self.stdout.write(f"OPTION_CALL (rule-based): {option_call_count}")
         else:
             self.stdout.write(f"\nTotal setups: {len(setups)}")
             self.stdout.write(f"  LONG: {long_count} | PRIMARY_SHORT: {primary_short_count} | TACTICAL_PUT: {tactical_put_count}")
+            self.stdout.write(f"  OPTION_CALL: {option_call_count} | OPTION_PUT: {option_put_count}")
         
         self.stdout.write("")
         
@@ -761,6 +827,26 @@ class Command(BaseCommand):
             self.stdout.write(f"\n→ Matched: {matched}")
         else:
             self.stdout.write(f"\n→ Fallback: NO_TRADE (no conditions matched)")
+        
+        # === OPTION SIGNALS ===
+        signal_call = int(row.get('signal_option_call', 0))
+        signal_put = int(row.get('signal_option_put', 0))
+        
+        if signal_call or signal_put:
+            self.stdout.write("\n" + "─" * 70)
+            self.stdout.write("OPTION SIGNALS (Rule-based, from interactions.py)")
+            self.stdout.write("─" * 70)
+            
+            call_emoji = "📗 FIRED" if signal_call else "  off"
+            put_emoji = "📕 FIRED" if signal_put else "  off"
+            self.stdout.write(f"signal_option_call: {call_emoji}  (MVRV cheap 2+ flags + sentiment fear)")
+            self.stdout.write(f"signal_option_put:  {put_emoji}  (MVRV overheated + sentiment greed + whale distrib)")
+            
+            # Show underlying values
+            sent = row.get('sentiment_norm', 0)
+            mvrv_flags = f"{int(row.get('mvrv_comp_undervalued_90d', 0))}/{int(row.get('mvrv_comp_new_low_180d', 0))}/{int(row.get('mvrv_comp_near_bottom_any', 0))}"
+            mvrv_pct = row.get('mvrv_60d_pct', 0)
+            self.stdout.write(f"  sentiment_norm: {sent:+.2f} | MVRV flags: {mvrv_flags} | 60d_pct: {mvrv_pct:.2f}")
         
         self.stdout.write("\n" + "═" * 70)
         self.stdout.write("Done.\n")

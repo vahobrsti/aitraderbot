@@ -125,6 +125,7 @@ class Command(BaseCommand):
         core_cooldown_days = 7
         probe_cooldown_days = 5
         tactical_cooldown_days = 7
+        option_cooldown_days = 7
 
         # Collect all trades with hit status
         all_trades = []
@@ -162,6 +163,8 @@ class Command(BaseCommand):
             last_long_date = None
             last_short_date = None
             last_tactical_date = None
+            last_option_call_date = None
+            last_option_put_date = None
 
             for date, row in df_year.iterrows():
                 result = fuse_signals(row)
@@ -284,6 +287,49 @@ class Command(BaseCommand):
                         })
                         last_tactical_date = date
 
+                # === OPTION SIGNAL CALL (tracked independently, like tactical puts) ===
+                signal_call = int(row.get("signal_option_call", 0))
+                signal_put = int(row.get("signal_option_put", 0))
+
+                if signal_call == 1:
+                    cooldown_ok = no_cooldown or last_option_call_date is None or (date - last_option_call_date).days >= option_cooldown_days
+                    overlay_ok = no_overlay or size_mult > 0
+                    if cooldown_ok and overlay_ok:
+                        hit = int(row.get("label_good_move_long", 0))
+                        all_trades.append({
+                            "date": date_str,
+                            "year": year,
+                            "type": "OPTION_CALL",
+                            "direction": "LONG",
+                            "state": result.state.value,
+                            "score": result.score,
+                            "source": "option_rule",
+                            "hit": hit,
+                            "p_long": row["p_long"],
+                            "p_short": row["p_short"],
+                        })
+                        last_option_call_date = date
+
+                # === OPTION SIGNAL PUT ===
+                if signal_put == 1:
+                    cooldown_ok = no_cooldown or last_option_put_date is None or (date - last_option_put_date).days >= option_cooldown_days
+                    overlay_ok = no_overlay or size_mult > 0
+                    if cooldown_ok and overlay_ok:
+                        hit = int(row.get("label_good_move_short", 0))
+                        all_trades.append({
+                            "date": date_str,
+                            "year": year,
+                            "type": "OPTION_PUT",
+                            "direction": "SHORT",
+                            "state": result.state.value,
+                            "score": result.score,
+                            "source": "option_rule",
+                            "hit": hit,
+                            "p_long": row["p_long"],
+                            "p_short": row["p_short"],
+                        })
+                        last_option_put_date = date
+
         # === PRINT RESULTS ===
         if not all_trades:
             self.stdout.write("No trades found.")
@@ -333,7 +379,7 @@ class Command(BaseCommand):
         self.stdout.write("HIT RATE BY TRADE TYPE")
         self.stdout.write(f"{'=' * 100}")
 
-        for trade_type in ["LONG", "BULL_PROBE", "PRIMARY_SHORT", "BEAR_PROBE", "TACTICAL_PUT"]:
+        for trade_type in ["LONG", "BULL_PROBE", "PRIMARY_SHORT", "BEAR_PROBE", "TACTICAL_PUT", "OPTION_CALL", "OPTION_PUT"]:
             type_df = trades_df[trades_df["type"] == trade_type]
             if len(type_df) > 0:
                 t_total = len(type_df)
