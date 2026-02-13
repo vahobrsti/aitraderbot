@@ -680,3 +680,182 @@ class TestConfidenceAdjustment(SimpleTestCase):
         )
         result = adjust_confidence_with_overlay(Confidence.MEDIUM, overlay)
         self.assertEqual(result, Confidence.MEDIUM)
+
+
+# =============================================================================
+# OPTION SIGNAL (TRADE DECISION) TESTS
+# =============================================================================
+
+class TestOptionSignalTradeDecision(SimpleTestCase):
+    """Test _determine_trade_decision for option signal fallback logic."""
+    
+    def _make_fusion_result(self, state=MarketState.NO_TRADE, score=0, confidence=Confidence.LOW, short_source=None):
+        return FusionResult(
+            state=state,
+            confidence=confidence,
+            score=score,
+            components={},
+            short_source=short_source,
+        )
+    
+    def _make_tactical_inactive(self):
+        from signals.tactical_puts import TacticalPutResult, TacticalPutStrategy
+        return TacticalPutResult(
+            active=False, strength=0, strategy=TacticalPutStrategy.NONE,
+            size_mult=0.0, dte_mult=1.0, reason="",
+        )
+    
+    def _make_overlay_clean(self):
+        return OverlayResult(
+            edge_strength=0, long_veto_strength=0, short_veto_strength=0,
+            short_edge_strength=0, score_adjustment=0, extended_dte=False,
+            reduced_size=False, reason="",
+        )
+    
+    def _make_overlay_vetoed(self):
+        return OverlayResult(
+            edge_strength=0, long_veto_strength=2, short_veto_strength=0,
+            short_edge_strength=0, score_adjustment=-2, extended_dte=False,
+            reduced_size=True, reason="STRONG VETO",
+        )
+    
+    def _call_decision(self, fusion_result=None, size_mult=1.0, dte_mult=1.0,
+                        tactical_result=None, p_long=0.5, p_short=0.5,
+                        signal_option_call=0, signal_option_put=0,
+                        overlay=None, option_call_ok=False, option_put_ok=False):
+        from signals.services import SignalService
+        svc = SignalService.__new__(SignalService)  # bypass __init__
+        return svc._determine_trade_decision(
+            fusion_result=fusion_result or self._make_fusion_result(),
+            size_mult=size_mult,
+            dte_mult=dte_mult,
+            tactical_result=tactical_result or self._make_tactical_inactive(),
+            p_long=p_long,
+            p_short=p_short,
+            signal_option_call=signal_option_call,
+            signal_option_put=signal_option_put,
+            overlay=overlay or self._make_overlay_clean(),
+            option_call_ok=option_call_ok,
+            option_put_ok=option_put_ok,
+        )
+    
+    # --- OPTION_CALL tests ---
+    
+    def test_option_call_fires_on_no_trade(self):
+        """OPTION_CALL fires when fusion=NO_TRADE, signal=1, cooldown OK, overlay clean."""
+        decision, notes, reasons, trace = self._call_decision(
+            signal_option_call=1, option_call_ok=True,
+        )
+        self.assertEqual(decision, "OPTION_CALL")
+        self.assertIn("MVRV cheap", notes)
+    
+    def test_option_put_fires_on_no_trade(self):
+        """OPTION_PUT fires when fusion=NO_TRADE, signal=1, cooldown OK, overlay clean."""
+        decision, notes, reasons, trace = self._call_decision(
+            signal_option_put=1, option_put_ok=True,
+        )
+        self.assertEqual(decision, "OPTION_PUT")
+        self.assertIn("MVRV overheated", notes)
+    
+    # --- Fusion priority tests ---
+    
+    def test_fusion_call_takes_priority_over_option_call(self):
+        """When fusion has a directional view, it takes priority over option signals."""
+        fusion = self._make_fusion_result(
+            state=MarketState.EARLY_RECOVERY, score=4, confidence=Confidence.HIGH,
+        )
+        decision, notes, reasons, trace = self._call_decision(
+            fusion_result=fusion,
+            signal_option_call=1, option_call_ok=True,
+        )
+        self.assertEqual(decision, "CALL")
+        self.assertIn("early_recovery", notes)
+    
+    def test_fusion_put_takes_priority_over_option_put(self):
+        """When fusion says short, it takes priority over option put signals."""
+        fusion = self._make_fusion_result(
+            state=MarketState.BEAR_CONTINUATION, score=-4, confidence=Confidence.LOW,
+            short_source="rule",
+        )
+        decision, notes, reasons, trace = self._call_decision(
+            fusion_result=fusion,
+            signal_option_put=1, option_put_ok=True,
+        )
+        self.assertEqual(decision, "PUT")
+    
+    def test_bull_probe_takes_priority_over_option(self):
+        """Bull probe (fusion directional) beats option signal."""
+        fusion = self._make_fusion_result(
+            state=MarketState.BULL_PROBE, score=2, confidence=Confidence.MEDIUM,
+        )
+        decision, _, _, _ = self._call_decision(
+            fusion_result=fusion,
+            signal_option_call=1, option_call_ok=True,
+        )
+        self.assertEqual(decision, "CALL")  # From bull probe, not OPTION_CALL
+    
+    # --- Overlay veto tests ---
+    
+    def test_option_call_vetoed_by_overlay(self):
+        """OPTION_CALL is blocked when overlay vetoes (size_mult=0)."""
+        decision, notes, reasons, trace = self._call_decision(
+            signal_option_call=1, option_call_ok=True, size_mult=0,
+        )
+        self.assertEqual(decision, "NO_TRADE")
+        self.assertIn("OPTION_CALL_OVERLAY_VETO", reasons)
+    
+    def test_option_put_vetoed_by_overlay(self):
+        """OPTION_PUT is blocked when overlay vetoes (size_mult=0)."""
+        decision, notes, reasons, trace = self._call_decision(
+            signal_option_put=1, option_put_ok=True, size_mult=0,
+        )
+        self.assertEqual(decision, "NO_TRADE")
+        self.assertIn("OPTION_PUT_OVERLAY_VETO", reasons)
+    
+    # --- Cooldown tests ---
+    
+    def test_option_call_blocked_by_cooldown(self):
+        """Option call signal fires but cooldown not passed → NO_TRADE."""
+        decision, _, reasons, trace = self._call_decision(
+            signal_option_call=1, option_call_ok=False,  # cooldown active
+        )
+        self.assertEqual(decision, "NO_TRADE")
+        self.assertTrue(any("cooldown_active" in t for t in trace))
+    
+    def test_option_put_blocked_by_cooldown(self):
+        """Option put signal fires but cooldown not passed → NO_TRADE."""
+        decision, _, reasons, trace = self._call_decision(
+            signal_option_put=1, option_put_ok=False,  # cooldown active
+        )
+        self.assertEqual(decision, "NO_TRADE")
+        self.assertTrue(any("cooldown_active" in t for t in trace))
+    
+    # --- Priority between CALL and PUT ---
+    
+    def test_option_call_priority_over_put(self):
+        """When both option signals fire, CALL takes priority."""
+        decision, notes, _, _ = self._call_decision(
+            signal_option_call=1, signal_option_put=1,
+            option_call_ok=True, option_put_ok=True,
+        )
+        self.assertEqual(decision, "OPTION_CALL")
+    
+    # --- Constants ---
+    
+    def test_option_signal_size_mult(self):
+        """Option signals use 0.50x sizing."""
+        from signals.services import OPTION_SIGNAL_SIZE_MULT
+        self.assertEqual(OPTION_SIGNAL_SIZE_MULT, 0.50)
+    
+    def test_option_signal_cooldown_days(self):
+        """Option signal cooldown is 7 days."""
+        from signals.services import OPTION_SIGNAL_COOLDOWN_DAYS
+        self.assertEqual(OPTION_SIGNAL_COOLDOWN_DAYS, 7)
+    
+    # --- NO_TRADE when no signals fire ---
+    
+    def test_no_trade_when_no_option_signals(self):
+        """Default NO_TRADE when fusion is NO_TRADE and no option signals fire."""
+        decision, _, reasons, _ = self._call_decision()
+        self.assertEqual(decision, "NO_TRADE")
+        self.assertIn("FUSION_STATE_NO_TRADE", reasons)
