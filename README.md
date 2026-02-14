@@ -91,7 +91,7 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
    └─ MDIA inflow + Whale sponsored + MVRV recovery
 
 🐻 BEAR_CONTINUATION
-   └─ (MDIA distrib OR not inflow) + Whale distrib + (MVRV put OR bear)
+   └─ NOT MDIA inflow + Whale distrib + (MVRV put OR bear)
 
 ⚠️ DISTRIBUTION_RISK
    └─ Whale distrib + not MDIA strong + (MVRV rollover/weak_down/warning)
@@ -103,7 +103,7 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
    └─ MDIA inflow + Whale sponsored + MVRV neutral
 
 🔴 BEAR_PROBE (0.5x sizing)
-   └─ MDIA distrib + Whale distrib + MVRV neutral
+   └─ Whale strong_distribution + MVRV neutral (no MDIA requirement)
 
 🟡 NO_TRADE
    └─ No alignment (fallback)
@@ -139,7 +139,7 @@ When fusion returns `NO_TRADE` (or any state), **rule-based option signals** can
 | Signal | Direction | Conditions | Sizing |
 |--------|-----------|------------|--------|
 | `OPTION_CALL` | 🟢 Long | MVRV cheap (2+ of: undervalued_90d, new_low_180d, near_bottom) + Sentiment fear (sent_norm < -1.0) | 0.75x |
-| `OPTION_PUT` | 🔴 Short | MVRV overheated (60d_pct > 0.80) + Sentiment greed (sent_norm > 1.0) + Whale distribution | 0.75x |
+| `OPTION_PUT` | 🔴 Short | MVRV near-peak (60d_pct ≥ 0.80 OR 60d_dist_from_max ≤ 0.20) + Sentiment greed (sent_norm > 1.0) + Whale distribution | 0.75x |
 
 Key design decisions:
 - **Independent of fusion**: Option signals fire based on `signal_option_call` / `signal_option_put` features from `interactions.py`, regardless of fusion state
