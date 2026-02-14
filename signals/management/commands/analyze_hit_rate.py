@@ -264,8 +264,9 @@ class Command(BaseCommand):
                         })
                         last_short_date = date
 
-                # === TACTICAL PUTS ===
-                if result.state in long_states:
+                # === TACTICAL PUTS (only when fusion LONG didn't already fire) ===
+                # Fusion rule trades take priority over tactical puts on the same date
+                if result.state in long_states and not (is_long_state and size_mult > 0 and not long_veto):
                     if not no_cooldown and last_tactical_date is not None:
                         if (date - last_tactical_date).days < tactical_cooldown_days:
                             continue
