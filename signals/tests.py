@@ -863,14 +863,14 @@ class TestOptionSignalTradeDecision(SimpleTestCase):
     # --- Constants ---
     
     def test_option_signal_size_mult(self):
-        """Option signals use 0.50x sizing."""
+        """Option signals use 0.75x sizing (boosted — 81% hit rate)."""
         from signals.services import OPTION_SIGNAL_SIZE_MULT
-        self.assertEqual(OPTION_SIGNAL_SIZE_MULT, 0.50)
+        self.assertEqual(OPTION_SIGNAL_SIZE_MULT, 0.75)
     
     def test_option_signal_cooldown_days(self):
-        """Option signal cooldown is 7 days."""
+        """Option signal cooldown is 5 days (reduced to capture more winners)."""
         from signals.services import OPTION_SIGNAL_COOLDOWN_DAYS
-        self.assertEqual(OPTION_SIGNAL_COOLDOWN_DAYS, 7)
+        self.assertEqual(OPTION_SIGNAL_COOLDOWN_DAYS, 5)
     
     # --- NO_TRADE when no signals fire ---
     
