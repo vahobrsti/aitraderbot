@@ -235,8 +235,8 @@ class SignalService:
         Determine final trade decision, notes, and diagnostics.
         
         Priority:
-            1. Tactical Put
-            2. Fusion state (CALL/PUT/probes)
+            1. Fusion state (CALL/PUT/probes)
+            2. Tactical Put (only when fusion=NO_TRADE)
             3. Option signal fallback (when fusion=NO_TRADE, with cooldown + overlay)
             4. NO_TRADE
         
@@ -250,15 +250,14 @@ class SignalService:
         fusion_step = f"fusion={fusion_result.state.value}(score={fusion_result.score},conf={fusion_result.confidence.value})"
         decision_trace.append(fusion_step)
         
-        # Check for tactical put first
-        if tactical_result.active:
-            decision_trace.append(f"tactical_put=active(strategy={tactical_result.strategy.value}) -> TRADE")
-            return "TACTICAL_PUT", tactical_result.reason, [], decision_trace
-        else:
-            decision_trace.append("tactical_put=inactive")
-        
-        # Check fusion state — if fusion has a directional view, use it
+        # Check fusion state first — if fusion has a directional view, use it
         if fusion_result.state != MarketState.NO_TRADE:
+            # Log tactical put status for tracing (but fusion takes priority)
+            if tactical_result.active:
+                decision_trace.append(f"tactical_put=active(strategy={tactical_result.strategy.value}) but fusion takes priority")
+            else:
+                decision_trace.append("tactical_put=inactive")
+            
             # Check confidence
             if fusion_result.confidence.value == "low":
                 no_trade_reasons.append("CONFIDENCE_TOO_LOW")
@@ -307,8 +306,14 @@ class SignalService:
             decision_trace.append("stop_reason=STATE_NOT_TRADEABLE")
             return "NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, decision_trace
         
-        # --- Fusion is NO_TRADE — check option signal fallback ---
+        # --- Fusion is NO_TRADE — check tactical put fallback ---
         decision_trace.append("fusion=NO_TRADE")
+        
+        if tactical_result.active:
+            decision_trace.append(f"tactical_put=active(strategy={tactical_result.strategy.value}) -> TRADE")
+            return "TACTICAL_PUT", tactical_result.reason, [], decision_trace
+        else:
+            decision_trace.append("tactical_put=inactive")
         
         # Option CALL fallback
         if option_call_ok:
