@@ -794,6 +794,26 @@ class TestOptionSignalTradeDecision(SimpleTestCase):
         )
         self.assertEqual(decision, "CALL")  # From bull probe, not OPTION_CALL
     
+    def test_fusion_call_beats_tactical_put(self):
+        """When fusion has a directional view (e.g., EARLY_RECOVERY), it beats tactical put."""
+        from signals.tactical_puts import TacticalPutResult, TacticalPutStrategy
+        fusion = self._make_fusion_result(
+            state=MarketState.EARLY_RECOVERY, score=4, confidence=Confidence.HIGH,
+        )
+        tactical_active = TacticalPutResult(
+            active=True, strength=2, strategy=TacticalPutStrategy.PUT_SPREAD,
+            size_mult=0.60, dte_mult=0.85,
+            reason="FULL: Bull regime + MVRV-60d near-peak & rolling over",
+        )
+        decision, notes, _, trace = self._call_decision(
+            fusion_result=fusion,
+            tactical_result=tactical_active,
+        )
+        self.assertEqual(decision, "CALL")
+        self.assertIn("early_recovery", notes)
+        # Verify trace shows tactical was noted but fusion took priority
+        self.assertTrue(any("fusion takes priority" in t for t in trace))
+    
     # --- Overlay veto tests ---
     
     def test_option_call_vetoed_by_overlay(self):
