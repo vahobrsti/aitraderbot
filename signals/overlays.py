@@ -261,6 +261,35 @@ def compute_short_overlay(row: pd.Series, is_confirmed_bear: bool, is_bear_probe
     return 0, 0, f"No short overlay active (score={score:.2f})"
 
 
+# ============================================================================
+# EFB (Exchange Flow Balance) Distribution Pressure Overlay
+# Vetoes OPTION_PUT when distribution pressure is too low (supply tightening)
+# Threshold tuned from historical miss analysis (69% veto accuracy)
+# ============================================================================
+
+EFB_OPTION_PUT_THRESHOLD = 0.40
+
+
+def compute_efb_veto(row: pd.Series) -> tuple[int, str]:
+    """
+    Veto OPTION_PUT trades when distribution_pressure_score is too low.
+
+    Low distribution pressure = BTC leaving exchanges = supply tightening
+    = shorts are unreliable.
+
+    Returns:
+        (veto_strength, reason) where 1 = soft veto, 0 = no veto
+    """
+    dp = row.get("distribution_pressure_score")
+    if dp is None or pd.isna(dp):
+        return 0, "EFB: no distribution_pressure_score available"
+
+    if dp < EFB_OPTION_PUT_THRESHOLD:
+        return 1, f"EFB SOFT VETO: distribution_pressure={dp:.3f} < {EFB_OPTION_PUT_THRESHOLD:.2f}"
+
+    return 0, f"EFB: distribution_pressure={dp:.3f} OK (>= {EFB_OPTION_PUT_THRESHOLD:.2f})"
+
+
 def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult:
     """
     Apply overlays to a fusion result.

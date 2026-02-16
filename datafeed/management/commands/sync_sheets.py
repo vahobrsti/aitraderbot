@@ -31,7 +31,8 @@ SHEET_FIELD_MAP = {
     "BTC_holders_100_1k": "btc_holders_100_1k",
     "BTC_holders_1k_10k": "btc_holders_1k_10k",
     "sentiment_weighted_total": "sentiment_weighted_total",
-    "btc_price":"btc_price_mean"
+    "btc_price": "btc_price_mean",
+    "san_exchange_funds_flow": "exchange_flow_balance",
 }
 
 

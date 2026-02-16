@@ -5,6 +5,7 @@ from features.metrics import (
     mvrv_long_short,
     mvrv_composite,
     whales,
+    exchange_flow,
     sentiment,
     interactions,
     labels,
@@ -41,6 +42,10 @@ def build_features_and_labels_from_raw(
     if 'sentiment_weighted_total' in df.columns:
         df['sentiment_raw'] = df['sentiment_weighted_total']
 
+    # 4. Exchange Flow Raw (for exchange_flow.py)
+    if 'exchange_flow_balance' in df.columns:
+        df['exchange_flow_raw'] = df['exchange_flow_balance']
+
     # Execute modules in dependency order
     feature_dfs = []
 
@@ -69,17 +74,22 @@ def build_features_and_labels_from_raw(
     feature_dfs.append(df_whales)
     df = pd.concat([df, df_whales], axis=1)
 
-    # 6. Sentiment (Uses sentiment_raw)
+    # 6. Exchange Flow (Uses exchange_flow_raw)
+    df_flow = exchange_flow.calculate(df)
+    feature_dfs.append(df_flow)
+    df = pd.concat([df, df_flow], axis=1)
+
+    # 7. Sentiment (Uses sentiment_raw)
     df_sent = sentiment.calculate(df)
     feature_dfs.append(df_sent)
     df = pd.concat([df, df_sent], axis=1)
 
-    # 7. Interactions (Uses MVRV Comp features, Sentiment, Whales)
+    # 8. Interactions (Uses MVRV Comp features, Sentiment, Whales)
     df_inter = interactions.calculate(df)
     feature_dfs.append(df_inter)
     df = pd.concat([df, df_inter], axis=1)
 
-    # 8. Labels (Uses mean_price)
+    # 9. Labels (Uses mean_price)
     df_labels = labels.calculate(df, horizon_days=horizon_days, target_return=target_return)
     feature_dfs.append(df_labels)
     # No need to update df for labels as it's the last step
