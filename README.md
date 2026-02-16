@@ -146,7 +146,7 @@ Key design decisions:
 - **7-day cooldown**: Prevents rapid consecutive option signals
 - **Overlay filtered**: Subject to the same overlay veto logic (size_mult == 0 blocks the trade)
 - **In production** (`services.py`): Only promoted to actual trade when fusion = NO_TRADE (fusion takes priority)
-- **In analysis** (`analyze_hit_rate`): Tracked independently alongside fusion trades (like TACTICAL_PUT)
+- **In analysis** (`analyze_hit_rate`): Tracked independently alongside fusion trades, but suppressed on dates where a fusion LONG already fires
 
 Use `analyze_fusion --explain --date YYYY-MM-DD` to see both fusion state and option signal status.
 
@@ -267,7 +267,7 @@ Uses a blended "near-peak score" from `mvrv_60d_pct_rank` and `mvrv_60d_dist_fro
 | BULL_PROBE | 🟢 Long | 0.35-0.60x | Fusion | Call spread (defined risk) |
 | PRIMARY_SHORT | 🔴 Short | 1.0x | Fusion | Puts |
 | BEAR_PROBE | 🔴 Short | 0.35-0.60x | Fusion | Put spread (defined risk) |
-| TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Fusion | Hedge inside bull regimes |
+| TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Tactical | Hedge inside bull regimes (only when fusion = NO_TRADE) |
 | OPTION_CALL | 🟢 Long | 0.50x | Rule | MVRV cheap + fear fallback |
 | OPTION_PUT | 🔴 Short | 0.50x | Rule | MVRV hot + greed fallback |
 
@@ -616,9 +616,10 @@ A **7-day GLOBAL cooldown** (blocking ALL trades after any trade) prevents clust
 2. **Whale sponsorship required**: No trade without smart money alignment
 3. **Probes are smaller**: Macro-neutral trades use defined risk at 0.5x
 4. **Overlays never override fusion**: They amplify or reduce, not flip
-5. **Clustering prevention**: 7-day cooldown collapses events into single trades
-6. **ML + Rules hybrid**: ML for probability, rules for regime classification
-7. **Fallback signals**: Option signals fire when fusion has no view, catching extremes fusion misses
+5. **Fusion beats tactical**: When fusion has a directional view, it takes priority over tactical puts (rule signals outperform tactical 59% vs 39% on contested dates)
+6. **Clustering prevention**: 7-day cooldown collapses events into single trades
+7. **ML + Rules hybrid**: ML for probability, rules for regime classification
+8. **Fallback signals**: Option signals and tactical puts fire when fusion has no view, catching extremes fusion misses
 
 ---
 
