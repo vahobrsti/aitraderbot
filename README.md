@@ -24,11 +24,12 @@ Think of it as: **MDIA = ignition, Whales = fuel, MVRV-LS = terrain**
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │                       FEATURE LAYER                              │
-│  features/feature_builder.py → 60+ regime features               │
+│  features/feature_builder.py → 70+ regime features               │
 │  - MDIA slopes, buckets, regimes                                 │
 │  - MVRV composite, LS, 60d percentiles                           │
 │  - Whale accumulation/distribution patterns                      │
 │  - Sentiment z-scores, buckets                                   │
+│  - Exchange flow balance (EFB) distribution pressure             │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
@@ -240,9 +241,11 @@ Overlays (`signals/overlays.py`) modify **how hard** you press a trade. They nev
 | **Moderate Veto** (-1) | Euphoria persisting | Size -50% |
 | **Strong Veto** (-2) | Euphoria + MVRV overvalued rollover | **No trade** |
 
-### Short Overlays (MVRV-60d Only)
+### Short Overlays (MVRV-60d + EFB Distribution Pressure)
 
-Uses a blended "near-peak score" from `mvrv_60d_pct_rank` and `mvrv_60d_dist_from_max`:
+**Layer 1: MVRV-60d Near-Peak Score**
+
+Blends `mvrv_60d_pct_rank` and `mvrv_60d_dist_from_max`:
 
 | Score | Overlay | Effect |
 |-------|---------|--------|
@@ -251,11 +254,18 @@ Uses a blended "near-peak score" from `mvrv_60d_pct_rank` and `mvrv_60d_dist_fro
 | ≤ 0.35 | Soft Veto | Size -50% |
 | ≤ 0.25 | Hard Veto | **No trade** |
 
+**Layer 2: EFB Distribution Pressure** (`compute_efb_veto`)
+
+Vetoes `OPTION_PUT` trades when `distribution_pressure_score < 0.40` (BTC leaving exchanges = supply tightening = shorts unreliable). Applied in `services._determine_trade_decision()` after overlay check. Tuned from historical miss analysis: OPTION_PUT HR improved from 47% → 57% (69% veto accuracy, +5 net correct vetoes).
+
+The `distribution_pressure_score` is a composite of `flow_sum_7` (60%), `flow_slope_7` (25%), and `flow_z_90` (15%) from the exchange flow feature module (`features/metrics/exchange_flow.py`).
+
 ### Veto Dominance Rules
 
 1. **STRONG/HARD veto always wins** (overrides any edge)
 2. **Moderate/soft veto beats partial edge**
 3. **Full edge can override moderate veto**
+4. **EFB veto only applies to OPTION_PUT** (soft veto, never downgrades existing decisions)
 
 ---
 

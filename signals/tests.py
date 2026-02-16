@@ -722,9 +722,12 @@ class TestOptionSignalTradeDecision(SimpleTestCase):
     def _call_decision(self, fusion_result=None, size_mult=1.0, dte_mult=1.0,
                         tactical_result=None, p_long=0.5, p_short=0.5,
                         signal_option_call=0, signal_option_put=0,
-                        overlay=None, option_call_ok=False, option_put_ok=False):
+                        overlay=None, option_call_ok=False, option_put_ok=False,
+                        row=None):
         from signals.services import SignalService
         svc = SignalService.__new__(SignalService)  # bypass __init__
+        if row is None:
+            row = make_row(distribution_pressure_score=0.90)
         return svc._determine_trade_decision(
             fusion_result=fusion_result or self._make_fusion_result(),
             size_mult=size_mult,
@@ -735,6 +738,7 @@ class TestOptionSignalTradeDecision(SimpleTestCase):
             signal_option_call=signal_option_call,
             signal_option_put=signal_option_put,
             overlay=overlay or self._make_overlay_clean(),
+            row=row,
             option_call_ok=option_call_ok,
             option_put_ok=option_put_ok,
         )
