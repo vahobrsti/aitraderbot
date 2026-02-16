@@ -33,15 +33,13 @@ def calculate(df: pd.DataFrame) -> pd.DataFrame:
     for w in sum_windows:
         feats[f"flow_sum_{w}"] = raw.rolling(w, min_periods=1).sum()
 
-    # ========== B) MOMENTUM / ACCELERATION (OLS regression slope) ==========
-    # True slope = linear regression coefficient over the window
-    # Measures rate of change of raw flow, not just boundary differences
+    # ========== B) MOMENTUM / ACCELERATION ==========
+    # slope = S_t - S_{t-w} (change in rolling sum over a full window)
+    # Measures true momentum of supply build-up / withdrawal
     slope_windows = [2, 4, 7, 14]
     for w in slope_windows:
-        feats[f"flow_slope_{w}"] = raw.rolling(w, min_periods=w).apply(
-            lambda x: np.polyfit(range(len(x)), x, 1)[0],
-            raw=True,
-        )
+        rolling_sum = feats[f"flow_sum_{w}"]
+        feats[f"flow_slope_{w}"] = rolling_sum - rolling_sum.shift(w)
 
     # ========== C) EXTREMENESS ==========
     # Z-scores of 7-day rolling sum against longer baselines
@@ -59,7 +57,7 @@ def calculate(df: pd.DataFrame) -> pd.DataFrame:
 
     # 180-day percentile rank (robust to fat tails)
     feats["flow_pct_rank_180"] = flow_sum_7.rolling(180, min_periods=60).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1],
+        lambda x: (x <= x.iloc[-1]).mean(),
         raw=False,
     )
 
@@ -67,11 +65,11 @@ def calculate(df: pd.DataFrame) -> pd.DataFrame:
     # distribution_pressure_score: blended from normalised flow_sum_7 + slope_7 + z_90
     # Each component normalised to roughly 0-1 using 90-day percentile rank
     norm_sum_7 = flow_sum_7.rolling(90, min_periods=30).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1],
+        lambda x: (x <= x.iloc[-1]).mean(),
         raw=False,
     )
     norm_slope_7 = feats["flow_slope_7"].rolling(90, min_periods=30).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1],
+        lambda x: (x <= x.iloc[-1]).mean(),
         raw=False,
     )
     z_90 = feats["flow_z_90"]
@@ -79,16 +77,9 @@ def calculate(df: pd.DataFrame) -> pd.DataFrame:
     norm_z_90 = ((z_90.clip(-2, 2) + 2) / 4)
 
     feats["distribution_pressure_score"] = (
-        0.4 * norm_sum_7.fillna(0.5)
-        + 0.3 * norm_slope_7.fillna(0.5)
-        + 0.3 * norm_z_90.fillna(0.5)
+        0.60 * norm_sum_7.fillna(0.5)
+        + 0.25 * norm_slope_7.fillna(0.5)
+        + 0.15 * norm_z_90.fillna(0.5)
     )
-
-    # high_inflow_flag: simple binary threshold
-    feats["high_inflow_flag"] = (
-        (feats["flow_z_90"] > 1.5)
-        & (flow_sum_7 > 0)
-        & (feats["flow_slope_7"] > 0)
-    ).astype(int)
 
     return pd.DataFrame(feats, index=df.index)
