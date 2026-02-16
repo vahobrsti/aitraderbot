@@ -14,7 +14,7 @@ from datafeed.models import RawDailyData
 from features.feature_builder import build_features_and_labels_from_raw
 from signals.models import DailySignal
 from signals.fusion import fuse_signals, MarketState
-from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier
+from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier, compute_efb_veto
 from signals.tactical_puts import tactical_put_inside_bull
 from signals.options import get_strategy_summary
 
@@ -156,7 +156,7 @@ class SignalService:
         
         trade_decision, trade_notes, no_trade_reasons, decision_trace = self._determine_trade_decision(
             fusion_result, size_mult, dte_mult, tactical_result, p_long, p_short,
-            signal_option_call, signal_option_put, overlay,
+            signal_option_call, signal_option_put, overlay, row,
             option_call_ok=option_call_ok, option_put_ok=option_put_ok,
         )
         
@@ -228,7 +228,7 @@ class SignalService:
 
     def _determine_trade_decision(
         self, fusion_result, size_mult, dte_mult, tactical_result,
-        p_long, p_short, signal_option_call, signal_option_put, overlay,
+        p_long, p_short, signal_option_call, signal_option_put, overlay, row,
         option_call_ok=False, option_put_ok=False,
     ) -> tuple[str, str, list, list]:
         """
@@ -335,6 +335,12 @@ class SignalService:
                 no_trade_reasons.append("FUSION_STATE_NO_TRADE")
                 no_trade_reasons.append("OPTION_PUT_OVERLAY_VETO")
                 return "NO_TRADE", "Option put fired but overlay vetoed", no_trade_reasons, decision_trace
+            # Check EFB veto for option puts
+            efb_veto, efb_reason = compute_efb_veto(row)
+            if efb_veto >= 1:
+                decision_trace.append(f"option_put=fired but {efb_reason} -> NO_TRADE")
+                no_trade_reasons.append("EFB_VETO_OPTION_PUT")
+                return "NO_TRADE", f"Option put fired but EFB vetoed ({efb_reason})", no_trade_reasons, decision_trace
             decision_trace.append(f"option_put=fired(cooldown_ok) -> OPTION_PUT (size={OPTION_SIGNAL_SIZE_MULT})")
             return "OPTION_PUT", "Rule: MVRV overheated + Sentiment greed + Whale distrib", [], decision_trace
         elif signal_option_put == 1:

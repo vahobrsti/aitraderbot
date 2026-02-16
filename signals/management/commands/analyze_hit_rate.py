@@ -16,7 +16,7 @@ import joblib
 from collections import defaultdict
 
 from signals.fusion import fuse_signals, add_fusion_features, MarketState
-from signals.overlays import apply_overlays, get_size_multiplier
+from signals.overlays import apply_overlays, get_size_multiplier, compute_efb_veto
 from signals.tactical_puts import tactical_put_inside_bull
 
 
@@ -316,6 +316,10 @@ class Command(BaseCommand):
                     cooldown_ok = no_cooldown or last_option_put_date is None or (date - last_option_put_date).days >= option_cooldown_days
                     overlay_ok = no_overlay or size_mult > 0
                     if cooldown_ok and overlay_ok:
+                        # EFB veto for OPTION_PUT
+                        efb_veto, _ = compute_efb_veto(row)
+                        if efb_veto >= 1:
+                            continue
                         hit = int(row.get("label_good_move_short", 0))
                         all_trades.append({
                             "date": date_str,

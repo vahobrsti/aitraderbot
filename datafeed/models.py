@@ -27,6 +27,9 @@ class RawDailyData(models.Model):
     btc_holders_100_1k = models.FloatField(null=True, blank=True)
     btc_holders_1k_10k = models.FloatField(null=True, blank=True)
 
+    # Exchange Funds Flow
+    exchange_flow_balance = models.FloatField(null=True, blank=True)  # inflows - outflows
+
     # Sentiment
     sentiment_weighted_total = models.FloatField(null=True, blank=True)
 
