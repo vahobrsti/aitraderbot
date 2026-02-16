@@ -92,7 +92,7 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
    └─ MDIA inflow + Whale sponsored + MVRV recovery
 
 🐻 BEAR_CONTINUATION
-   └─ (MDIA distrib OR not inflow) + Whale distrib + (MVRV put OR bear)
+   └─ NOT MDIA inflow + Whale distrib + (MVRV put OR bear)
 
 ⚠️ DISTRIBUTION_RISK
    └─ Whale distrib + not MDIA strong + (MVRV rollover/weak_down/warning)
@@ -104,15 +104,15 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
    └─ MDIA inflow + Whale sponsored + MVRV neutral
 
 🔴 BEAR_PROBE (0.5x sizing)
-   └─ Whale STRONG distrib + MVRV neutral (MDIA ignored)
+   └─ Whale strong_distribution + MVRV neutral (no MDIA requirement)
 
 🟡 NO_TRADE
    └─ No alignment (fallback)
 
-📗 OPTION_CALL (0.5x sizing, rule-based fallback)
+📗 OPTION_CALL (0.75x sizing, rule-based fallback)
    └─ MVRV cheap (2+ flags) + Sentiment fear — fires on ANY fusion state
 
-📕 OPTION_PUT (0.5x sizing, rule-based fallback)
+📕 OPTION_PUT (0.75x sizing, rule-based fallback)
    └─ MVRV overheated + Sentiment greed + Whale distrib — fires on ANY fusion state
 ```
 
@@ -139,12 +139,12 @@ When fusion returns `NO_TRADE` (or any state), **rule-based option signals** can
 
 | Signal | Direction | Conditions | Sizing |
 |--------|-----------|------------|--------|
-| `OPTION_CALL` | 🟢 Long | MVRV cheap (2+ of: undervalued_90d, new_low_180d, near_bottom) + Sentiment fear (sent_norm < -1.0) | 0.50x |
-| `OPTION_PUT` | 🔴 Short | MVRV overheated (60d_pct > 0.80) + Sentiment greed (sent_norm > 1.0) + Whale distribution | 0.50x |
+| `OPTION_CALL` | 🟢 Long | MVRV cheap (2+ of: undervalued_90d, new_low_180d, near_bottom) + Sentiment fear (sent_norm < -1.0) | 0.75x |
+| `OPTION_PUT` | 🔴 Short | MVRV near-peak (60d_pct ≥ 0.80 OR 60d_dist_from_max ≤ 0.20) + Sentiment greed (sent_norm > 1.0) + Whale distribution | 0.75x |
 
 Key design decisions:
 - **Independent of fusion**: Option signals fire based on `signal_option_call` / `signal_option_put` features from `interactions.py`, regardless of fusion state
-- **7-day cooldown**: Prevents rapid consecutive option signals
+- **5-day cooldown**: Prevents rapid consecutive option signals (reduced from 7d — OPTION_CALL hits 81%)
 - **Overlay filtered**: Subject to the same overlay veto logic (size_mult == 0 blocks the trade)
 - **In production** (`services.py`): Only promoted to actual trade when fusion = NO_TRADE (fusion takes priority)
 - **In analysis** (`analyze_hit_rate`): Tracked independently alongside fusion trades, but suppressed on dates where a fusion LONG already fires
@@ -271,15 +271,15 @@ The `distribution_pressure_score` is a composite of `flow_sum_7` (60%), `flow_sl
 
 ## Trade Types
 
-| Type | Direction | Sizing | Source | Strategy |
-|------|-----------|--------|--------|----------|
-| LONG | 🟢 Long | 1.0x | Fusion | Calls |
-| BULL_PROBE | 🟢 Long | 0.35-0.60x | Fusion | Call spread (defined risk) |
-| PRIMARY_SHORT | 🔴 Short | 1.0x | Fusion | Puts |
-| BEAR_PROBE | 🔴 Short | 0.35-0.60x | Fusion | Put spread (defined risk) |
-| TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Tactical | Hedge inside bull regimes (only when fusion = NO_TRADE) |
-| OPTION_CALL | 🟢 Long | 0.50x | Rule | MVRV cheap + fear fallback |
-| OPTION_PUT | 🔴 Short | 0.50x | Rule | MVRV hot + greed fallback |
+| Type | Direction | Sizing | Source | Strategy | Hit Rate |
+|------|-----------|--------|--------|----------|----------|
+| LONG | 🟢 Long | 1.0x | Fusion | Calls | **72.6%** |
+| BULL_PROBE | 🟢 Long | 0.35-0.60x | Fusion | Call spread (defined risk) | 60.8% |
+| PRIMARY_SHORT | 🔴 Short | 1.0x | Fusion | Puts | 62.5% |
+| BEAR_PROBE | 🔴 Short | 0.35-0.60x | Fusion | Put spread (defined risk) | 54.8% |
+| TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Tactical | Hedge inside bull regimes (only when fusion = NO_TRADE) | — |
+| OPTION_CALL | 🟢 Long | 0.75x | Rule | MVRV cheap + fear fallback | **81.2%** |
+| OPTION_PUT | 🔴 Short | 0.75x | Rule | MVRV hot + greed fallback | 44.0% |
 
 ---
 
@@ -445,8 +445,8 @@ python manage.py analyze_neutral
 | TACTICAL_PUT | 7 days |
 | BULL_PROBE | 5 days |
 | BEAR_PROBE | 5 days |
-| OPTION_CALL | 7 days |
-| OPTION_PUT | 7 days |
+| OPTION_CALL | 5 days |
+| OPTION_PUT | 5 days |
 
 ### Environment Variables
 
@@ -512,7 +512,7 @@ signal_option_put  = 0
 --- OPTION STRATEGY ---
    Structures: long_call
    Strike: atm
-   DTE: 45-90d
+   DTE: 14-45d
    Rationale: High conviction bullish setup
 
 ============================================================

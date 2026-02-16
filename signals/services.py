@@ -19,8 +19,8 @@ from signals.tactical_puts import tactical_put_inside_bull
 from signals.options import get_strategy_summary
 
 # Option signal constants
-OPTION_SIGNAL_COOLDOWN_DAYS = 7
-OPTION_SIGNAL_SIZE_MULT = 0.50
+OPTION_SIGNAL_COOLDOWN_DAYS = 5   # was 7 — OPTION_CALL hits 81%, let more through
+OPTION_SIGNAL_SIZE_MULT = 0.75    # was 0.50 — size up on best-performing signal
 
 
 @dataclass
