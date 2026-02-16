@@ -108,10 +108,10 @@ STRATEGY_MAP = {
             OptionStructure.CALL_DIAGONAL,  # If IV elevated
         ],
         strike_guidance=StrikeSelection.SLIGHT_OTM,
-        dte=DTEGuidance(min_dte=45, max_dte=90, optimal_dte=60),
-        sizing=PositionSizing(high_confidence=0.05, medium_confidence=0.03, low_confidence=0.01),
+        dte=DTEGuidance(min_dte=14, max_dte=45, optimal_dte=30),
+        sizing=PositionSizing(high_confidence=0.06, medium_confidence=0.04, low_confidence=0.02),
         rationale="Fresh capital + smart money + exhaustion resolved. Size up.",
-        campaign_bonus="If whale_mega_campaign_accum=1: extend DTE to 90-120d",
+        campaign_bonus="If whale_mega_campaign_accum=1: extend DTE to 45-60d",
     ),
     
     # 📈 EARLY RECOVERY (Asymmetric Upside)
@@ -125,10 +125,10 @@ STRATEGY_MAP = {
             OptionStructure.RATIO_CALL_SPREAD,  # Advanced
         ],
         strike_guidance=StrikeSelection.ATM,
-        dte=DTEGuidance(min_dte=60, max_dte=120, optimal_dte=90),
-        sizing=PositionSizing(high_confidence=0.04, medium_confidence=0.02, low_confidence=0.01),
+        dte=DTEGuidance(min_dte=21, max_dte=60, optimal_dte=45),
+        sizing=PositionSizing(high_confidence=0.05, medium_confidence=0.03, low_confidence=0.015),
         rationale="Direction likely right, timing uncertain. Options shine here.",
-        campaign_bonus="Use long back leg (60-120d), short front leg (15-30d)",
+        campaign_bonus="Use long back leg (30-60d), short front leg (7-14d)",
     ),
     
     # 🔥 MOMENTUM CONTINUATION
@@ -142,8 +142,8 @@ STRATEGY_MAP = {
             OptionStructure.LONG_CALL,  # Shorter dated
         ],
         strike_guidance=StrikeSelection.SLIGHT_OTM,
-        dte=DTEGuidance(min_dte=21, max_dte=45, optimal_dte=30),
-        sizing=PositionSizing(high_confidence=0.03, medium_confidence=0.02, low_confidence=0.0),
+        dte=DTEGuidance(min_dte=14, max_dte=30, optimal_dte=21),
+        sizing=PositionSizing(high_confidence=0.04, medium_confidence=0.03, low_confidence=0.01),
         rationale="Trend continuation without strong sponsorship. Good trades, not lifetime trades.",
     ),
     
@@ -158,10 +158,10 @@ STRATEGY_MAP = {
             OptionStructure.SHORT_CALL_SPREAD,  # Advanced
         ],
         strike_guidance=StrikeSelection.ATM,
-        dte=DTEGuidance(min_dte=45, max_dte=90, optimal_dte=60),
+        dte=DTEGuidance(min_dte=14, max_dte=45, optimal_dte=30),
         sizing=PositionSizing(high_confidence=0.03, medium_confidence=0.02, low_confidence=0.0),
         rationale="Smart money exiting. Profit from stalls/reversals. Theta + convexity.",
-        campaign_bonus="Short leg 7-21d, Long leg 45-90d",
+        campaign_bonus="Short leg 7-14d, Long leg 21-45d",
     ),
     
     # 🐻 BEAR CONTINUATION
@@ -175,7 +175,7 @@ STRATEGY_MAP = {
             OptionStructure.BROKEN_WING_BUTTERFLY,
         ],
         strike_guidance=StrikeSelection.SLIGHT_OTM,
-        dte=DTEGuidance(min_dte=30, max_dte=60, optimal_dte=45),
+        dte=DTEGuidance(min_dte=14, max_dte=30, optimal_dte=21),
         sizing=PositionSizing(high_confidence=0.04, medium_confidence=0.02, low_confidence=0.0),
         rationale="No buyers, sellers in control. Directional downside with protection.",
     ),
@@ -190,7 +190,7 @@ STRATEGY_MAP = {
             OptionStructure.CALL_DIAGONAL,
         ],
         strike_guidance=StrikeSelection.ATM,
-        dte=DTEGuidance(min_dte=30, max_dte=60, optimal_dte=45),
+        dte=DTEGuidance(min_dte=14, max_dte=30, optimal_dte=21),
         sizing=PositionSizing(high_confidence=0.02, medium_confidence=0.015, low_confidence=0.0),
         rationale="Early signs of buying. Small probe position with defined risk.",
     ),
@@ -205,7 +205,7 @@ STRATEGY_MAP = {
             OptionStructure.PUT_DIAGONAL,
         ],
         strike_guidance=StrikeSelection.ATM,
-        dte=DTEGuidance(min_dte=30, max_dte=60, optimal_dte=45),
+        dte=DTEGuidance(min_dte=14, max_dte=30, optimal_dte=21),
         sizing=PositionSizing(high_confidence=0.02, medium_confidence=0.015, low_confidence=0.0),
         rationale="Early signs of distribution. Small probe position with defined risk.",
     ),
