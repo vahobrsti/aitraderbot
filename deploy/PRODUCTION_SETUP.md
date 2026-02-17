@@ -88,10 +88,30 @@ Add these lines:
 20 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py generate_signal >> /var/www/app/logs/cron.log 2>&1
 
 # ============================================
+# Daily Backups (UTC times)
+# ============================================
+
+# 01:00 - Backup PostgreSQL database to S3
+0 1 * * * cd /var/www/app && bash scripts/backup_db.sh >> /var/www/app/logs/backup.log 2>&1
+
+# 01:05 - Backup features CSV to S3
+5 1 * * * cd /var/www/app && bash scripts/backup_features.sh >> /var/www/app/logs/backup.log 2>&1
+
+# ============================================
 # Weekly Model Retraining (Sundays 3 AM UTC)
 # ============================================
 0 3 * * 0 cd /var/www/app && /var/www/app/venv/bin/python manage.py train_models --production --mode hybrid --lag 1 >> /var/www/app/logs/training.log 2>&1
 ```
+
+---
+
+## 🛠️ Helper Scripts
+
+| Script | Purpose | Usage |
+|--------|---------|-------|
+| `scripts/backup_db.sh` | Dump DB → S3 `db-backups/` | Runs via cron; or `bash scripts/backup_db.sh` |
+| `scripts/backup_features.sh` | Features CSV → S3 `features-backups/` | Runs via cron; or `bash scripts/backup_features.sh` |
+| `scripts/analyze_fusion.sh` | Quick `analyze_fusion --explain` | `bash scripts/analyze_fusion.sh [--date YYYY-MM-DD]` |
 
 ---
 
