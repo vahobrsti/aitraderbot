@@ -134,6 +134,28 @@ Check `short_source` field: `'rule'` or `'score'`.
 
 ---
 
+---
+
+## Statistical Models (Time-to-Hit)
+
+Based on 114 successful trades (hits) from 2017–2025:
+
+| Metric | Value | Insight |
+|--------|-------|---------|
+| **Median Time** | **4.0 days** | Winners validate quickly. |
+| **Mean Time** | 5.2 days | Skewed by a few slower trades (max 14d). |
+| **Fastest Hits** | OPTION_PUT (2.0d) | Downside moves are sharper. |
+| **Slowest Hits** | LONG (5.0d) | Organic growth takes slightly longer. |
+
+**Distribution of Days-to-Hit:**
+- **1–3 days**: 40% (Quick profit taking)
+- **4–7 days**: 35% (Standard swing)
+- **8–14 days**: 25% (Grinding moves)
+
+> **Strategic Implication**: If a trade hasn't hit its target by **Day 7**, the probability of a "clean win" drops significantly. Consider tightening stops or taking partial profits if available.
+
+---
+
 ## Actionable Recommendations
 
 1. **Trust EARLY_RECOVERY** — 83% hit rate. Your best fusion signal. Size up.
@@ -170,6 +192,10 @@ python manage.py analyze_hit_rate --year 2025
 # Score a CSV dataset
 python manage.py score_dataset
 
+
 # Diagnose NO_TRADE days
 python manage.py diagnose_notrade --year 2025
+
+# Analyze Days-to-Hit (Performance)
+python analyze_days_to_hit.py --year 2024
 ```
