@@ -193,9 +193,7 @@ python manage.py analyze_hit_rate --year 2025
 python manage.py score_dataset
 
 
+
 # Diagnose NO_TRADE days
 python manage.py diagnose_notrade --year 2025
-
-# Analyze Days-to-Hit (Performance)
-python analyze_days_to_hit.py --year 2024
 ```
