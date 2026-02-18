@@ -107,9 +107,9 @@ class TelegramNotifier:
             mdia = signal.score_components.get('mdia', {})
             whale = signal.score_components.get('whale', {})
             mvrv = signal.score_components.get('mvrv_ls', {})
-            msg += f"  • MDIA: `{mdia.get('score', 0):+d}` ({mdia.get('label', 'n/a')})\n"
-            msg += f"  • Whales: `{whale.get('score', 0):+d}` ({whale.get('label', 'n/a')})\n"
-            msg += f"  • MVRV: `{mvrv.get('score', 0):+d}` ({mvrv.get('label', 'n/a')})\n"
+            msg += f"  • MDIA: `{mdia.get('score', 0):+d}` (`{mdia.get('label', 'n/a')}`)\n"
+            msg += f"  • Whales: `{whale.get('score', 0):+d}` (`{whale.get('label', 'n/a')}`)\n"
+            msg += f"  • MVRV: `{mvrv.get('score', 0):+d}` (`{mvrv.get('label', 'n/a')}`)\n"
         msg += "\n"
         
         # ML Probabilities
