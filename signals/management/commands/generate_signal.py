@@ -97,12 +97,20 @@ class Command(BaseCommand):
                     signal_option_call=result.signal_option_call,
                     signal_option_put=result.signal_option_put,
                     fusion_state=result.fusion_state,
+                    fusion_confidence=result.fusion_confidence,
                     fusion_score=result.fusion_score,
                     trade_decision=result.trade_decision,
                     size_multiplier=result.size_multiplier,
                     tactical_put_active=result.tactical_put_active,
                     tactical_put_strategy=result.tactical_put_strategy,
                     no_trade_reasons=result.no_trade_reasons,
+                    # Added missing fields for notification
+                    option_structures=result.option_structures,
+                    strike_guidance=result.strike_guidance,
+                    dte_range=result.dte_range,
+                    strategy_rationale=result.strategy_rationale,
+                    score_components=result.score_components,
+                    overlay_reason=result.overlay_reason,
                 )
                 self.stdout.write(self.style.WARNING("[DRY RUN] Signal not persisted"))
             
