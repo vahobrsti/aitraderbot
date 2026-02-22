@@ -25,6 +25,12 @@ class DailySignal(models.Model):
         help_text="Confidence level (HIGH/MEDIUM/LOW)"
     )
     fusion_score = models.IntegerField(help_text="Numeric fusion score")
+    short_source = models.CharField(
+        max_length=10,
+        blank=True,
+        default="",
+        help_text="Source of short signal: rule or score (empty for non-short states)"
+    )
 
     # Overlay Outputs
     overlay_reason = models.TextField(
