@@ -24,6 +24,7 @@ class DailySignalSerializer(serializers.ModelSerializer):
             'fusion_state',
             'fusion_confidence',
             'fusion_score',
+            'short_source',
             'score_components',  # Structured: {mdia: {score, label}, ...}
             'overlay_reason',
             'size_multiplier',
@@ -62,6 +63,7 @@ class DailySignalSummarySerializer(serializers.ModelSerializer):
             'p_short',
             'fusion_state',
             'fusion_score',
+            'short_source',
             'trade_decision',
         ]
         read_only_fields = fields
