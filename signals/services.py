@@ -371,6 +371,7 @@ class SignalService:
                 'fusion_state': result.fusion_state,
                 'fusion_confidence': result.fusion_confidence,
                 'fusion_score': result.fusion_score,
+                'short_source': result.short_source or "",
                 'overlay_reason': result.overlay_reason,
                 'size_multiplier': result.size_multiplier,
                 'dte_multiplier': result.dte_multiplier,
