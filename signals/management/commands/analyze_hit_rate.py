@@ -193,19 +193,21 @@ class Command(BaseCommand):
                     continue
 
                 # Cooldown checks
+                can_long_fire = True
+                can_short_fire = True
                 if not no_cooldown:
                     if is_long_state and last_long_date is not None:
                         if (date - last_long_date).days < core_cooldown_days:
-                            continue
+                            can_long_fire = False
                     if is_short_state and last_short_date is not None:
                         if (date - last_short_date).days < core_cooldown_days:
-                            continue
+                            can_short_fire = False
                     if is_bull_probe and last_long_date is not None:
                         if (date - last_long_date).days < probe_cooldown_days:
-                            continue
+                            can_long_fire = False
                     if is_bear_probe and last_short_date is not None:
                         if (date - last_short_date).days < probe_cooldown_days:
-                            continue
+                            can_short_fire = False
 
                 # Probe sizing
                 if is_bull_probe:
@@ -225,51 +227,53 @@ class Command(BaseCommand):
                         size_mult = min(size_mult, 0.35)
 
                 # === LONG TRADES ===
-                if result.state in long_states and size_mult > 0:
-                    if not long_veto:
-                        trade_type = "BULL_PROBE" if is_bull_probe else "LONG"
-                        # Check if hit target using label
-                        hit = int(row.get("label_good_move_long", 0))
-                        all_trades.append({
-                            "date": date_str,
-                            "year": year,
-                            "type": trade_type,
-                            "direction": "LONG",
-                            "state": result.state.value,
-                            "score": result.score,
-                            "source": "rule",  # LONG is always rule-based
-                            "hit": hit,
-                            "p_long": row["p_long"],
-                            "p_short": row["p_short"],
-                        })
-                        last_long_date = date
+                long_trade_fired = False
+                if result.state in long_states and size_mult > 0 and not long_veto and can_long_fire:
+                    trade_type = "BULL_PROBE" if is_bull_probe else "LONG"
+                    # Check if hit target using label
+                    hit = int(row.get("label_good_move_long", 0))
+                    all_trades.append({
+                        "date": date_str,
+                        "year": year,
+                        "type": trade_type,
+                        "direction": "LONG",
+                        "state": result.state.value,
+                        "score": result.score,
+                        "source": "rule",  # LONG is always rule-based
+                        "hit": hit,
+                        "p_long": row["p_long"],
+                        "p_short": row["p_short"],
+                    })
+                    last_long_date = date
+                    long_trade_fired = True
 
                 # === SHORT TRADES ===
-                if result.state in short_states and size_mult > 0:
-                    if not short_veto:
-                        trade_type = "BEAR_PROBE" if is_bear_probe else "PRIMARY_SHORT"
-                        source = result.short_source or "rule"
-                        hit = int(row.get("label_good_move_short", 0))
-                        all_trades.append({
-                            "date": date_str,
-                            "year": year,
-                            "type": trade_type,
-                            "direction": "SHORT",
-                            "state": result.state.value,
-                            "score": result.score,
-                            "source": source,
-                            "hit": hit,
-                            "p_long": row["p_long"],
-                            "p_short": row["p_short"],
-                        })
-                        last_short_date = date
+                if result.state in short_states and size_mult > 0 and not short_veto and can_short_fire:
+                    trade_type = "BEAR_PROBE" if is_bear_probe else "PRIMARY_SHORT"
+                    source = result.short_source or "rule"
+                    hit = int(row.get("label_good_move_short", 0))
+                    all_trades.append({
+                        "date": date_str,
+                        "year": year,
+                        "type": trade_type,
+                        "direction": "SHORT",
+                        "state": result.state.value,
+                        "score": result.score,
+                        "source": source,
+                        "hit": hit,
+                        "p_long": row["p_long"],
+                        "p_short": row["p_short"],
+                    })
+                    last_short_date = date
 
                 # === TACTICAL PUTS (only when fusion LONG didn't already fire) ===
                 # Fusion rule trades take priority over tactical puts on the same date
-                if result.state in long_states and not (is_long_state and size_mult > 0 and not long_veto):
-                    if not no_cooldown and last_tactical_date is not None:
-                        if (date - last_tactical_date).days < tactical_cooldown_days:
-                            continue
+                tactical_cooldown_ok = (
+                    no_cooldown
+                    or last_tactical_date is None
+                    or (date - last_tactical_date).days >= tactical_cooldown_days
+                )
+                if result.state in long_states and not long_trade_fired and tactical_cooldown_ok:
 
                     tactical = tactical_put_inside_bull(result, row)
                     if tactical.active:
@@ -318,22 +322,21 @@ class Command(BaseCommand):
                     if cooldown_ok and overlay_ok:
                         # EFB veto for OPTION_PUT
                         efb_veto, _ = compute_efb_veto(row)
-                        if efb_veto >= 1:
-                            continue
-                        hit = int(row.get("label_good_move_short", 0))
-                        all_trades.append({
-                            "date": date_str,
-                            "year": year,
-                            "type": "OPTION_PUT",
-                            "direction": "SHORT",
-                            "state": result.state.value,
-                            "score": result.score,
-                            "source": "option_rule",
-                            "hit": hit,
-                            "p_long": row["p_long"],
-                            "p_short": row["p_short"],
-                        })
-                        last_option_put_date = date
+                        if efb_veto < 1:
+                            hit = int(row.get("label_good_move_short", 0))
+                            all_trades.append({
+                                "date": date_str,
+                                "year": year,
+                                "type": "OPTION_PUT",
+                                "direction": "SHORT",
+                                "state": result.state.value,
+                                "score": result.score,
+                                "source": "option_rule",
+                                "hit": hit,
+                                "p_long": row["p_long"],
+                                "p_short": row["p_short"],
+                            })
+                            last_option_put_date = date
 
         # === PRINT RESULTS ===
         if not all_trades:
