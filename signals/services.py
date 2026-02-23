@@ -245,7 +245,7 @@ class SignalService:
     def _determine_trade_decision(
         self, fusion_result, size_mult, dte_mult, tactical_result,
         p_long, p_short, signal_option_call, signal_option_put, overlay, row,
-        core_call_ok=False, core_put_ok=False,
+        core_call_ok=True, core_put_ok=True,
         option_call_ok=False, option_put_ok=False,
     ) -> tuple[str, str, list, list]:
         """
@@ -324,6 +324,8 @@ class SignalService:
 
             if core_decision is not None:
                 if core_cooldown_ok:
+                    if tactical_result.active:
+                        decision_trace.append("fusion takes priority over tactical_put")
                     decision_trace.append(f"state={fusion_result.state.value} -> {core_decision}")
                     return core_decision, core_notes, [], decision_trace
 
