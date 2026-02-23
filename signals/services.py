@@ -21,6 +21,8 @@ from signals.options import get_strategy_summary
 # Option signal constants
 OPTION_SIGNAL_COOLDOWN_DAYS = 5   # was 7 — OPTION_CALL hits 81%, let more through
 OPTION_SIGNAL_SIZE_MULT = 0.75    # was 0.50 — size up on best-performing signal
+CORE_SIGNAL_COOLDOWN_DAYS = 7
+TACTICAL_PUT_COOLDOWN_DAYS = 7
 
 
 @dataclass
@@ -147,20 +149,30 @@ class SignalService:
         size_mult = get_size_multiplier(overlay)
         dte_mult = get_dte_multiplier(overlay)
         
-        # 6) Tactical Put
-        tactical_result = tactical_put_inside_bull(fusion_result, row)
-        
-        # 7) Option signal cooldown check
+        # 6) Core and tactical cooldown checks
+        core_call_ok = self._check_trade_cooldown(latest_date, "CALL", CORE_SIGNAL_COOLDOWN_DAYS)
+        core_put_ok = self._check_trade_cooldown(latest_date, "PUT", CORE_SIGNAL_COOLDOWN_DAYS)
+        tactical_put_ok = self._check_trade_cooldown(latest_date, "TACTICAL_PUT", TACTICAL_PUT_COOLDOWN_DAYS)
+
+        # 7) Tactical Put
+        tactical_result = tactical_put_inside_bull(
+            fusion_result,
+            row,
+            cooldown_active=not tactical_put_ok,
+        )
+
+        # 8) Option signal cooldown check
         option_call_ok = signal_option_call == 1 and self._check_option_cooldown(latest_date, "OPTION_CALL")
         option_put_ok = signal_option_put == 1 and self._check_option_cooldown(latest_date, "OPTION_PUT")
         
         trade_decision, trade_notes, no_trade_reasons, decision_trace = self._determine_trade_decision(
             fusion_result, size_mult, dte_mult, tactical_result, p_long, p_short,
             signal_option_call, signal_option_put, overlay, row,
+            core_call_ok=core_call_ok, core_put_ok=core_put_ok,
             option_call_ok=option_call_ok, option_put_ok=option_put_ok,
         )
         
-        # 8) Get option strategy recommendation
+        # 9) Get option strategy recommendation
         strategy_summary = get_strategy_summary(fusion_result.state)
         
         # Compute effective values
@@ -212,12 +224,9 @@ class SignalService:
             short_source=fusion_result.short_source,
         )
     
-    def _check_option_cooldown(self, current_date, decision_type: str) -> bool:
-        """
-        Check if enough days have passed since last OPTION_CALL/OPTION_PUT trade.
-        Returns True if cooldown has passed (OK to trade).
-        """
-        cutoff = current_date - timedelta(days=OPTION_SIGNAL_COOLDOWN_DAYS)
+    def _check_trade_cooldown(self, current_date: date, decision_type: str, cooldown_days: int) -> bool:
+        """Return True when decision_type can fire on current_date."""
+        cutoff = current_date - timedelta(days=cooldown_days)
         last_signal = (
             DailySignal.objects
             .filter(trade_decision=decision_type, date__gte=cutoff, date__lt=current_date)
@@ -226,9 +235,17 @@ class SignalService:
         )
         return last_signal is None
 
+    def _check_option_cooldown(self, current_date, decision_type: str) -> bool:
+        """
+        Check if enough days have passed since last OPTION_CALL/OPTION_PUT trade.
+        Returns True if cooldown has passed (OK to trade).
+        """
+        return self._check_trade_cooldown(current_date, decision_type, OPTION_SIGNAL_COOLDOWN_DAYS)
+
     def _determine_trade_decision(
         self, fusion_result, size_mult, dte_mult, tactical_result,
         p_long, p_short, signal_option_call, signal_option_put, overlay, row,
+        core_call_ok=True, core_put_ok=True,
         option_call_ok=False, option_put_ok=False,
     ) -> tuple[str, str, list, list]:
         """
@@ -236,7 +253,7 @@ class SignalService:
         
         Priority:
             1. Fusion state (CALL/PUT/probes)
-            2. Tactical Put (only when fusion=NO_TRADE)
+            2. Tactical Put (when fusion=NO_TRADE or CALL is cooldown-blocked)
             3. Option signal fallback (when fusion=NO_TRADE, with cooldown + overlay)
             4. NO_TRADE
         
@@ -252,9 +269,9 @@ class SignalService:
         
         # Check fusion state first — if fusion has a directional view, use it
         if fusion_result.state != MarketState.NO_TRADE:
-            # Log tactical put status for tracing (but fusion takes priority)
+            # Log tactical put status for tracing
             if tactical_result.active:
-                decision_trace.append(f"tactical_put=active(strategy={tactical_result.strategy.value}) but fusion takes priority")
+                decision_trace.append(f"tactical_put=active(strategy={tactical_result.strategy.value})")
             else:
                 decision_trace.append("tactical_put=inactive")
             
@@ -281,25 +298,47 @@ class SignalService:
                 MarketState.DISTRIBUTION_RISK,
                 MarketState.BEAR_CONTINUATION
             }
-            
+
+            core_decision = None
+            core_notes = ""
+            core_cooldown_ok = False
+
             if is_long:
-                decision_trace.append(f"state={fusion_result.state.value} -> CALL")
-                return "CALL", f"Fusion: {fusion_result.state.value}", [], decision_trace
-            
-            if is_short:
+                core_decision = "CALL"
+                core_notes = f"Fusion: {fusion_result.state.value}"
+                core_cooldown_ok = core_call_ok
+            elif is_short:
                 source_label = f"[{fusion_result.short_source}]" if fusion_result.short_source else ""
-                decision_trace.append(f"state={fusion_result.state.value} {source_label} -> PUT")
-                return "PUT", f"Fusion: {fusion_result.state.value} {source_label}".strip(), [], decision_trace
-            
-            # Check probes
-            if fusion_result.state == MarketState.BULL_PROBE:
-                decision_trace.append(f"bull_probe(score={fusion_result.score}) -> CALL")
-                return "CALL", f"Bull probe, score={fusion_result.score}", [], decision_trace
-            
-            if fusion_result.state == MarketState.BEAR_PROBE:
+                core_decision = "PUT"
+                core_notes = f"Fusion: {fusion_result.state.value} {source_label}".strip()
+                core_cooldown_ok = core_put_ok
+            elif fusion_result.state == MarketState.BULL_PROBE:
+                core_decision = "CALL"
+                core_notes = f"Bull probe, score={fusion_result.score}"
+                core_cooldown_ok = core_call_ok
+            elif fusion_result.state == MarketState.BEAR_PROBE:
                 source_label = f"[{fusion_result.short_source}]" if fusion_result.short_source else ""
-                decision_trace.append(f"bear_probe(score={fusion_result.score}) {source_label} -> PUT")
-                return "PUT", f"Bear probe, score={fusion_result.score} {source_label}".strip(), [], decision_trace
+                core_decision = "PUT"
+                core_notes = f"Bear probe, score={fusion_result.score} {source_label}".strip()
+                core_cooldown_ok = core_put_ok
+
+            if core_decision is not None:
+                if core_cooldown_ok:
+                    if tactical_result.active:
+                        decision_trace.append("fusion takes priority over tactical_put")
+                    decision_trace.append(f"state={fusion_result.state.value} -> {core_decision}")
+                    return core_decision, core_notes, [], decision_trace
+
+                cooldown_reason = f"{core_decision}_COOLDOWN_ACTIVE"
+                no_trade_reasons.append(cooldown_reason)
+                decision_trace.append(f"state={fusion_result.state.value} -> {core_decision} blocked by cooldown")
+
+                if core_decision == "CALL" and tactical_result.active:
+                    decision_trace.append(f"fallback=tactical_put(strategy={tactical_result.strategy.value}) -> TRADE")
+                    return "TACTICAL_PUT", tactical_result.reason, [], decision_trace
+
+                decision_trace.append(f"stop_reason={cooldown_reason}")
+                return "NO_TRADE", f"{core_decision} cooldown active", no_trade_reasons, decision_trace
             
             # Catch-all for non-tradeable fusion states
             no_trade_reasons.append("STATE_NOT_TRADEABLE")
