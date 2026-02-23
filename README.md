@@ -110,10 +110,10 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
    └─ No alignment (fallback)
 
 📗 OPTION_CALL (0.75x sizing, rule-based fallback)
-   └─ MVRV cheap (2+ flags) + Sentiment fear — fires on ANY fusion state
+   └─ MVRV cheap (2+ flags) + Sentiment fear — promoted when fusion=NO_TRADE
 
 📕 OPTION_PUT (0.75x sizing, rule-based fallback)
-   └─ MVRV overheated + Sentiment greed + Whale distrib — fires on ANY fusion state
+   └─ MVRV overheated + Sentiment greed + Whale distrib — promoted when fusion=NO_TRADE
 ```
 
 ### Hybrid Classification for Shorts
@@ -135,7 +135,7 @@ The `short_source` field tracks origin: `'rule'` or `'score'`. Use `analyze_fusi
 
 ### Option Signal Fallback
 
-When fusion returns `NO_TRADE` (or any state), **rule-based option signals** can still fire as supplementary trades:
+When fusion returns `NO_TRADE`, **rule-based option signals** can fire as fallback trades:
 
 | Signal | Direction | Conditions | Sizing |
 |--------|-----------|------------|--------|
@@ -143,11 +143,11 @@ When fusion returns `NO_TRADE` (or any state), **rule-based option signals** can
 | `OPTION_PUT` | 🔴 Short | MVRV near-peak (60d_pct ≥ 0.80 OR 60d_dist_from_max ≤ 0.20) + Sentiment greed (sent_norm > 1.0) + Whale distribution | 0.75x |
 
 Key design decisions:
-- **Independent of fusion**: Option signals fire based on `signal_option_call` / `signal_option_put` features from `interactions.py`, regardless of fusion state
+- **Feature-level independent of fusion**: Option signals are computed from `signal_option_call` / `signal_option_put` features from `interactions.py`
 - **5-day cooldown**: Prevents rapid consecutive option signals (reduced from 7d — OPTION_CALL hits 81%)
 - **Overlay filtered**: Subject to the same overlay veto logic (size_mult == 0 blocks the trade)
 - **In production** (`services.py`): Only promoted to actual trade when fusion = NO_TRADE (fusion takes priority)
-- **In analysis** (`analyze_hit_rate`): Tracked independently alongside fusion trades, but suppressed on dates where a fusion LONG already fires
+- **In analysis** (`analyze_hit_rate`): Tracked independently with their own cooldown/overlay gates
 
 Use `analyze_fusion --explain --date YYYY-MM-DD` to see both fusion state and option signal status.
 
@@ -277,7 +277,7 @@ The `distribution_pressure_score` is a composite of `flow_sum_7` (60%), `flow_sl
 | BULL_PROBE | 🟢 Long | 0.35-0.60x | Fusion | Call spread (defined risk) | 60.8% |
 | PRIMARY_SHORT | 🔴 Short | 1.0x | Fusion | Puts | 62.5% |
 | BEAR_PROBE | 🔴 Short | 0.35-0.60x | Fusion | Put spread (defined risk) | 54.8% |
-| TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Tactical | Hedge inside bull regimes (only when fusion = NO_TRADE) | — |
+| TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Tactical | Hedge inside bull regimes when CALL is not executable (e.g., CALL cooldown) or fusion = NO_TRADE | — |
 | OPTION_CALL | 🟢 Long | 0.75x | Rule | MVRV cheap + fear fallback | **81.2%** |
 | OPTION_PUT | 🔴 Short | 0.75x | Rule | MVRV hot + greed fallback | 44.0% |
 
@@ -605,13 +605,10 @@ Based on 2025 winners, use these thresholds:
 
 **Action**: For shorts, if Fusion says `BEAR_PROBE`/`SHORT` and `p_short` is even moderately active (>0.38), take the trade.
 
-### 3. Global Cooldown is Critical
-A **7-day GLOBAL cooldown** (blocking ALL trades after any trade) prevents clustering and improves win rate to near 100%.
+### 3. Per-Trade Cooldown is Critical
+A **7-day core cooldown** on `CALL` and `PUT` prevents clustering while preserving directional priority.
 
-| Cooldown | Hit Rate (2025) | Trades/Year |
-|----------|-----------------|-------------|
-| None | ~70% | High volume |
-| 7-Day Global | **86% (12/14)** | Optimal balance (1.2 trades/mo) |
+Tactical and option trades use their own cooldowns (`TACTICAL_PUT`: 7d, `OPTION_*`: 5d), so fallback setups are still allowed when core trades are blocked.
 
 ### 4. What to Monitor
 1. **Short Signals with Low ML**: Validate if `BEAR_PROBE` continues performing when `p_short` is 0.38-0.45.
@@ -627,9 +624,9 @@ A **7-day GLOBAL cooldown** (blocking ALL trades after any trade) prevents clust
 3. **Probes are smaller**: Macro-neutral trades use defined risk at 0.5x
 4. **Overlays never override fusion**: They amplify or reduce, not flip
 5. **Fusion beats tactical**: When fusion has a directional view, it takes priority over tactical puts (rule signals outperform tactical 59% vs 39% on contested dates)
-6. **Clustering prevention**: 7-day cooldown collapses events into single trades
+6. **Clustering prevention**: Per-trade cooldowns reduce repeated entries without forcing a global no-trade lockout
 7. **ML + Rules hybrid**: ML for probability, rules for regime classification
-8. **Fallback signals**: Option signals and tactical puts fire when fusion has no view, catching extremes fusion misses
+8. **Fallback signals**: Tactical puts can fire when bullish core CALL is cooldown-blocked; option signals fire as fallback when fusion is NO_TRADE
 
 ---
 
