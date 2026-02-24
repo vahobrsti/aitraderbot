@@ -16,13 +16,19 @@ from signals.models import DailySignal
 from signals.fusion import fuse_signals, MarketState
 from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier, compute_efb_veto
 from signals.tactical_puts import tactical_put_inside_bull
-from signals.options import get_strategy_summary
+from signals.options import get_strategy_with_path_risk
 
 # Option signal constants
 OPTION_SIGNAL_COOLDOWN_DAYS = 5   # was 7 — OPTION_CALL hits 81%, let more through
 OPTION_SIGNAL_SIZE_MULT = 0.75    # was 0.50 — size up on best-performing signal
 CORE_SIGNAL_COOLDOWN_DAYS = 7
 TACTICAL_PUT_COOLDOWN_DAYS = 7
+
+# Path-risk defaults from analyze_path_stats (14d, target=3%, strict+ambiguous split)
+LONG_INVALID_BEFORE_HIT_RATE = 0.301
+LONG_SAME_DAY_AMBIG_RATE = 0.062
+SHORT_INVALID_BEFORE_HIT_RATE = 0.362
+SHORT_SAME_DAY_AMBIG_RATE = 0.043
 
 
 @dataclass
@@ -172,8 +178,8 @@ class SignalService:
             option_call_ok=option_call_ok, option_put_ok=option_put_ok,
         )
         
-        # 9) Get option strategy recommendation
-        strategy_summary = get_strategy_summary(fusion_result.state)
+        # 9) Get option strategy recommendation (path-risk adjusted)
+        strategy_summary = self._get_strategy_summary_with_path_risk(fusion_result.state)
         
         # Compute effective values
         if trade_decision == "NO_TRADE":
@@ -192,7 +198,7 @@ class SignalService:
             'long': self.long_model_path.name,
             'short': self.short_model_path.name,
         }
-        decision_version = "2025-12-28.1"
+        decision_version = "2026-02-24.1"
         
         return SignalResult(
             date=latest_date,
@@ -223,6 +229,58 @@ class SignalService:
             model_versions=model_versions,
             short_source=fusion_result.short_source,
         )
+
+    def _get_strategy_summary_with_path_risk(self, state: MarketState) -> dict:
+        if state == MarketState.NO_TRADE:
+            return {
+                "primary_structures": "",
+                "strike_guidance": "",
+                "dte_range": "",
+                "rationale": "",
+            }
+
+        long_states = {
+            MarketState.STRONG_BULLISH,
+            MarketState.EARLY_RECOVERY,
+            MarketState.MOMENTUM_CONTINUATION,
+            MarketState.BULL_PROBE,
+        }
+        short_states = {
+            MarketState.DISTRIBUTION_RISK,
+            MarketState.BEAR_CONTINUATION,
+            MarketState.BEAR_PROBE,
+        }
+
+        if state in long_states:
+            inv, amb = LONG_INVALID_BEFORE_HIT_RATE, LONG_SAME_DAY_AMBIG_RATE
+        elif state in short_states:
+            inv, amb = SHORT_INVALID_BEFORE_HIT_RATE, SHORT_SAME_DAY_AMBIG_RATE
+        else:
+            inv, amb = None, None
+
+        strategy = get_strategy_with_path_risk(
+            state=state,
+            invalid_before_hit_rate=inv,
+            same_day_ambiguous_rate=amb,
+        )
+
+        structures = ", ".join(s.value for s in strategy.primary_structures)
+        dte_range = f"{strategy.dte.min_dte}-{strategy.dte.max_dte}d"
+        rationale = strategy.rationale
+        if strategy.spread is not None:
+            rationale = (
+                f"{rationale} "
+                f"[spread width={strategy.spread.width_pct*100:.0f}%, "
+                f"take-profit={strategy.spread.take_profit_pct*100:.0f}%, "
+                f"max-hold={strategy.spread.max_hold_days}d]"
+            )
+
+        return {
+            "primary_structures": structures,
+            "strike_guidance": strategy.strike_guidance.value,
+            "dte_range": dte_range,
+            "rationale": rationale,
+        }
     
     def _check_trade_cooldown(self, current_date: date, decision_type: str, cooldown_days: int) -> bool:
         """Return True when decision_type can fire on current_date."""
