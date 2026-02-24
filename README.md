@@ -33,21 +33,21 @@ Think of it as: **MDIA = ignition, Whales = fuel, MVRV-LS = terrain**
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                         ML LAYER                                 │
-│  ml/training.py → Model training with walk-forward validation   │
-│  ml/predict.py → Inference for daily scoring                    │
-│  models/ → Trained model artifacts (long_model, short_model)    │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
 │                       SIGNAL LAYER                               │
 │  signals/                                                        │
 │  ├── fusion.py      → Market state classification (8 states)    │
 │  ├── overlays.py    → Edge/veto modifiers for execution         │
 │  ├── tactical_puts.py → Hedging logic inside bull regimes       │
-│  ├── options.py     → Option strategy & strike selection        │
+│  ├── options.py     → Option strategy, strikes, DTE & spreads   │
 │  ├── services.py    → SignalService for scoring + persistence   │
 │  └── models.py      → DailySignal model for DB storage          │
+└─────────────────────────────────────────────────────────────────┘
+                               ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                         ML LAYER                                 │
+│  ml/training.py → Model training with walk-forward validation   │
+│  ml/predict.py → Inference for daily scoring                    │
+│  models/ → Probabilities (future use: automated sizing/risk)    │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
@@ -281,6 +281,28 @@ The `distribution_pressure_score` is a composite of `flow_sum_7` (60%), `flow_sl
 | OPTION_CALL | 🟢 Long | 0.75x | Rule | MVRV cheap + fear fallback | **81.2%** |
 | OPTION_PUT | 🔴 Short | 0.75x | Rule | MVRV hot + greed fallback | 44.0% |
 
+### Option Strategy Selection (`options.py`)
+
+All strategies tuned from `analyze_path_stats` (14d horizon, 3% target, 224 trades).
+
+**Key data**: median TTH 1–3 days, 81% hit rate, 42% overshoot→mean-revert path.
+
+| State | Primary Structure | Strike | DTE | Spread Width | Take-Profit | Max Hold |
+|-------|------------------|--------|-----|-------------|-------------|----------|
+| STRONG_BULLISH | Call spread, long call | SLIGHT_ITM | 7–14d (opt 11) | 9% | 70% | 6d |
+| EARLY_RECOVERY | Call spread, long call | SLIGHT_ITM | 14–30d (opt 21) | 11% | 70% | 8d |
+| MOMENTUM | Call spread, long call | SLIGHT_ITM | 7–14d (opt 11) | 9% | 70% | 6d |
+| DISTRIBUTION_RISK | Put spread | SLIGHT_ITM | 7–14d (opt 12) | 9% | 70% | 6d |
+| BEAR_CONTINUATION | Put spread | SLIGHT_ITM | 7–14d (opt 12) | 10% | 70% | 6d |
+| BULL_PROBE | Call spread | SLIGHT_ITM | 7–12d (opt 9) | 7% | 70% | 5d |
+| BEAR_PROBE | Put spread | SLIGHT_ITM | 7–12d (opt 9) | 7% | 70% | 5d |
+
+**Path-Risk Adjustment** (`get_strategy_with_path_risk`): When invalidation-before-hit rate ≥ 30% or combined invalidation + ambiguous rate ≥ 35%, strikes shift one level deeper ITM (SLIGHT_ITM → ITM) and DTE floors are raised. This is always active for long trades (30.1% invalidation) and short trades (36.2% invalidation).
+
+**Runtime Structure Gating** (`generate_trade_signal`): Advanced structures are conditionally added:
+- **Backspreads**: Only for HIGH confidence + score ≥ 4 (MOMENTUM → call backspread, BEAR_CONTINUATION → put backspread)
+- **Short call spreads**: Only when IV percentile ≥ 85% in DISTRIBUTION_RISK or BEAR_CONTINUATION
+
 ---
 
 ## REST API
@@ -337,10 +359,10 @@ curl -H "Authorization: Token YOUR_API_TOKEN" \
 | `tactical_put_size` | float | Tactical put sizing |
 | `trade_decision` | string | Final decision (CALL/PUT/TACTICAL_PUT/OPTION_CALL/OPTION_PUT/NO_TRADE) |
 | `trade_notes` | string | Additional notes |
-| `option_structures` | string | Recommended structures (e.g., `long_call`) |
-| `strike_guidance` | string | Strike selection (e.g., `atm`, `slight_otm`) |
-| `dte_range` | string | DTE range (e.g., `45-90d`) |
-| `strategy_rationale` | string | Human-readable strategy explanation |
+| `option_structures` | string | Recommended structures (e.g., `call_spread`) |
+| `strike_guidance` | string | Strike selection (e.g., `slight_itm`, `itm`) |
+| `dte_range` | string | DTE range (e.g., `7-14d`) |
+| `strategy_rationale` | string | Strategy explanation with spread guidance (width, take-profit, max-hold) |
 
 **Summary response** (`/signals/` list):
 
@@ -474,7 +496,7 @@ DEBUG=False
 | `signals/fusion.py` | Market state classification engine |
 | `signals/overlays.py` | Edge amplifiers and veto gates |
 | `signals/tactical_puts.py` | Hedge puts inside bull regimes |
-| `signals/options.py` | Option strategy selection |
+| `signals/options.py` | Option strategy, strikes, DTE, spread guidance, path-risk adjustment |
 | `signals/services.py` | SignalService for scoring + persistence |
 | `signals/models.py` | DailySignal Django model |
 | `features/metrics/interactions.py` | Option signal rules (MVRV cheap/hot + sentiment) |
@@ -510,10 +532,11 @@ signal_option_put  = 0
    DTE Multiplier: 1.50
 
 --- OPTION STRATEGY ---
-   Structures: long_call
-   Strike: atm
-   DTE: 14-45d
-   Rationale: High conviction bullish setup
+   Structures: call_spread, long_call
+   Strike: itm (path-risk adjusted from slight_itm)
+   DTE: 10-14d
+   Rationale: Fresh capital + smart money + exhaustion resolved.
+            [spread width=9%, take-profit=70%, max-hold=6d]
 
 ============================================================
 TRADE DECISIONS
@@ -595,25 +618,29 @@ The Fusion engine alone achieved an **86% hit rate (12/14)** in 2025.
 - **Fusion is the primary alpha generator.**
 - ML probabilities are useful for sizing/risk management but should not gate trades too aggressively.
 
-### 2. ML Probability Thresholds (Empirical)
-Based on 2025 winners, use these thresholds:
+### 2. ML Probability Thresholds (Current Testing Phase)
+The system is currently in a testing phase. The signal flow completely trusts the rule-based **Fusion Engine** to make trade decisions (LONG, SHORT, NO_TRADE).
 
-| Direction | Threshold | Observation |
-|-----------|-----------|-------------|
+**The ML probabilities (`p_long` and `p_short`) are recorded for informational purposes and are NOT currently used to gate or filter trades.**
+
+In the next phase (automated trading), these empirical thresholds will be used to automate **position sizing and risk management**:
+
+| Direction | Threshold (Future Sizing Target) | Observation |
+|-----------|----------------------------------|-------------|
 | **LONG** | p_long ≥ 0.70 | High confidence required. All 2025 winners had p ≥ 0.70. |
 | **SHORT** | p_short ≥ 0.38 | **Conservative Model.** Winners appear as low as 0.38. Do not gate with 0.50. |
 
-**Action**: For shorts, if Fusion says `BEAR_PROBE`/`SHORT` and `p_short` is even moderately active (>0.38), take the trade.
+**Action**: For shorts, if Fusion says `BEAR_PROBE`/`SHORT` and `p_short` is even moderately active (>0.38), this will inform future automated sizing logic.
 
 ### 3. Per-Trade Cooldown is Critical
 A **7-day core cooldown** on `CALL` and `PUT` prevents clustering while preserving directional priority.
 
 Tactical and option trades use their own cooldowns (`TACTICAL_PUT`: 7d, `OPTION_*`: 5d), so fallback setups are still allowed when core trades are blocked.
 
-### 4. What to Monitor
+### 4. What to Monitor (Testing Phase)
 1. **Short Signals with Low ML**: Validate if `BEAR_PROBE` continues performing when `p_short` is 0.38-0.45.
-2. **Fusion vs ML Divergence**: If Fusion says TRADE but ML is very low (e.g., < 0.30), skip.
-3. **NO_TRADE days**: Remain noisy. High ML on NO_TRADE days is still a coin flip (50% hit rate). Stuck to Fusion states.
+2. **Fusion vs ML Divergence**: Monitor the outcomes when Fusion says TRADE but ML is very low (e.g., < 0.30). Currently, the system executes these trades based on Fusion state alone; tracking their performance will inform the rules for future automated gating and sizing.
+3. **NO_TRADE days**: Remain noisy. High ML on NO_TRADE days is still a coin flip (50% hit rate). Stick to Fusion states.
 
 ---
 
@@ -627,6 +654,9 @@ Tactical and option trades use their own cooldowns (`TACTICAL_PUT`: 7d, `OPTION_
 6. **Clustering prevention**: Per-trade cooldowns reduce repeated entries without forcing a global no-trade lockout
 7. **ML + Rules hybrid**: ML for probability, rules for regime classification
 8. **Fallback signals**: Tactical puts can fire when bullish core CALL is cooldown-blocked; option signals fire as fallback when fusion is NO_TRADE
+9. **Data-driven DTE**: All DTEs compressed to match actual TTH (median 1–3 days). Don't pay for 30–60 days of theta when moves resolve in under a week
+10. **Survive the shakeout**: SLIGHT_ITM strikes default across all states (MAE averages 3–6%). Path-risk adjustment pushes to ITM when invalidation rate exceeds 30%
+11. **Defined risk first**: Call/put spreads as primary structure for all states. Advanced structures (backspreads, credit spreads) gated by confidence + IV conditions
 
 ---
 

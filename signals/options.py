@@ -10,7 +10,7 @@ Each market state has:
 - Position sizing guidance based on confidence
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import List, Optional
 from .fusion import MarketState, Confidence
@@ -37,6 +37,8 @@ class OptionStructure(Enum):
     SHORT_PUT_SPREAD = "short_put_spread"    # Bull put spread
     
     # Advanced
+    CALL_BACKSPREAD = "call_backspread"
+    PUT_BACKSPREAD = "put_backspread"
     RATIO_CALL_SPREAD = "ratio_call_spread"
     BROKEN_WING_BUTTERFLY = "broken_wing_butterfly"
     
@@ -47,6 +49,7 @@ class OptionStructure(Enum):
 class StrikeSelection(Enum):
     """Strike selection guidance"""
     ATM = "atm"              # At-the-money
+    SLIGHT_ITM = "slight_itm"  # ~1-2% ITM / ~0.55-0.65 delta
     SLIGHT_OTM = "slight_otm"  # 5-10% OTM
     OTM = "otm"              # 10-20% OTM
     DEEP_OTM = "deep_otm"    # >20% OTM
@@ -81,6 +84,14 @@ class PositionSizing:
 
 
 @dataclass
+class SpreadGuidance:
+    """Spread width and exit guidance"""
+    width_pct: float
+    take_profit_pct: float
+    max_hold_days: int
+
+
+@dataclass
 class StrategyRecommendation:
     """Complete strategy recommendation"""
     market_state: MarketState
@@ -90,109 +101,110 @@ class StrategyRecommendation:
     dte: DTEGuidance
     sizing: PositionSizing
     rationale: str
+    spread: Optional[SpreadGuidance] = None
     campaign_bonus: Optional[str] = None  # If whale campaign confirmed
 
 
 # === STRATEGY TEMPLATES ===
+# Tuned from analyze_path_stats (14d horizon, 3% target, 224 trades)
+# Key data: median TTH 1-3d, 81% hit rate, 42% overshoot→mean-revert path
 
 STRATEGY_MAP = {
     
     # 🚀 STRONG BULLISH (High Conviction)
+    # Data: 81.3% hit, median TTH 3d, 93.4% overshoot ≥4%, avg MAE 3.3%
     MarketState.STRONG_BULLISH: StrategyRecommendation(
         market_state=MarketState.STRONG_BULLISH,
         primary_structures=[
-            OptionStructure.LONG_CALL,
             OptionStructure.CALL_SPREAD,
+            OptionStructure.LONG_CALL,
         ],
-        secondary_structures=[
-            OptionStructure.CALL_DIAGONAL,  # If IV elevated
-        ],
-        strike_guidance=StrikeSelection.SLIGHT_OTM,
-        dte=DTEGuidance(min_dte=14, max_dte=45, optimal_dte=30),
-        sizing=PositionSizing(high_confidence=0.06, medium_confidence=0.04, low_confidence=0.02),
-        rationale="Fresh capital + smart money + exhaustion resolved. Size up.",
-        campaign_bonus="If whale_mega_campaign_accum=1: extend DTE to 45-60d",
+        secondary_structures=[],
+        strike_guidance=StrikeSelection.SLIGHT_ITM,
+        dte=DTEGuidance(min_dte=7, max_dte=14, optimal_dte=11),
+        sizing=PositionSizing(high_confidence=0.07, medium_confidence=0.04, low_confidence=0.02),  # High bumped 6→7%
+        rationale="Fresh capital + smart money + exhaustion resolved. ATM strikes survive 3% shakeouts.",
+        spread=SpreadGuidance(width_pct=0.09, take_profit_pct=0.70, max_hold_days=6),
+        campaign_bonus="If whale_mega_campaign_accum=1: extend DTE to 21-30d",
     ),
     
     # 📈 EARLY RECOVERY (Asymmetric Upside)
+    # Data: direction right but timing uncertain; keep slightly wider DTE
     MarketState.EARLY_RECOVERY: StrategyRecommendation(
         market_state=MarketState.EARLY_RECOVERY,
         primary_structures=[
             OptionStructure.CALL_SPREAD,
-            OptionStructure.CALL_CALENDAR,
+            OptionStructure.LONG_CALL,
         ],
-        secondary_structures=[
-            OptionStructure.RATIO_CALL_SPREAD,  # Advanced
-        ],
-        strike_guidance=StrikeSelection.ATM,
-        dte=DTEGuidance(min_dte=21, max_dte=60, optimal_dte=45),
+        secondary_structures=[],  # Removed ratio_call_spread (too complex for fast moves)
+        strike_guidance=StrikeSelection.SLIGHT_ITM,
+        dte=DTEGuidance(min_dte=14, max_dte=30, optimal_dte=21),  # Was 21-60d
         sizing=PositionSizing(high_confidence=0.05, medium_confidence=0.03, low_confidence=0.015),
-        rationale="Direction likely right, timing uncertain. Options shine here.",
-        campaign_bonus="Use long back leg (30-60d), short front leg (7-14d)",
+        rationale="Direction likely right, timing uncertain. Defined-risk spreads.",
+        spread=SpreadGuidance(width_pct=0.11, take_profit_pct=0.70, max_hold_days=8),
+        campaign_bonus="If whale campaign: extend DTE to 21-30d",
     ),
     
     # 🔥 MOMENTUM CONTINUATION
+    # Data: 75th pctile TTH = 5d; no need for diagonals
     MarketState.MOMENTUM_CONTINUATION: StrategyRecommendation(
         market_state=MarketState.MOMENTUM_CONTINUATION,
         primary_structures=[
             OptionStructure.CALL_SPREAD,
-            OptionStructure.CALL_DIAGONAL,
+            OptionStructure.LONG_CALL,
         ],
-        secondary_structures=[
-            OptionStructure.LONG_CALL,  # Shorter dated
-        ],
-        strike_guidance=StrikeSelection.SLIGHT_OTM,
-        dte=DTEGuidance(min_dte=14, max_dte=30, optimal_dte=21),
+        secondary_structures=[],  # Removed call_diagonal (too theta-heavy for 1-3d resolution)
+        strike_guidance=StrikeSelection.SLIGHT_ITM,
+        dte=DTEGuidance(min_dte=7, max_dte=14, optimal_dte=11),
         sizing=PositionSizing(high_confidence=0.04, medium_confidence=0.03, low_confidence=0.01),
-        rationale="Trend continuation without strong sponsorship. Good trades, not lifetime trades.",
+        rationale="Trend continuation. Fast-resolving spreads, avoid overpaying for theta.",
+        spread=SpreadGuidance(width_pct=0.09, take_profit_pct=0.70, max_hold_days=6),
     ),
     
     # ⚠️ DISTRIBUTION RISK
+    # Data: put median TTH 1d, 62% overshoot→mean-revert; spreads not calendars
     MarketState.DISTRIBUTION_RISK: StrategyRecommendation(
         market_state=MarketState.DISTRIBUTION_RISK,
         primary_structures=[
-            OptionStructure.PUT_CALENDAR,
-            OptionStructure.PUT_DIAGONAL,
+            OptionStructure.PUT_SPREAD,
         ],
-        secondary_structures=[
-            OptionStructure.SHORT_CALL_SPREAD,  # Advanced
-        ],
-        strike_guidance=StrikeSelection.ATM,
-        dte=DTEGuidance(min_dte=14, max_dte=45, optimal_dte=30),
+        secondary_structures=[],
+        strike_guidance=StrikeSelection.SLIGHT_ITM,
+        dte=DTEGuidance(min_dte=7, max_dte=14, optimal_dte=12),
         sizing=PositionSizing(high_confidence=0.03, medium_confidence=0.02, low_confidence=0.0),
-        rationale="Smart money exiting. Profit from stalls/reversals. Theta + convexity.",
-        campaign_bonus="Short leg 7-14d, Long leg 21-45d",
+        rationale="Smart money exiting. Fast drops → put spreads with defined risk.",
+        spread=SpreadGuidance(width_pct=0.09, take_profit_pct=0.70, max_hold_days=6),
     ),
     
     # 🐻 BEAR CONTINUATION
+    # Data: 81.2% hit, median TTH 1d, 62% overshoot→MR, avg MAE 5.6%
     MarketState.BEAR_CONTINUATION: StrategyRecommendation(
         market_state=MarketState.BEAR_CONTINUATION,
         primary_structures=[
             OptionStructure.PUT_SPREAD,
-            OptionStructure.PUT_DIAGONAL,
         ],
         secondary_structures=[
-            OptionStructure.BROKEN_WING_BUTTERFLY,
+            OptionStructure.PUT_BACKSPREAD,
         ],
-        strike_guidance=StrikeSelection.SLIGHT_OTM,
-        dte=DTEGuidance(min_dte=14, max_dte=30, optimal_dte=21),
+        strike_guidance=StrikeSelection.SLIGHT_ITM,
+        dte=DTEGuidance(min_dte=7, max_dte=14, optimal_dte=12),
         sizing=PositionSizing(high_confidence=0.04, medium_confidence=0.02, low_confidence=0.0),
-        rationale="No buyers, sellers in control. Directional downside with protection.",
+        rationale="Sellers in control. ATM put spreads survive 5%+ bounce before resuming.",
+        spread=SpreadGuidance(width_pct=0.10, take_profit_pct=0.70, max_hold_days=6),
     ),
     
-    # � BULL PROBE (Exploratory Long)
+    # 🟢 BULL PROBE (Exploratory Long)
     MarketState.BULL_PROBE: StrategyRecommendation(
         market_state=MarketState.BULL_PROBE,
         primary_structures=[
             OptionStructure.CALL_SPREAD,
         ],
-        secondary_structures=[
-            OptionStructure.CALL_DIAGONAL,
-        ],
-        strike_guidance=StrikeSelection.ATM,
-        dte=DTEGuidance(min_dte=14, max_dte=30, optimal_dte=21),
+        secondary_structures=[],  # Removed call_diagonal
+        strike_guidance=StrikeSelection.SLIGHT_ITM,
+        dte=DTEGuidance(min_dte=7, max_dte=12, optimal_dte=9),
         sizing=PositionSizing(high_confidence=0.02, medium_confidence=0.015, low_confidence=0.0),
-        rationale="Early signs of buying. Small probe position with defined risk.",
+        rationale="Early signs of buying. Small defined-risk probe.",
+        spread=SpreadGuidance(width_pct=0.07, take_profit_pct=0.70, max_hold_days=5),
     ),
     
     # 🔍 BEAR PROBE (Exploratory Short)
@@ -201,16 +213,15 @@ STRATEGY_MAP = {
         primary_structures=[
             OptionStructure.PUT_SPREAD,
         ],
-        secondary_structures=[
-            OptionStructure.PUT_DIAGONAL,
-        ],
-        strike_guidance=StrikeSelection.ATM,
-        dte=DTEGuidance(min_dte=14, max_dte=30, optimal_dte=21),
+        secondary_structures=[],  # Removed put_diagonal
+        strike_guidance=StrikeSelection.SLIGHT_ITM,
+        dte=DTEGuidance(min_dte=7, max_dte=12, optimal_dte=9),
         sizing=PositionSizing(high_confidence=0.02, medium_confidence=0.015, low_confidence=0.0),
-        rationale="Early signs of distribution. Small probe position with defined risk.",
+        rationale="Early signs of distribution. Small defined-risk probe.",
+        spread=SpreadGuidance(width_pct=0.07, take_profit_pct=0.70, max_hold_days=5),
     ),
     
-    # �🟡 NO TRADE
+    # 🟡 NO TRADE
     MarketState.NO_TRADE: StrategyRecommendation(
         market_state=MarketState.NO_TRADE,
         primary_structures=[
@@ -228,6 +239,41 @@ STRATEGY_MAP = {
 def get_strategy(state: MarketState) -> StrategyRecommendation:
     """Get strategy recommendation for a market state"""
     return STRATEGY_MAP[state]
+
+
+def get_strategy_with_path_risk(
+    state: MarketState,
+    invalid_before_hit_rate: Optional[float] = None,
+    same_day_ambiguous_rate: Optional[float] = None,
+) -> StrategyRecommendation:
+    """
+    Return strategy with conservative adjustments for invalidation-heavy regimes.
+
+    Rates should be decimals (e.g. 0.32 for 32%).
+    """
+    strategy = STRATEGY_MAP[state]
+    if invalid_before_hit_rate is None and same_day_ambiguous_rate is None:
+        return strategy
+
+    inv_rate = invalid_before_hit_rate or 0.0
+    amb_rate = same_day_ambiguous_rate or 0.0
+
+    # If stops are frequently challenged before target, bias to more survivable setups.
+    if inv_rate >= 0.30 or (inv_rate + amb_rate) >= 0.35:
+        if strategy.strike_guidance == StrikeSelection.ATM:
+            safer_strike = StrikeSelection.SLIGHT_ITM
+        elif strategy.strike_guidance == StrikeSelection.SLIGHT_ITM:
+            safer_strike = StrikeSelection.ITM
+        else:
+            safer_strike = strategy.strike_guidance
+        safer_dte = DTEGuidance(
+            min_dte=max(strategy.dte.min_dte, 10),
+            max_dte=max(strategy.dte.max_dte, 14),
+            optimal_dte=max(strategy.dte.optimal_dte, 14),
+        )
+        return replace(strategy, strike_guidance=safer_strike, dte=safer_dte)
+
+    return strategy
 
 
 def get_strategy_summary(state: MarketState) -> dict:
@@ -354,9 +400,9 @@ def generate_trade_signal(row: dict, date: str) -> TradeSignal:
     
     # Determine direction
     if result.state in [MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, 
-                        MarketState.MOMENTUM_CONTINUATION]:
+                        MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE]:
         direction = 'long'
-    elif result.state in [MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION]:
+    elif result.state in [MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, MarketState.BEAR_PROBE]:
         direction = 'short'
     else:
         direction = 'neutral'
@@ -364,6 +410,24 @@ def generate_trade_signal(row: dict, date: str) -> TradeSignal:
     # Check whale campaign
     whale_campaign = row.get('whale_mega_campaign_accum', 0) == 1 or \
                      row.get('whale_mega_campaign_distrib', 0) == 1
+
+    # Runtime structure gating:
+    # - Backspreads only for extreme, high-confidence continuation
+    # - Credit spreads only in high-IV environment and reduced by policy outside this function
+    structures = list(strategy.primary_structures)
+    high_conf_extreme = result.confidence == Confidence.HIGH and abs(result.score) >= 4
+    if result.state == MarketState.MOMENTUM_CONTINUATION and high_conf_extreme:
+        structures.append(OptionStructure.CALL_BACKSPREAD)
+    if result.state == MarketState.BEAR_CONTINUATION and high_conf_extreme:
+        structures.append(OptionStructure.PUT_BACKSPREAD)
+
+    iv_keys = ("iv_percentile", "btc_iv_percentile", "options_iv_percentile")
+    iv_percentile = next((float(row[k]) for k in iv_keys if k in row and row[k] is not None), None)
+    if iv_percentile is not None and iv_percentile >= 0.85 and result.state in {
+        MarketState.DISTRIBUTION_RISK,
+        MarketState.BEAR_CONTINUATION,
+    }:
+        structures.append(OptionStructure.SHORT_CALL_SPREAD)
     
     return TradeSignal(
         date=date,
@@ -371,7 +435,7 @@ def generate_trade_signal(row: dict, date: str) -> TradeSignal:
         confidence=result.confidence,
         fusion_score=result.score,
         direction=direction,
-        structures=strategy.primary_structures,
+        structures=structures,
         strike_guidance=strategy.strike_guidance,
         min_dte=strategy.dte.min_dte,
         max_dte=strategy.dte.max_dte,
