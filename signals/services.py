@@ -16,7 +16,7 @@ from signals.models import DailySignal
 from signals.fusion import fuse_signals, MarketState
 from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier, compute_efb_veto
 from signals.tactical_puts import tactical_put_inside_bull
-from signals.options import get_strategy_with_path_risk
+from signals.options import get_strategy_with_path_risk, get_decision_strategy_summary, DECISION_STRATEGY_MAP
 
 # Option signal constants
 OPTION_SIGNAL_COOLDOWN_DAYS = 5   # was 7 — OPTION_CALL hits 81%, let more through
@@ -178,8 +178,11 @@ class SignalService:
             option_call_ok=option_call_ok, option_put_ok=option_put_ok,
         )
         
-        # 9) Get option strategy recommendation (path-risk adjusted)
-        strategy_summary = self._get_strategy_summary_with_path_risk(fusion_result.state)
+        # 9) Get strategy recommendation based on final trade decision
+        if trade_decision in DECISION_STRATEGY_MAP:
+            strategy_summary = get_decision_strategy_summary(trade_decision)
+        else:
+            strategy_summary = self._get_strategy_summary_with_path_risk(fusion_result.state)
         
         # Compute effective values
         if trade_decision == "NO_TRADE":

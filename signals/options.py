@@ -236,6 +236,43 @@ STRATEGY_MAP = {
 }
 
 
+# === DECISION-BASED STRATEGY OVERRIDES ===
+# For trade decisions that don't map 1:1 to a fusion MarketState.
+# Keyed by trade_decision string (from services.py).
+DECISION_STRATEGY_MAP = {
+    "OPTION_CALL": {
+        "primary_structures": "long_call, call_spread",
+        "strike_guidance": "slight_itm",
+        "dte_range": "7-14d",
+        "rationale": "Rule: MVRV cheap + Sentiment fear. Exploratory long probe.",
+    },
+    "OPTION_PUT": {
+        "primary_structures": "long_put, put_spread",
+        "strike_guidance": "slight_itm",
+        "dte_range": "7-14d",
+        "rationale": "Rule: MVRV overheated + Sentiment greed. Defined-risk short.",
+    },
+    "TACTICAL_PUT": {
+        "primary_structures": "put_spread",
+        "strike_guidance": "slight_otm",
+        "dte_range": "7-12d",
+        "rationale": "Hedge inside bull: MVRV-60d near-peak & rolling over.",
+    },
+}
+
+_EMPTY_STRATEGY = {
+    "primary_structures": "",
+    "strike_guidance": "",
+    "dte_range": "",
+    "rationale": "",
+}
+
+
+def get_decision_strategy_summary(trade_decision: str) -> dict:
+    """Get strategy summary for non-fusion trade decisions (OPTION_CALL, OPTION_PUT, TACTICAL_PUT)."""
+    return DECISION_STRATEGY_MAP.get(trade_decision, _EMPTY_STRATEGY)
+
+
 def get_strategy(state: MarketState) -> StrategyRecommendation:
     """Get strategy recommendation for a market state"""
     return STRATEGY_MAP[state]
