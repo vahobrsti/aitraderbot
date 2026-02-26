@@ -106,8 +106,8 @@ class StrategyRecommendation:
 
 
 # === STRATEGY TEMPLATES ===
-# Tuned from analyze_path_stats (14d horizon, 3% target, 224 trades)
-# Key data: median TTH 1-3d, 81% hit rate, 42% overshoot→mean-revert path
+# Tuned from analyze_path_stats (14d horizon, 5% target, 213 trades)
+# Key data: median TTH 3d, 69% hit rate, 49% overshoot→mean-revert path
 
 STRATEGY_MAP = {
     
