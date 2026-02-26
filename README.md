@@ -271,21 +271,23 @@ The `distribution_pressure_score` is a composite of `flow_sum_7` (60%), `flow_sl
 
 ## Trade Types
 
-| Type | Direction | Sizing | Source | Strategy | Hit Rate |
-|------|-----------|--------|--------|----------|----------|
-| LONG | 🟢 Long | 1.0x | Fusion | Calls | **72.6%** |
-| BULL_PROBE | 🟢 Long | 0.35-0.60x | Fusion | Call spread (defined risk) | 60.8% |
-| PRIMARY_SHORT | 🔴 Short | 1.0x | Fusion | Puts | 62.5% |
-| BEAR_PROBE | 🔴 Short | 0.35-0.60x | Fusion | Put spread (defined risk) | 54.8% |
-| TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Tactical | Hedge inside bull regimes when CALL is not executable (e.g., CALL cooldown) or fusion = NO_TRADE | — |
-| OPTION_CALL | 🟢 Long | 0.75x | Rule | MVRV cheap + fear fallback | **81.2%** |
-| OPTION_PUT | 🔴 Short | 0.75x | Rule | MVRV hot + greed fallback | 44.0% |
+Hit rates from 5% target, 14-day horizon, 213 trades (with overlays and cooldowns active):
 
-### Option Strategy Selection (`options.py`)
+| Type | Direction | Sizing | Source | Hit Rate (3.5%) | Hit Rate (5%) |
+|------|-----------|--------|--------|-----------------|---------------|
+| OPTION_CALL | 🟢 Long | 0.75x | Rule | **94.1%** | **94.1%** |
+| PRIMARY_SHORT | 🔴 Short | 1.0x | Fusion | **87.5%** | **87.5%** |
+| LONG | 🟢 Long | 1.0x | Fusion | 79.0% | **72.6%** |
+| OPTION_PUT | 🔴 Short | 0.75x | Rule | 75.0% | **68.8%** |
+| TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Tactical | 70.6% | **64.7%** |
+| BULL_PROBE | 🟢 Long | 0.35-0.60x | Fusion | 74.5% | **64.7%** |
+| BEAR_PROBE | 🔴 Short | 0.35-0.60x | Fusion | 66.7% | **57.1%** |
 
-All strategies tuned from `analyze_path_stats` (14d horizon, 3% target, 224 trades).
+### Option Strategy Selection — Fusion States (`STRATEGY_MAP` in `options.py`)
 
-**Key data**: median TTH 1–3 days, 81% hit rate, 42% overshoot→mean-revert path.
+Strategies tuned from `analyze_path_stats` (14d horizon, 5% target, 213 trades).
+
+**Key data**: median TTH 3 days, 69% hit rate, 49% overshoot→mean-revert path, 91.8% of winners exceed 6%.
 
 | State | Primary Structure | Strike | DTE | Spread Width | Take-Profit | Max Hold |
 |-------|------------------|--------|-----|-------------|-------------|----------|
@@ -297,7 +299,29 @@ All strategies tuned from `analyze_path_stats` (14d horizon, 3% target, 224 trad
 | BULL_PROBE | Call spread | SLIGHT_ITM | 7–12d (opt 9) | 7% | 70% | 5d |
 | BEAR_PROBE | Put spread | SLIGHT_ITM | 7–12d (opt 9) | 7% | 70% | 5d |
 
-**Path-Risk Adjustment** (`get_strategy_with_path_risk`): When invalidation-before-hit rate ≥ 30% or combined invalidation + ambiguous rate ≥ 35%, strikes shift one level deeper ITM (SLIGHT_ITM → ITM) and DTE floors are raised. This is always active for long trades (30.1% invalidation) and short trades (36.2% invalidation).
+### Option Strategy Selection — Decision Overrides (`DECISION_STRATEGY_MAP` in `options.py`)
+
+Trade decisions that don't map 1:1 to a fusion MarketState get their own strategy guidance:
+
+| Decision | Structures | Strike | DTE | Rationale |
+|----------|-----------|--------|-----|----------|
+| OPTION_CALL | long_call, call_spread | slight_itm | 7–14d | MVRV cheap + Sentiment fear. Exploratory long probe. |
+| OPTION_PUT | long_put, put_spread | slight_itm | 7–14d | MVRV overheated + Sentiment greed. Defined-risk short. |
+| TACTICAL_PUT | put_spread | slight_otm | 7–12d | Hedge inside bull: MVRV-60d near-peak & rolling over. |
+
+### Per-State Path-Risk Adjustment (`get_strategy_with_path_risk`)
+
+When a state's invalidation-before-hit rate ≥ 30% (or combined inv + ambiguous ≥ 35%), strikes shift one level deeper ITM and DTE floors are raised. Uses **per-state constants** (not flat aggregates) from the 5% target analysis:
+
+| State | Inv Rate | Triggers? | Notes |
+|-------|----------|-----------|-------|
+| STRONG_BULLISH | 0.0% | ❌ | n=1, clean |
+| EARLY_RECOVERY | 9.1% | ❌ | Very clean paths at 5% |
+| BULL_PROBE | 11.4% | ❌ | Wide stop absorbs shakeouts |
+| BEAR_CONTINUATION | 25.0% | ❌ | Small sample (n=4) |
+| BEAR_PROBE | 26.9% | ❌ | Moderate |
+| **MOMENTUM** | **31.8%** | ✅ | Messiest long state |
+| **DISTRIBUTION_RISK** | **50.0%** | ✅ | Conservative (small sample) |
 
 **Runtime Structure Gating** (`generate_trade_signal`): Advanced structures are conditionally added:
 - **Backspreads**: Only for HIGH confidence + score ≥ 4 (MOMENTUM → call backspread, BEAR_CONTINUATION → put backspread)
@@ -460,15 +484,13 @@ python manage.py analyze_neutral
 
 ### Cooldown Settings (Anti-Clustering)
 
-| Trade Type | Cooldown |
-|------------|----------|
-| LONG | 7 days |
-| PRIMARY_SHORT | 7 days |
-| TACTICAL_PUT | 7 days |
-| BULL_PROBE | 5 days |
-| BEAR_PROBE | 5 days |
-| OPTION_CALL | 5 days |
-| OPTION_PUT | 5 days |
+| Trade Type | Cooldown | Constant |
+|------------|----------|----------|
+| CALL (LONG / BULL_PROBE) | 7 days | `CORE_SIGNAL_COOLDOWN_DAYS` |
+| PUT (SHORT / BEAR_PROBE) | 7 days | `CORE_SIGNAL_COOLDOWN_DAYS` |
+| TACTICAL_PUT | 7 days | `TACTICAL_PUT_COOLDOWN_DAYS` |
+| OPTION_CALL | 5 days | `OPTION_SIGNAL_COOLDOWN_DAYS` |
+| OPTION_PUT | 5 days | `OPTION_SIGNAL_COOLDOWN_DAYS` |
 
 ### Environment Variables
 
@@ -533,8 +555,8 @@ signal_option_put  = 0
 
 --- OPTION STRATEGY ---
    Structures: call_spread, long_call
-   Strike: itm (path-risk adjusted from slight_itm)
-   DTE: 10-14d
+   Strike: slight_itm
+   DTE: 7-14d
    Rationale: Fresh capital + smart money + exhaustion resolved.
             [spread width=9%, take-profit=70%, max-hold=6d]
 
@@ -650,13 +672,14 @@ Tactical and option trades use their own cooldowns (`TACTICAL_PUT`: 7d, `OPTION_
 2. **Whale sponsorship required**: No trade without smart money alignment
 3. **Probes are smaller**: Macro-neutral trades use defined risk at 0.5x
 4. **Overlays never override fusion**: They amplify or reduce, not flip
-5. **Fusion beats tactical**: When fusion has a directional view, it takes priority over tactical puts (rule signals outperform tactical 59% vs 39% on contested dates)
+5. **Fusion beats tactical**: When fusion has a directional view, it takes priority over tactical puts
 6. **Clustering prevention**: Per-trade cooldowns reduce repeated entries without forcing a global no-trade lockout
 7. **ML + Rules hybrid**: ML for probability, rules for regime classification
 8. **Fallback signals**: Tactical puts can fire when bullish core CALL is cooldown-blocked; option signals fire as fallback when fusion is NO_TRADE
-9. **Data-driven DTE**: All DTEs compressed to match actual TTH (median 1–3 days). Don't pay for 30–60 days of theta when moves resolve in under a week
-10. **Survive the shakeout**: SLIGHT_ITM strikes default across all states (MAE averages 3–6%). Path-risk adjustment pushes to ITM when invalidation rate exceeds 30%
+9. **Data-driven DTE**: All DTEs compressed to match actual TTH (median 3 days, 75th pct 6 days at 5% target). Don't pay for 30–60 days of theta when moves resolve in under a week
+10. **Survive the shakeout**: SLIGHT_ITM strikes default across all states (75th MAE ~5% for winners). Per-state path-risk adjustment pushes to ITM only for genuinely messy states (momentum 31.8%, distribution_risk 50% invalidation)
 11. **Defined risk first**: Call/put spreads as primary structure for all states. Advanced structures (backspreads, credit spreads) gated by confidence + IV conditions
+12. **Per-state, not blanket**: Path-risk constants, invalidation rates, and DTE guidance are calibrated per market state from 5% target analysis—not applied as flat averages
 
 ---
 
