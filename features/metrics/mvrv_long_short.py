@@ -155,7 +155,7 @@ def calculate(df: pd.DataFrame) -> pd.DataFrame:
 
     # ========== STEP 5: FINAL REGIMES (User Refinements) ==========
 
-    # 1. Early Recovery (User: "ls_level == -2 AND rising_count >= 2")
+    # 1. Early Recovery (ls_level <= -1 AND rising_count >= 2, falling_count == 0)
     # This maps to 'mvrv_ls_regime_call_confirm_recovery' for Fusion.
     recovery_condition = (ls_level <= -1) & (rising_count >= 2) & (falling_count == 0)
     feats['mvrv_ls_regime_call_confirm_recovery'] = recovery_condition.astype(int)
