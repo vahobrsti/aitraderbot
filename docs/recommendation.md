@@ -112,16 +112,47 @@ Check `short_source` field: `'rule'` or `'score'`.
 
 | State | DTE Range | Optimal |
 |-------|-----------|---------|
-| STRONG_BULLISH | 14–45d | 30d |
-| EARLY_RECOVERY | 21–60d | 45d |
-| MOMENTUM | 14–30d | 21d |
-| DISTRIBUTION_RISK | 14–45d | 30d |
-| BEAR_CONTINUATION | 14–30d | 21d |
-| BULL_PROBE / BEAR_PROBE | 14–30d | 21d |
+| STRONG_BULLISH | 7–14d | 11d |
+| EARLY_RECOVERY | 14–30d | 21d |
+| MOMENTUM | 7–14d | 11d |
+| DISTRIBUTION_RISK | 7–14d | 12d |
+| BEAR_CONTINUATION | 7–14d | 12d |
+| BULL_PROBE | 7–12d | 9d |
+| BEAR_PROBE | 7–12d | 9d |
 
 > Overlays adjust DTE via multiplier (0.75–1.50).
 
 ---
+
+## Stop Loss Strategy
+
+Data-driven exit system calibrated from `analyze_path_stats` (7 states × 6 invalidation levels, 14d horizon, 5% target). Three-layer exit:
+
+### Per-State Parameters
+
+| State | Stop | Scale-Down Day | Hard Cut | Spread Width | Stop/Width |
+|-------|------|----------------|----------|-------------|------------|
+| STRONG_BULLISH | 4.0% | Day 5 | Day 6 | 9% | 44% |
+| EARLY_RECOVERY | 4.0% | Day 6 | Day 8 | 11% | 36% |
+| MOMENTUM | 4.0% | Day 5 | Day 6 | 9% | 44% |
+| DISTRIBUTION_RISK | 4.0% | Day 5 | Day 6 | 9% | 44% |
+| BEAR_CONTINUATION | 3.5% | Day 4 | Day 6 | 10% | 35% |
+| BULL_PROBE | 3.5% | Day 4 | Day 5 | 7% | 50% |
+| BEAR_PROBE | 4.0% | Day 6 | Day 7 | 7% | 57% |
+
+### Exit Timeline
+
+1. **Fixed price stop**: If underlying moves stop_loss_pct against you → close all
+2. **Scale-down**: At scale_down_day (≈ p75 TTH) → reduce to 25% position
+3. **Hard time stop**: At max_hold_days → close everything remaining
+
+### Key Data Points
+
+- **Sweet spot 3.5–4.0%**: Below 3% → 40%+ false stops. Above 5% → starts missing losers
+- **~20% of winners hit after day 7** → keeping 25% position matches conditional probability
+- **Winner MAE 2–4% vs Loser MAE 9–22%** → stop sits cleanly between winner noise and loser trajectory
+- On a spread, 4% underlying stop ≈ 35–50% of premium lost (not 100%), because time value remains
+- Verified stable across 2019–2025 (early crypto 2017–2018 was noisier but still within range)
 
 ## Cooldown Settings
 

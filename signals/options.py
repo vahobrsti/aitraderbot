@@ -88,7 +88,9 @@ class SpreadGuidance:
     """Spread width and exit guidance"""
     width_pct: float
     take_profit_pct: float
-    max_hold_days: int
+    max_hold_days: int           # Hard time stop: close all remaining
+    stop_loss_pct: float = 0.0   # Underlying move to exit (~40-50% of width)
+    scale_down_day: int = 0      # Day to reduce position to 25%
 
 
 @dataclass
@@ -108,6 +110,11 @@ class StrategyRecommendation:
 # === STRATEGY TEMPLATES ===
 # Tuned from analyze_path_stats (14d horizon, 5% target, 213 trades)
 # Key data: median TTH 3d, 69% hit rate, 49% overshoot→mean-revert path
+#
+# Stop loss calibration (from per-state invalidation sweep):
+# - stop_loss_pct ≈ 40-50% of spread width (sweet spot: 3.5-4.0%)
+# - scale_down_day = p75 TTH (reduce to 25% position)
+# - max_hold_days = hard time stop (close all)
 
 STRATEGY_MAP = {
     
@@ -124,7 +131,7 @@ STRATEGY_MAP = {
         dte=DTEGuidance(min_dte=7, max_dte=14, optimal_dte=11),
         sizing=PositionSizing(high_confidence=0.07, medium_confidence=0.04, low_confidence=0.02),  # High bumped 6→7%
         rationale="Fresh capital + smart money + exhaustion resolved. ATM strikes survive 3% shakeouts.",
-        spread=SpreadGuidance(width_pct=0.09, take_profit_pct=0.70, max_hold_days=6),
+        spread=SpreadGuidance(width_pct=0.09, take_profit_pct=0.70, max_hold_days=6, stop_loss_pct=0.04, scale_down_day=5),
         campaign_bonus="If whale_mega_campaign_accum=1: extend DTE to 21-30d",
     ),
     
@@ -141,7 +148,7 @@ STRATEGY_MAP = {
         dte=DTEGuidance(min_dte=14, max_dte=30, optimal_dte=21),  # Was 21-60d
         sizing=PositionSizing(high_confidence=0.05, medium_confidence=0.03, low_confidence=0.015),
         rationale="Direction likely right, timing uncertain. Defined-risk spreads.",
-        spread=SpreadGuidance(width_pct=0.11, take_profit_pct=0.70, max_hold_days=8),
+        spread=SpreadGuidance(width_pct=0.11, take_profit_pct=0.70, max_hold_days=8, stop_loss_pct=0.04, scale_down_day=6),
         campaign_bonus="If whale campaign: extend DTE to 21-30d",
     ),
     
@@ -158,7 +165,7 @@ STRATEGY_MAP = {
         dte=DTEGuidance(min_dte=7, max_dte=14, optimal_dte=11),
         sizing=PositionSizing(high_confidence=0.04, medium_confidence=0.03, low_confidence=0.01),
         rationale="Trend continuation. Fast-resolving spreads, avoid overpaying for theta.",
-        spread=SpreadGuidance(width_pct=0.09, take_profit_pct=0.70, max_hold_days=6),
+        spread=SpreadGuidance(width_pct=0.09, take_profit_pct=0.70, max_hold_days=6, stop_loss_pct=0.04, scale_down_day=5),
     ),
     
     # ⚠️ DISTRIBUTION RISK
@@ -173,7 +180,7 @@ STRATEGY_MAP = {
         dte=DTEGuidance(min_dte=7, max_dte=14, optimal_dte=12),
         sizing=PositionSizing(high_confidence=0.03, medium_confidence=0.02, low_confidence=0.0),
         rationale="Smart money exiting. Fast drops → put spreads with defined risk.",
-        spread=SpreadGuidance(width_pct=0.09, take_profit_pct=0.70, max_hold_days=6),
+        spread=SpreadGuidance(width_pct=0.09, take_profit_pct=0.70, max_hold_days=6, stop_loss_pct=0.04, scale_down_day=5),
     ),
     
     # 🐻 BEAR CONTINUATION
@@ -190,7 +197,7 @@ STRATEGY_MAP = {
         dte=DTEGuidance(min_dte=7, max_dte=14, optimal_dte=12),
         sizing=PositionSizing(high_confidence=0.04, medium_confidence=0.02, low_confidence=0.0),
         rationale="Sellers in control. ATM put spreads survive 5%+ bounce before resuming.",
-        spread=SpreadGuidance(width_pct=0.10, take_profit_pct=0.70, max_hold_days=6),
+        spread=SpreadGuidance(width_pct=0.10, take_profit_pct=0.70, max_hold_days=6, stop_loss_pct=0.035, scale_down_day=4),
     ),
     
     # 🟢 BULL PROBE (Exploratory Long)
@@ -204,7 +211,7 @@ STRATEGY_MAP = {
         dte=DTEGuidance(min_dte=7, max_dte=12, optimal_dte=9),
         sizing=PositionSizing(high_confidence=0.02, medium_confidence=0.015, low_confidence=0.0),
         rationale="Early signs of buying. Small defined-risk probe.",
-        spread=SpreadGuidance(width_pct=0.07, take_profit_pct=0.70, max_hold_days=5),
+        spread=SpreadGuidance(width_pct=0.07, take_profit_pct=0.70, max_hold_days=5, stop_loss_pct=0.035, scale_down_day=4),
     ),
     
     # 🔍 BEAR PROBE (Exploratory Short)
@@ -218,7 +225,7 @@ STRATEGY_MAP = {
         dte=DTEGuidance(min_dte=7, max_dte=12, optimal_dte=9),
         sizing=PositionSizing(high_confidence=0.02, medium_confidence=0.015, low_confidence=0.0),
         rationale="Early signs of distribution. Small defined-risk probe.",
-        spread=SpreadGuidance(width_pct=0.07, take_profit_pct=0.70, max_hold_days=5),
+        spread=SpreadGuidance(width_pct=0.07, take_profit_pct=0.70, max_hold_days=7, stop_loss_pct=0.04, scale_down_day=6),
     ),
     
     # 🟡 NO TRADE
@@ -245,18 +252,21 @@ DECISION_STRATEGY_MAP = {
         "strike_guidance": "slight_itm",
         "dte_range": "7-14d",
         "rationale": "Rule: MVRV cheap + Sentiment fear. Exploratory long probe.",
+        "stop_loss": "4.0% stop | scale to 25% on day 5 | hard cut day 7",
     },
     "OPTION_PUT": {
         "primary_structures": "long_put, put_spread",
         "strike_guidance": "slight_itm",
         "dte_range": "7-14d",
         "rationale": "Rule: MVRV overheated + Sentiment greed. Defined-risk short.",
+        "stop_loss": "4.0% stop | scale to 25% on day 5 | hard cut day 7",
     },
     "TACTICAL_PUT": {
         "primary_structures": "put_spread",
         "strike_guidance": "slight_otm",
         "dte_range": "7-12d",
         "rationale": "Hedge inside bull: MVRV-60d near-peak & rolling over.",
+        "stop_loss": "3.5% stop | scale to 25% on day 4 | hard cut day 6",
     },
 }
 
@@ -332,16 +342,26 @@ def get_strategy_summary(state: MarketState) -> dict:
             "strike_guidance": "",
             "dte_range": "",
             "rationale": "",
+            "stop_loss": "",
         }
     
     structures = ", ".join(s.value for s in strategy.primary_structures)
     dte_range = f"{strategy.dte.min_dte}-{strategy.dte.max_dte}d"
+    
+    stop_loss = ""
+    if strategy.spread and strategy.spread.stop_loss_pct > 0:
+        stop_loss = (
+            f"{strategy.spread.stop_loss_pct*100:.1f}% stop | "
+            f"scale to 25% on day {strategy.spread.scale_down_day} | "
+            f"hard cut day {strategy.spread.max_hold_days}"
+        )
     
     return {
         "primary_structures": structures,
         "strike_guidance": strategy.strike_guidance.value,
         "dte_range": dte_range,
         "rationale": strategy.rationale,
+        "stop_loss": stop_loss,
     }
 
 

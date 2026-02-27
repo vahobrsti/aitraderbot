@@ -109,6 +109,7 @@ class Command(BaseCommand):
                     strike_guidance=result.strike_guidance,
                     dte_range=result.dte_range,
                     strategy_rationale=result.strategy_rationale,
+                    stop_loss=result.stop_loss,
                     score_components=result.score_components,
                     overlay_reason=result.overlay_reason,
                 )
@@ -129,6 +130,8 @@ class Command(BaseCommand):
                 if hasattr(signal, 'signal_option_call'):
                     self.stdout.write(f"Option Call:    {signal.signal_option_call}")
                     self.stdout.write(f"Option Put:     {signal.signal_option_put}")
+                if hasattr(signal, 'stop_loss') and signal.stop_loss:
+                    self.stdout.write(f"Stop Loss:      {signal.stop_loss}")
                 self.stdout.write(f"{'='*50}\n")
             else:
                 # Minimal output for cron
