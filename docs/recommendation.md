@@ -152,7 +152,7 @@ Data-driven exit system calibrated from `analyze_path_stats` (7 states × 6 inva
 - **~20% of winners hit after day 7** → keeping 25% position matches conditional probability
 - **Winner MAE 2–4% vs Loser MAE 9–22%** → stop sits cleanly between winner noise and loser trajectory
 - On a spread, 4% underlying stop ≈ 35–50% of premium lost (not 100%), because time value remains
-- Verified stable across 2019–2025 (early crypto 2017–2018 was noisier but still within range)
+- Verified stable across 2017–2025 (early crypto 2017–2018 was noisier but still within range)
 
 ## Cooldown Settings
 

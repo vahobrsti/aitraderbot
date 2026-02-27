@@ -43,6 +43,7 @@ class DailySignalSerializer(serializers.ModelSerializer):
             'strike_guidance',
             'dte_range',
             'strategy_rationale',
+            'stop_loss',
             'created_at',
             'updated_at',
         ]
