@@ -297,7 +297,7 @@ Strategies tuned from `analyze_path_stats` (14d horizon, 5% target, 213 trades).
 | DISTRIBUTION_RISK | Put spread | SLIGHT_ITM | 7–14d (opt 12) | 9% | 70% | 6d |
 | BEAR_CONTINUATION | Put spread | SLIGHT_ITM | 7–14d (opt 12) | 10% | 70% | 6d |
 | BULL_PROBE | Call spread | SLIGHT_ITM | 7–12d (opt 9) | 7% | 70% | 5d |
-| BEAR_PROBE | Put spread | SLIGHT_ITM | 7–12d (opt 9) | 7% | 70% | 5d |
+| BEAR_PROBE | Put spread | SLIGHT_ITM | 7–12d (opt 9) | 7% | 70% | 7d |
 
 ### Option Strategy Selection — Decision Overrides (`DECISION_STRATEGY_MAP` in `options.py`)
 
@@ -326,6 +326,34 @@ When a state's invalidation-before-hit rate ≥ 30% (or combined inv + ambiguous
 **Runtime Structure Gating** (`generate_trade_signal`): Advanced structures are conditionally added:
 - **Backspreads**: Only for HIGH confidence + score ≥ 4 (MOMENTUM → call backspread, BEAR_CONTINUATION → put backspread)
 - **Short call spreads**: Only when IV percentile ≥ 85% in DISTRIBUTION_RISK or BEAR_CONTINUATION
+
+### Stop Loss Strategy
+
+Data-driven three-layer exit system calibrated from `analyze_path_stats` (7 states × 6 invalidation levels, 14d horizon, 5% target). Integrated into `SpreadGuidance` in `options.py`.
+
+**Per-State Parameters:**
+
+| State | Fixed Stop | Scale-Down Day | Hard Cut | Stop/Width |
+|-------|-----------|----------------|----------|------------|
+| STRONG_BULLISH | 4.0% | Day 5 (→25%) | Day 6 | 44% |
+| EARLY_RECOVERY | 4.0% | Day 6 (→25%) | Day 8 | 36% |
+| MOMENTUM | 4.0% | Day 5 (→25%) | Day 6 | 44% |
+| DISTRIBUTION_RISK | 4.0% | Day 5 (→25%) | Day 6 | 44% |
+| BEAR_CONTINUATION | 3.5% | Day 4 (→25%) | Day 6 | 35% |
+| BULL_PROBE | 3.5% | Day 4 (→25%) | Day 5 | 50% |
+| BEAR_PROBE | 4.0% | Day 6 (→25%) | Day 7 | 57% |
+
+**Exit timeline:**
+1. **Fixed price stop**: Underlying moves `stop_loss_pct` against you → close all
+2. **Scale-down**: At `scale_down_day` (≈ p75 TTH) → reduce to 25% position
+3. **Hard time stop**: At `max_hold_days` → close everything remaining
+
+**Why these numbers:**
+- **3.5–4.0% sweet spot**: Validated by sweeping 2–5% across all states. Below 3% → 40%+ false stops (killing winners). Above 5% → starts missing losers with diminishing returns.
+- **Stop ≈ 40–50% of spread width**: Natural ratio — at 4% underlying stop on a 9% spread, actual capital loss is ~35–50% of premium (spread still has time value).
+- **~20% of winners hit after day 7**: Scaling to 25% at the p75 TTH day matches position size to conditional probability of success.
+- **Winner MAE 2–4% vs Loser MAE 9–22%**: The 4% stop sits cleanly between winner noise and loser trajectory — the populations separate well.
+- **Regime-stable**: Year-by-year robustness check (2017–2025) confirms 3.5–4% works across market eras. Modern regime (2020+) shows even lower false stops (~15–20%).
 
 ---
 
@@ -387,6 +415,7 @@ curl -H "Authorization: Token YOUR_API_TOKEN" \
 | `strike_guidance` | string | Strike selection (e.g., `slight_itm`, `itm`) |
 | `dte_range` | string | DTE range (e.g., `7-14d`) |
 | `strategy_rationale` | string | Strategy explanation with spread guidance (width, take-profit, max-hold) |
+| `stop_loss` | string | Stop loss guidance (e.g., `4.0% stop \| scale to 25% on day 5 \| hard cut day 6`) |
 
 **Summary response** (`/signals/` list):
 
@@ -559,6 +588,7 @@ signal_option_put  = 0
    DTE: 7-14d
    Rationale: Fresh capital + smart money + exhaustion resolved.
             [spread width=9%, take-profit=70%, max-hold=6d]
+   Stop Loss: 4.0% stop | scale to 25% on day 5 | hard cut day 6
 
 ============================================================
 TRADE DECISIONS
@@ -680,6 +710,7 @@ Tactical and option trades use their own cooldowns (`TACTICAL_PUT`: 7d, `OPTION_
 10. **Survive the shakeout**: SLIGHT_ITM strikes default across all states (75th MAE ~5% for winners). Per-state path-risk adjustment pushes to ITM only for genuinely messy states (momentum 31.8%, distribution_risk 50% invalidation)
 11. **Defined risk first**: Call/put spreads as primary structure for all states. Advanced structures (backspreads, credit spreads) gated by confidence + IV conditions
 12. **Per-state, not blanket**: Path-risk constants, invalidation rates, and DTE guidance are calibrated per market state from 5% target analysis—not applied as flat averages
+13. **Three-layer exit**: Fixed stop + scale-down + hard time stop. Stop at 40–50% of spread width catches losers early while giving winners room to breathe through shakeouts. Scale-down to 25% at p75 TTH matches position to conditional win probability
 
 ---
 
