@@ -132,6 +132,12 @@ class DailySignal(models.Model):
         default="",
         help_text="Human-readable strategy rationale"
     )
+    stop_loss = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text="Stop loss guidance (e.g., 4.0% stop | scale to 25% on day 5 | hard cut day 6)"
+    )
 
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)

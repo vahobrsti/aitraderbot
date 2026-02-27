@@ -489,6 +489,7 @@ class SignalService:
                 'strike_guidance': result.strike_guidance,
                 'dte_range': result.dte_range,
                 'strategy_rationale': result.strategy_rationale,
+                'stop_loss': result.stop_loss,
                 'no_trade_reasons': result.no_trade_reasons,
                 'decision_trace': result.decision_trace,
                 'score_components': result.score_components,
