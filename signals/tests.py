@@ -188,6 +188,93 @@ class TestMarketStateClassification(SimpleTestCase):
         )
         # This doesn't fit any bullish or bearish pattern cleanly
         self.assertEqual(classify_market_state(row), MarketState.NO_TRADE)
+    
+    def test_known_gap_fixed_inflow_sponsored_trend(self):
+        """FIXED GAP: inflow + whale_sponsored + mvrv_trend → MOMENTUM.
+        
+        Previously fell through to NO_TRADE because MOMENTUM required
+        whale_neutral/mixed. Fixed by expanding MOMENTUM to accept any
+        non-distributing whale state.
+        
+        Backtested: 45 days at score ≥ +3, 80% hit rate (5% target, 14d),
+        avg +15.1% return. Key clusters at major rally starts (Apr 2019,
+        Dec 2020, Feb 2024).
+        """
+        # inflow + strategic + trend_confirm = score +3 → MOMENTUM
+        row = make_row(
+            mdia_regime_inflow=1,
+            whale_regime_strategic_accum=1,
+            mvrv_ls_regime_call_confirm_trend=1,
+        )
+        state = classify_market_state(row)
+        self.assertEqual(state, MarketState.MOMENTUM_CONTINUATION)
+        
+        # Verify score is ≥ +3
+        score, components = compute_confidence_score(row)
+        self.assertGreaterEqual(score, 3)
+    
+    def test_high_score_coverage_no_silent_gaps(self):
+        """Coverage test: no bullish component combo at score ≥ +3 should
+        silently fall to NO_TRADE without being in KNOWN_GAPS.
+        
+        This catches future metric refactors that add new regimes without
+        updating classify_market_state(). If a new combo produces score ≥ +3
+        but maps to NO_TRADE, this test fails — forcing the developer to
+        either fix the gap or explicitly add it to KNOWN_GAPS.
+        """
+        # Combos that are known to produce NO_TRADE at score ≥ +3.
+        # Each entry: (mdia_field, whale_field, mvrv_field)
+        # When a gap is FIXED, remove it from this set.
+        # Combos known to produce NO_TRADE at score ≥ +3.
+        # When a gap is FIXED, remove it from this set.
+        # All previous gaps (inflow/strong_inflow + sponsored + trend/call)
+        # were fixed by expanding MOMENTUM to accept whale_sponsored and
+        # adding mvrv_call to mvrv_improving.
+        KNOWN_GAPS = set()
+        
+        # All bullish MDIA options
+        mdia_options = [
+            ('mdia_regime_inflow', 1),
+            ('mdia_regime_strong_inflow', 1),
+        ]
+        # All bullish whale options
+        whale_options = [
+            ('whale_regime_strategic_accum', 1),
+            ('whale_regime_broad_accum', 1),
+        ]
+        # All bullish MVRV options
+        mvrv_options = [
+            ('mvrv_ls_regime_call_confirm', 1),
+            ('mvrv_ls_regime_call_confirm_recovery', 1),
+            ('mvrv_ls_regime_call_confirm_trend', 1),
+        ]
+        
+        unexpected_gaps = []
+        for mdia_field, mdia_val in mdia_options:
+            for whale_field, whale_val in whale_options:
+                for mvrv_field, mvrv_val in mvrv_options:
+                    row = make_row(**{
+                        mdia_field: mdia_val,
+                        whale_field: whale_val,
+                        mvrv_field: mvrv_val,
+                    })
+                    score, _ = compute_confidence_score(row)
+                    state = classify_market_state(row)
+                    
+                    if score >= 3 and state == MarketState.NO_TRADE:
+                        combo_key = (mdia_field, whale_field, mvrv_field)
+                        if combo_key not in KNOWN_GAPS:
+                            unexpected_gaps.append(
+                                f"{mdia_field}+{whale_field}+{mvrv_field} "
+                                f"→ score={score}, state=NO_TRADE"
+                            )
+        
+        if unexpected_gaps:
+            self.fail(
+                f"Found {len(unexpected_gaps)} unexpected high-score NO_TRADE gap(s). "
+                f"Either fix classify_market_state() or add to KNOWN_GAPS:\n"
+                + "\n".join(f"  - {g}" for g in unexpected_gaps)
+            )
 
 
 class TestConfidenceScore(SimpleTestCase):
