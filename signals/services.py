@@ -24,11 +24,17 @@ OPTION_SIGNAL_SIZE_MULT = 0.75    # was 0.50 — size up on best-performing sign
 CORE_SIGNAL_COOLDOWN_DAYS = 7
 TACTICAL_PUT_COOLDOWN_DAYS = 7
 
-# Path-risk defaults from analyze_path_stats (14d, target=3%, strict+ambiguous split)
-LONG_INVALID_BEFORE_HIT_RATE = 0.301
-LONG_SAME_DAY_AMBIG_RATE = 0.062
-SHORT_INVALID_BEFORE_HIT_RATE = 0.362
-SHORT_SAME_DAY_AMBIG_RATE = 0.043
+# Per-state path-risk rates from analyze_path_stats (14d horizon, 5% target)
+# Format: MarketState -> (invalid_before_hit_rate, same_day_ambiguous_rate)
+PATH_RISK_BY_STATE = {
+    MarketState.STRONG_BULLISH:          (0.000, 0.000),  # n=1, clean
+    MarketState.EARLY_RECOVERY:          (0.091, 0.000),  # n=16, very clean at 5%
+    MarketState.MOMENTUM_CONTINUATION:   (0.318, 0.000),  # n=62, messiest long state
+    MarketState.BULL_PROBE:              (0.114, 0.000),  # n=53, clean at 5%
+    MarketState.DISTRIBUTION_RISK:       (0.500, 0.000),  # n=5, small sample, conservative
+    MarketState.BEAR_CONTINUATION:       (0.250, 0.000),  # n=4, small sample
+    MarketState.BEAR_PROBE:              (0.269, 0.000),  # n=45, moderate
+}
 
 
 @dataclass
@@ -242,22 +248,9 @@ class SignalService:
                 "rationale": "",
             }
 
-        long_states = {
-            MarketState.STRONG_BULLISH,
-            MarketState.EARLY_RECOVERY,
-            MarketState.MOMENTUM_CONTINUATION,
-            MarketState.BULL_PROBE,
-        }
-        short_states = {
-            MarketState.DISTRIBUTION_RISK,
-            MarketState.BEAR_CONTINUATION,
-            MarketState.BEAR_PROBE,
-        }
-
-        if state in long_states:
-            inv, amb = LONG_INVALID_BEFORE_HIT_RATE, LONG_SAME_DAY_AMBIG_RATE
-        elif state in short_states:
-            inv, amb = SHORT_INVALID_BEFORE_HIT_RATE, SHORT_SAME_DAY_AMBIG_RATE
+        rates = PATH_RISK_BY_STATE.get(state)
+        if rates is not None:
+            inv, amb = rates
         else:
             inv, amb = None, None
 

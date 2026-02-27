@@ -314,10 +314,12 @@ def classify_market_state(row: pd.Series) -> MarketState:
     if whale_distrib and not mdia_strong and (mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn):
         return MarketState.DISTRIBUTION_RISK
     
-    # 🔥 MOMENTUM CONTINUATION: Trend continuation WITHOUT strong sponsorship
-    # TUNED: Accept weak_uptrend OR full trend (not just full trend)
-    mvrv_improving = mvrv_trend or mvrv_weak_up
-    if mdia_inflow and (whale_mixed or whale_neutral) and mvrv_improving:
+    # 🔥 MOMENTUM CONTINUATION: Trend continuation with any non-distributing whales
+    # Accepts call_confirm, trend_confirm, or weak_uptrend as MVRV improving.
+    # Whale check: any state except distribution (includes sponsored, neutral, mixed).
+    # This ensures inflow + strategic + trend_confirm (score +3) doesn't fall to NO_TRADE.
+    mvrv_improving = mvrv_call or mvrv_trend or mvrv_weak_up
+    if mdia_inflow and not whale_distrib and mvrv_improving:
         return MarketState.MOMENTUM_CONTINUATION
     
     # === PROBE STATES: Timing/sponsorship align, but macro neutral ===
