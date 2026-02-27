@@ -61,6 +61,7 @@ class SignalResult:
     strike_guidance: str
     dte_range: str
     strategy_rationale: str
+    stop_loss: str
     # NO_TRADE diagnostics
     no_trade_reasons: list
     decision_trace: list
@@ -230,6 +231,7 @@ class SignalService:
             strike_guidance=strategy_summary["strike_guidance"],
             dte_range=strategy_summary["dte_range"],
             strategy_rationale=strategy_summary["rationale"],
+            stop_loss=strategy_summary.get("stop_loss", ""),
             no_trade_reasons=no_trade_reasons,
             decision_trace=decision_trace,
             score_components=fusion_result.components,
@@ -246,6 +248,7 @@ class SignalService:
                 "strike_guidance": "",
                 "dte_range": "",
                 "rationale": "",
+                "stop_loss": "",
             }
 
         rates = PATH_RISK_BY_STATE.get(state)
@@ -271,11 +274,20 @@ class SignalService:
                 f"max-hold={strategy.spread.max_hold_days}d]"
             )
 
+        stop_loss = ""
+        if strategy.spread and strategy.spread.stop_loss_pct > 0:
+            stop_loss = (
+                f"{strategy.spread.stop_loss_pct*100:.1f}% stop | "
+                f"scale to 25% on day {strategy.spread.scale_down_day} | "
+                f"hard cut day {strategy.spread.max_hold_days}"
+            )
+
         return {
             "primary_structures": structures,
             "strike_guidance": strategy.strike_guidance.value,
             "dte_range": dte_range,
             "rationale": rationale,
+            "stop_loss": stop_loss,
         }
     
     def _check_trade_cooldown(self, current_date: date, decision_type: str, cooldown_days: int) -> bool:
@@ -477,6 +489,7 @@ class SignalService:
                 'strike_guidance': result.strike_guidance,
                 'dte_range': result.dte_range,
                 'strategy_rationale': result.strategy_rationale,
+                'stop_loss': result.stop_loss,
                 'no_trade_reasons': result.no_trade_reasons,
                 'decision_trace': result.decision_trace,
                 'score_components': result.score_components,

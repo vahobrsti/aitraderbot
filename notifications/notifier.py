@@ -37,6 +37,7 @@ class SignalMessage:
     score_components: dict = None  # MDIA, Whales, MVRV breakdown
     signal_option_call: int = 0
     signal_option_put: int = 0
+    stop_loss: str = ""
 
 
 class TelegramNotifier:
@@ -137,6 +138,10 @@ class TelegramNotifier:
             # Rationale
             if signal.strategy_rationale:
                 msg += f"\n💡 _{signal.strategy_rationale}_"
+            
+            # Stop Loss
+            if signal.stop_loss:
+                msg += f"\n\n🛑 *Stop Loss:* `{signal.stop_loss}`"
         
         return msg
     
@@ -240,5 +245,6 @@ class TelegramNotifier:
             score_components=daily_signal.score_components or {},
             signal_option_call=daily_signal.signal_option_call,
             signal_option_put=daily_signal.signal_option_put,
+            stop_loss=getattr(daily_signal, 'stop_loss', '') or "",
         )
         return self.send_signal(signal)
