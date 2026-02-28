@@ -58,7 +58,7 @@ Think of it as: **MDIA = ignition, Whales = fuel, MVRV-LS = terrain**
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │                      EXECUTION LAYER                             │
-│  list_trades command → Final trade opportunities with sizing     │
+│  analyze_fusion command → Deep dive into fusion engine behavior  │
 │  generate_signal → Daily automated signal persistence            │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -95,7 +95,7 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
    └─ NOT MDIA inflow + Whale distrib + (MVRV put OR bear)
 
 ⚠️ DISTRIBUTION_RISK
-   └─ Whale distrib + NOT MDIA inflow + NOT MVRV macro bullish
+   └─ NOT MDIA inflow + Whale distrib + NOT MVRV macro bullish
 
 🔥 MOMENTUM_CONTINUATION
    └─ MDIA inflow + Whale sponsored/mixed + MVRV macro bullish
@@ -121,8 +121,8 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
 Short setups historically suffer from false positives during choppy structures. The new hierarchy applies a strict `mdia_inflow` gate—shorts cannot fire if the market is experiencing active near-term capital inflow.
 
 Key rules:
-- **BEAR_CONTINUATION**: Requires definitive whale distribution + MVRV macro bearishness.
-- **DISTRIBUTION_RISK**: Fires when whales and MVRV align bearishly, even if trailing momentum hasn't fully collapsed. Very strict.
+- **BEAR_CONTINUATION**: Requires definitive whale distribution + (MVRV put OR bear).
+- **DISTRIBUTION_RISK**: Fires when whales are distributing and MVRV is not macro bullish, provided there is no active MDIA inflow.
 - **BEAR_PROBE**: Weakest short state. Triggers on strong distribution alone, but is heavily vetted by overlays and size penalized to 0.35-0.60x.
 
 ### Option Signal Fallback
@@ -422,9 +422,6 @@ python manage.py generate_signal --verbose
 
 # Generate signal without persistence (dry run)
 python manage.py generate_signal --verbose --no-persist
-
-# List all trade opportunities
-python manage.py list_trades --year 2024
 ```
 
 ### Training
@@ -432,9 +429,6 @@ python manage.py list_trades --year 2024
 ```bash
 # Train ML models (holdout validation)
 python manage.py train_models
-
-# Train with walk-forward validation
-python manage.py train_walk_forward
 
 # Analyze historical path performance and exits
 python manage.py analyze_path_stats --target 0.05 --horizon 14
