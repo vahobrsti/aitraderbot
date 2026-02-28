@@ -311,15 +311,15 @@ class TestAnalyzeFusionExplainTrace(SimpleTestCase):
         self.assertIn('2024-01-01', out)
         self.assertIn('STRONG_BULLISH', out)
 
-    def test_explain_trace_uses_not_whale_distrib(self):
-        """MOMENTUM rule shows 'not_whale_distrib' (not stale whale_mixed/neutral)."""
+    def test_explain_trace_uses_whale_sponsored_or_mixed(self):
+        """MOMENTUM rule shows 'whale_sponsored/mixed' in the trace."""
         out, _ = _call(['--explain', '--date', '2024-01-03'])
-        self.assertIn('not_whale_distrib', out)
+        self.assertIn('whale_sponsored/mixed', out)
 
-    def test_explain_trace_uses_mvrv_improving(self):
-        """MOMENTUM rule shows 'mvrv_improving' including mvrv_call."""
+    def test_explain_trace_uses_macro_bullish(self):
+        """MOMENTUM rule shows 'macro_bullish' instead of stale mvrv_improving."""
         out, _ = _call(['--explain', '--date', '2024-01-03'])
-        self.assertIn('mvrv_improving', out)
+        self.assertIn('macro_bullish', out)
 
     def test_explain_trace_bear_continuation_not_mdia_inflow(self):
         """BEAR_CONTINUATION rule shows 'not_mdia_inflow' (not stale mdia_distrib)."""

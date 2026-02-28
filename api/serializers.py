@@ -25,7 +25,7 @@ class DailySignalSerializer(serializers.ModelSerializer):
             'fusion_confidence',
             'fusion_score',
             'short_source',
-            'score_components',  # Structured: {mdia: {score, label}, ...}
+            'score_components',  # Structured: flat boolean matrix (mdia_inflow, whale_sponsored, etc.)
             'overlay_reason',
             'size_multiplier',
             'dte_multiplier',

@@ -7,11 +7,6 @@ Metrics and their roles:
 - MDIA: Timing/impulse (is fresh capital entering NOW?)
 - Whales: Intent/sponsorship (is smart money backing the move?)  
 - MVRV LS: Macro confirmation (is market structurally ready?)
-
-Think of it as:
-- MDIA = ignition
-- Whales = fuel
-- MVRV LS = terrain
 """
 
 import pandas as pd
@@ -25,18 +20,18 @@ class MarketState(Enum):
     STRONG_BULLISH = "strong_bullish"        # 🚀 High conviction long
     EARLY_RECOVERY = "early_recovery"        # 📈 Asymmetric upside
     MOMENTUM_CONTINUATION = "momentum"       # 🔥 Trend continuation
-    BULL_PROBE = "bull_probe"                # 🎯 Timing + sponsorship, macro neutral (0.5x long)
+    BULL_PROBE = "bull_probe"                # 🎯 Timing + sponsorship, macro neutral
     DISTRIBUTION_RISK = "distribution_risk"  # ⚠️ Smart money exiting
     BEAR_CONTINUATION = "bear_continuation"  # 🐻 No buyers, sellers in control
-    BEAR_PROBE = "bear_probe"                # 🔴 Selling + distribution, macro neutral (0.5x short)
+    BEAR_PROBE = "bear_probe"                # 🔴 Selling + distribution
     NO_TRADE = "no_trade"                    # 🟡 Chop, conflicts everywhere
 
 
 class Confidence(Enum):
     """Confidence levels for position sizing"""
-    HIGH = "high"      # score >= 4
-    MEDIUM = "medium"  # score 2-3
-    LOW = "low"        # score < 2
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
 
 
 @dataclass
@@ -46,362 +41,118 @@ class FusionResult:
     confidence: Confidence
     score: int
     components: dict  # Breakdown of what contributed
-    short_source: Optional[str] = None  # 'rule' or 'score' for short setups
+    short_source: Optional[str] = None  # Kept for backward compatibility
     
 
-def compute_confidence_score(row: pd.Series) -> tuple[int, dict]:
-    """
-    Compute confidence score from regime features.
-    Returns (score, components_dict)
-    
-    Scoring:
-    +2: MDIA strong_inflow, whale broad_accum, MVRV call_confirm
-    +1: MDIA inflow (moderate), whale strategic, MVRV early_recovery
-    -2: whale distribution
-    -1: conflicts anywhere
-    """
-    score = 0
-    components = {}
-    
-    # MDIA contribution (data-aligned: bullish or neutral, NEVER bearish)
-    # Empirical finding: MDIA rising is "less bullish", not "bearish"
-    # Let whales + MVRV decide bearishness
-    if row.get('mdia_regime_strong_inflow', 0) == 1:
-        score += 2
-        components['mdia'] = {'score': 2, 'label': 'strong_inflow'}
-    elif row.get('mdia_regime_inflow', 0) == 1:
-        score += 1
-        components['mdia'] = {'score': 1, 'label': 'inflow'}
-    elif row.get('mdia_regime_aging', 0) == 1:
-        # Aging = trend-unfriendly, but NOT bearish (no penalty)
-        components['mdia'] = {'score': 0, 'label': 'aging'}
-    else:
-        components['mdia'] = {'score': 0, 'label': 'neutral'}
-    
-    # Whale contribution
-    if row.get('whale_regime_broad_accum', 0) == 1:
-        score += 2
-        components['whale'] = {'score': 2, 'label': 'broad_accum'}
-    elif row.get('whale_regime_strategic_accum', 0) == 1:
-        score += 1
-        components['whale'] = {'score': 1, 'label': 'strategic'}
-    elif row.get('whale_regime_distribution_strong', 0) == 1:
-        score -= 2
-        components['whale'] = {'score': -2, 'label': 'strong_distrib'}
-    elif row.get('whale_regime_distribution', 0) == 1:
-        score -= 1
-        components['whale'] = {'score': -1, 'label': 'distribution'}
-    else:
-        components['whale'] = {'score': 0, 'label': 'neutral'}
-    
-    # MVRV LS contribution
-    # NOTE: Check recovery FIRST because it's a subset of call_confirm
-    # (both require strong_uptrend, but recovery also requires level < 0)
-    if row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1:
-        score += 2  # Recovery is actually the best asymmetric setup
-        components['mvrv_ls'] = {'score': 2, 'label': 'early_recovery'}
-    elif row.get('mvrv_ls_regime_call_confirm_trend', 0) == 1:
-        score += 1  # Trend continuation is good but less special
-        components['mvrv_ls'] = {'score': 1, 'label': 'trend_confirm'}
-    elif row.get('mvrv_ls_regime_call_confirm', 0) == 1:
-        # Fallback: call_confirm is true but neither recovery nor trend flagged
-        score += 1
-        components['mvrv_ls'] = {'score': 1, 'label': 'call_confirm_fallback'}
-    elif row.get('mvrv_ls_regime_put_confirm', 0) == 1:
-        score -= 2
-        components['mvrv_ls'] = {'score': -2, 'label': 'put_confirm'}
-    elif row.get('mvrv_ls_regime_distribution_warning', 0) == 1:
-        score -= 1
-        components['mvrv_ls'] = {'score': -1, 'label': 'distribution_warning'}
-    else:
-        components['mvrv_ls'] = {'score': 0, 'label': 'neutral'}
-    
-    # Conflict penalty
-    # NOTE: Only mega whale and MVRV conflicts apply penalty
-    # Small whale conflicts ignored - mega whales have more market impact
-    conflicts = 0
-    if row.get('mvrv_ls_conflict', 0) == 1:
-        conflicts += 1
-    if row.get('whale_mega_conflict', 0) == 1:
-        conflicts += 1
-    # Removed: whale_small_conflict penalty
-    
-    if conflicts > 0:
-        score -= conflicts
-        components['conflicts'] = {'score': -conflicts, 'label': 'regime_conflicts'}
-    
-    return score, components
-
-
-def score_to_confidence(score: int) -> Confidence:
-    """Convert numeric score to confidence level"""
-    # Tuned thresholds for 1-3 trades/month with meaningful MEDIUM signals
-    if score >= 4:
-        return Confidence.HIGH
-    elif score >= 2:
-        return Confidence.MEDIUM
-    else:
-        return Confidence.LOW
-
-
-# === SCORE-BASED SHORT DETECTION ===
-# Mega whales (100-10k BTC) have more market impact than small whales
-MEGA_WHALE_WEIGHT = 1.5
-
-
-def compute_short_score(row: pd.Series) -> tuple[float, dict]:
-    """
-    Compute weighted score for SHORT detection.
-    Uses MEGA_WHALE_WEIGHT to amplify mega whale distribution signals.
-    
-    Returns (score, components_dict)
-    
-    Scoring (with MEGA_WHALE_WEIGHT = 1.5):
-    - MDIA: +1 inflow, -1 distribution
-    - Whale: weighted by MEGA_WHALE_WEIGHT for mega whale signals
-      - distribution: -1.5 (mega weighted)
-      - strong_distribution: -3.0 (mega weighted x2)
-    - MVRV: +2 recovery, -2 put_confirm, -1 warning
-    - Conflicts: -1 per conflict (mega whale, MVRV only)
-    
-    Thresholds (tuned for ~85% hit rate):
-    - BEAR_CONTINUATION: score <= -3.5
-    - DISTRIBUTION_RISK: score <= -2.5
-    - BEAR_PROBE: -2.5 < score <= -2.0
-    """
-    score = 0.0
-    components = {}
-    
-    # MDIA contribution (data-aligned: bullish or neutral, NEVER bearish)
-    # Empirical finding: MDIA rising is "less bullish", not "bearish"
-    if row.get('mdia_regime_strong_inflow', 0) == 1:
-        score += 2
-        components['mdia'] = {'score': 2, 'label': 'strong_inflow'}
-    elif row.get('mdia_regime_inflow', 0) == 1:
-        score += 1
-        components['mdia'] = {'score': 1, 'label': 'inflow'}
-    elif row.get('mdia_regime_aging', 0) == 1:
-        # Aging = trend-unfriendly, but NOT bearish (no penalty)
-        components['mdia'] = {'score': 0, 'label': 'aging'}
-    else:
-        components['mdia'] = {'score': 0, 'label': 'neutral'}
-    
-    # Whale contribution with MEGA_WHALE_WEIGHT for bearish signals
-    if row.get('whale_regime_broad_accum', 0) == 1:
-        whale_score = 1 + MEGA_WHALE_WEIGHT  # small + weighted mega
-        score += whale_score
-        components['whale'] = {'score': whale_score, 'label': 'broad_accum'}
-    elif row.get('whale_regime_strategic_accum', 0) == 1:
-        whale_score = MEGA_WHALE_WEIGHT  # mega only
-        score += whale_score
-        components['whale'] = {'score': whale_score, 'label': 'strategic'}
-    elif row.get('whale_regime_distribution_strong', 0) == 1:
-        whale_score = -2 * MEGA_WHALE_WEIGHT  # strong distrib weighted
-        score += whale_score
-        components['whale'] = {'score': whale_score, 'label': 'strong_distrib'}
-    elif row.get('whale_regime_distribution', 0) == 1:
-        whale_score = -1 * MEGA_WHALE_WEIGHT  # distrib weighted
-        score += whale_score
-        components['whale'] = {'score': whale_score, 'label': 'distribution'}
-    else:
-        components['whale'] = {'score': 0, 'label': 'neutral'}
-    
-    # MVRV LS contribution (unchanged)
-    if row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1:
-        score += 2
-        components['mvrv_ls'] = {'score': 2, 'label': 'early_recovery'}
-    elif row.get('mvrv_ls_regime_call_confirm_trend', 0) == 1:
-        score += 1
-        components['mvrv_ls'] = {'score': 1, 'label': 'trend_confirm'}
-    elif row.get('mvrv_ls_regime_call_confirm', 0) == 1:
-        score += 1
-        components['mvrv_ls'] = {'score': 1, 'label': 'call_confirm_fallback'}
-    elif row.get('mvrv_ls_regime_put_confirm', 0) == 1:
-        score -= 2
-        components['mvrv_ls'] = {'score': -2, 'label': 'put_confirm'}
-    elif row.get('mvrv_ls_regime_distribution_warning', 0) == 1:
-        score -= 1
-        components['mvrv_ls'] = {'score': -1, 'label': 'distribution_warning'}
-    else:
-        components['mvrv_ls'] = {'score': 0, 'label': 'neutral'}
-    
-    # Conflict penalty (same as original - mega and MVRV only)
-    conflicts = 0
-    if row.get('mvrv_ls_conflict', 0) == 1:
-        conflicts += 1
-    if row.get('whale_mega_conflict', 0) == 1:
-        conflicts += 1
-    
-    if conflicts > 0:
-        score -= conflicts
-        components['conflicts'] = {'score': -conflicts, 'label': 'regime_conflicts'}
-    
-    return score, components
-
-
-def score_to_short_state(score: float) -> Optional[MarketState]:
-    """
-    Map weighted short score to bearish market state.
-    Returns None if score is not bearish enough.
-    
-    Thresholds:
-    - BEAR_CONTINUATION: score <= -3.5
-    - DISTRIBUTION_RISK: -3.5 < score <= -2.5
-    - BEAR_PROBE: -2.5 < score <= -2.0
-    
-    Note: BEAR_PROBE uses stricter overlay filtering (see overlays.py)
-    """
-    if score <= -3.5:
-        return MarketState.BEAR_CONTINUATION
-    elif score <= -2.5:
-        return MarketState.DISTRIBUTION_RISK
-    elif score <= -2.0:
-        return MarketState.BEAR_PROBE
-    else:
-        return None  # Not bearish enough
+# Static mapping per MarketState instead of additive linear scoring
+# Maintains backward compatibility with DB fusion_score integers
+STATE_PROPERTIES = {
+    MarketState.STRONG_BULLISH:        (Confidence.HIGH, 5),
+    MarketState.EARLY_RECOVERY:        (Confidence.HIGH, 4),
+    MarketState.MOMENTUM_CONTINUATION: (Confidence.MEDIUM, 3),
+    MarketState.BULL_PROBE:            (Confidence.LOW, 1),
+    MarketState.NO_TRADE:              (Confidence.LOW, 0),
+    MarketState.BEAR_PROBE:            (Confidence.LOW, -2),
+    MarketState.DISTRIBUTION_RISK:     (Confidence.MEDIUM, -3),
+    MarketState.BEAR_CONTINUATION:     (Confidence.HIGH, -5),
+}
 
 
 def classify_market_state(row: pd.Series) -> MarketState:
     """
-    Classify row into one of 6 canonical market states.
-    Uses hierarchical rules (most specific first).
+    Classify row into one of 8 canonical market states using strictly 
+    hierarchical, empirically-derived rules based on research pipeline findings.
     """
-    
-    # Helper lookups
+    # MDIA
     mdia_strong = row.get('mdia_regime_strong_inflow', 0) == 1
     mdia_inflow = row.get('mdia_regime_inflow', 0) == 1 or mdia_strong
     mdia_aging = row.get('mdia_regime_aging', 0) == 1
-    # NOTE: mdia_aging is "trend-unfriendly" NOT "bearish" - don't use for short triggers
     
+    # Whales
     whale_broad = row.get('whale_regime_broad_accum', 0) == 1
     whale_strategic = row.get('whale_regime_strategic_accum', 0) == 1
-    whale_sponsored = whale_broad or whale_strategic  # Any sponsorship
-    whale_distrib = row.get('whale_regime_distribution', 0) == 1
     whale_mixed = row.get('whale_regime_mixed', 0) == 1
-    whale_neutral = not whale_sponsored and not whale_distrib  # Neither accumulating nor distributing
+    whale_sponsored = whale_broad or whale_strategic
+    whale_distrib_strong = row.get('whale_regime_distribution_strong', 0) == 1
+    whale_distrib = row.get('whale_regime_distribution', 0) == 1 or whale_distrib_strong
     
+    # MVRV LS
     mvrv_call = row.get('mvrv_ls_regime_call_confirm', 0) == 1
     mvrv_recovery = row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1
     mvrv_trend = row.get('mvrv_ls_regime_call_confirm_trend', 0) == 1
-    mvrv_weak_up = row.get('mvrv_ls_weak_uptrend', 0) == 1  # For looser MOMENTUM
     mvrv_put = row.get('mvrv_ls_regime_put_confirm', 0) == 1
     mvrv_bear = row.get('mvrv_ls_regime_bear_continuation', 0) == 1
     mvrv_rollover = row.get('mvrv_ls_early_rollover', 0) == 1
     mvrv_weak_down = row.get('mvrv_ls_weak_downtrend', 0) == 1
     mvrv_distrib_warn = row.get('mvrv_ls_regime_distribution_warning', 0) == 1
+
+    # Define MVRV macro buckets
+    mvrv_macro_bullish = mvrv_call or mvrv_recovery or mvrv_trend
+    mvrv_macro_bearish = mvrv_put or mvrv_bear or mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn
+    mvrv_macro_neutral = not mvrv_macro_bullish and not mvrv_macro_bearish
     
-    # NOTE: Conflicts are now score-only (not classification gate)
-    # This keeps more meaningful states instead of dumping into NO_TRADE
-    # Conflicts still reduce score/confidence, which gates execution
-    
-    # === CLASSIFICATION RULES (most specific first) ===
-    
-    # 🚀 STRONG BULLISH: All aligned bullish
-    if mdia_strong and whale_sponsored and mvrv_call:
+    # === RULE 1: STRONG BULLISH ===
+    if mdia_strong and whale_sponsored and mvrv_macro_bullish:
         return MarketState.STRONG_BULLISH
-    
-    # 📈 EARLY RECOVERY: Smart money leading, structure turning
+        
+    # === RULE 2: EARLY RECOVERY ===
     if mdia_inflow and whale_sponsored and mvrv_recovery:
         return MarketState.EARLY_RECOVERY
-    
-    # 🐻 BEAR CONTINUATION: No buyers, sellers in control
-    # NOTE: mdia_aging removed - MDIA is NOT a bear signal, only whales + MVRV decide
+        
+    # === RULE 3: BEAR CONTINUATION ===
     if not mdia_inflow and whale_distrib and (mvrv_put or mvrv_bear):
         return MarketState.BEAR_CONTINUATION
-    
-    # ⚠️ DISTRIBUTION RISK: Smart money exiting, structure cracking
-    # Uses whales + MVRV only - MDIA is not a bear trigger
-    if whale_distrib and not mdia_strong and (mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn):
-        return MarketState.DISTRIBUTION_RISK
-    
-    # 🔥 MOMENTUM CONTINUATION: Trend continuation with any non-distributing whales
-    # Accepts call_confirm, trend_confirm, or weak_uptrend as MVRV improving.
-    # Whale check: any state except distribution (includes sponsored, neutral, mixed).
-    # This ensures inflow + strategic + trend_confirm (score +3) doesn't fall to NO_TRADE.
-    mvrv_improving = mvrv_call or mvrv_trend or mvrv_weak_up
-    if mdia_inflow and not whale_distrib and mvrv_improving:
-        return MarketState.MOMENTUM_CONTINUATION
-    
-    # === PROBE STATES: Timing/sponsorship align, but macro neutral ===
-    # These are tradeable at 0.5x size with defined-risk strategies only
-    
-    # Define MVRV-LS macro terrain
-    mvrv_bullish = mvrv_call or mvrv_recovery or mvrv_trend or mvrv_weak_up
-    mvrv_bearish = mvrv_put or mvrv_bear or mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn
-    mvrv_neutral = (not mvrv_bullish) and (not mvrv_bearish)
-    
-    # 🎯 BULL PROBE: Timing + sponsorship, macro neutral
-    # MDIA inflow + whales accumulating, MVRV doesn't confirm but isn't hostile
-    if mdia_inflow and whale_sponsored and mvrv_neutral:
-        return MarketState.BULL_PROBE
-    
-    # 🔴 BEAR PROBE: Selling pressure + distribution, macro neutral
-    # Require STRONG whale distribution to reduce false positives
-    whale_distrib_strong = row.get('whale_regime_distribution_strong', 0) == 1
-    if whale_distrib_strong and mvrv_neutral:
+        
+    # === RULE 4: BEAR PROBE ===
+    if not mdia_inflow and whale_distrib_strong and mvrv_macro_neutral:
         return MarketState.BEAR_PROBE
-    
-    # 🟡 NO TRADE: No alignment
+        
+    # === RULE 5: DISTRIBUTION RISK ===
+    # Vetoed by mvrv_macro_bullish (don't short the bottom)
+    if not mdia_inflow and whale_distrib and not mvrv_macro_bullish:
+        return MarketState.DISTRIBUTION_RISK
+        
+    # === RULE 6: MOMENTUM CONTINUATION (Strict Macro Gate) ===
+    # Cannot fire in a neutral or bearish MVRV regime. MUST have macro support.
+    # Accepts whale_sponsored or whale_mixed.
+    if mdia_inflow and (whale_sponsored or whale_mixed) and mvrv_macro_bullish:
+        return MarketState.MOMENTUM_CONTINUATION
+        
+    # === RULE 7: BULL PROBE ===
+    if mdia_inflow and whale_sponsored and mvrv_macro_neutral:
+        return MarketState.BULL_PROBE
+        
     return MarketState.NO_TRADE
 
 
 def fuse_signals(row: pd.Series) -> FusionResult:
     """
-    Main fusion function: takes a feature row and returns unified market state.
-    
-    HYBRID APPROACH:
-    1. Rule-based classification for ALL states (unchanged)
-    2. If rule-based returns NO_TRADE, check score-based for SHORT setups
-    3. Score-based shorts catch distribution tops that rules miss (e.g., Nov 2021)
-    
-    short_source tracks origin: 'rule' or 'score'
+    Main fusion function: takes a feature row and returns unified market state
+    with its statically assigned confidence and score.
     """
-    # Get rule-based state (original logic - unchanged)
-    rule_state = classify_market_state(row)
-    score, components = compute_confidence_score(row)
-    confidence = score_to_confidence(score)
+    state = classify_market_state(row)
+    confidence, score = STATE_PROPERTIES[state]
     
-    # Define state categories
-    bearish_states = {
-        MarketState.DISTRIBUTION_RISK,
-        MarketState.BEAR_CONTINUATION,
-        MarketState.BEAR_PROBE
+    # Track the basic components for UI explainability
+    components = {
+        'mdia_strong': int(row.get('mdia_regime_strong_inflow', 0) == 1),
+        'mdia_inflow': int(row.get('mdia_regime_inflow', 0) == 1 or row.get('mdia_regime_strong_inflow', 0) == 1),
+        'mdia_aging': int(row.get('mdia_regime_aging', 0) == 1),
+        'whale_sponsored': int(row.get('whale_regime_broad_accum', 0) == 1 or row.get('whale_regime_strategic_accum', 0) == 1),
+        'whale_mixed': int(row.get('whale_regime_mixed', 0) == 1),
+        'whale_distrib': int(row.get('whale_regime_distribution', 0) == 1 or row.get('whale_regime_distribution_strong', 0) == 1),
+        'whale_distrib_strong': int(row.get('whale_regime_distribution_strong', 0) == 1),
+        'mvrv_macro_bullish': int(row.get('mvrv_ls_regime_call_confirm', 0) == 1 or row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1 or row.get('mvrv_ls_regime_call_confirm_trend', 0) == 1),
+        'mvrv_macro_bearish': int(row.get('mvrv_ls_regime_put_confirm', 0) == 1 or row.get('mvrv_ls_regime_bear_continuation', 0) == 1 or row.get('mvrv_ls_early_rollover', 0) == 1 or row.get('mvrv_ls_weak_downtrend', 0) == 1 or row.get('mvrv_ls_regime_distribution_warning', 0) == 1),
     }
-    
-    # Determine final state and short_source
-    short_source = None
-    
-    if rule_state in bearish_states:
-        # Rule-based short - use it
-        state = rule_state
-        short_source = 'rule'
-    elif rule_state == MarketState.NO_TRADE:
-        # Rule-based says NO_TRADE - check score-based for shorts
-        short_score, short_components = compute_short_score(row)
-        score_short_state = score_to_short_state(short_score)
-        
-        if score_short_state is not None:
-            # Score-based detected a short setup!
-            state = score_short_state
-            short_source = 'score'
-            # Update components with short score info
-            components['short_score'] = {
-                'score': short_score,
-                'components': short_components
-            }
-        else:
-            # Neither rule nor score found a trade
-            state = MarketState.NO_TRADE
-    else:
-        # Bullish state from rule-based - use it
-        state = rule_state
+    components['mvrv_macro_neutral'] = int(not components['mvrv_macro_bullish'] and not components['mvrv_macro_bearish'])
     
     return FusionResult(
         state=state,
         confidence=confidence,
         score=score,
         components=components,
-        short_source=short_source
+        short_source='rule' if state in [MarketState.BEAR_CONTINUATION, MarketState.DISTRIBUTION_RISK, MarketState.BEAR_PROBE] else None
     )
 
 
@@ -433,12 +184,6 @@ def add_fusion_features(feats: dict) -> dict:
     """
     Add fusion features directly into feature dict during build.
     Called from feature_builder.py.
-    
-    Args:
-        feats: The features dict being built
-    
-    Returns:
-        feats dict with fusion columns added
     """
     # Build temp DataFrame for classification
     temp_df = pd.DataFrame(feats)
