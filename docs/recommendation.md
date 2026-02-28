@@ -11,9 +11,9 @@ The system evaluates trades in this order — first match wins:
 | Priority | Type | Direction | Sizing | Source | Strategy |
 |----------|------|-----------|--------|--------|----------|
 | 1 | CALL | 🟢 Long | overlay × base | Fusion (STRONG_BULLISH, EARLY_RECOVERY, MOMENTUM) | Long call / call spread |
-| 1 | PUT | 🔴 Short | overlay × base | Fusion (DISTRIBUTION_RISK, BEAR_CONTINUATION, BEAR_PROBE) | Put spread / put diagonal |
+| 1 | PUT | 🔴 Short | overlay × base | Fusion (DISTRIBUTION_RISK, BEAR_CONTINUATION, BEAR_PROBE) | Put spread |
 | 1 | CALL | 🟢 Long | overlay × base | Fusion (BULL_PROBE) | Call spread (defined risk) |
-| 2 | TACTICAL_PUT | 🔴 Put | 0.40–0.60x | Tactical | Hedge inside bull regime (fusion = NO_TRADE only) |
+| 2 | TACTICAL_PUT | 🔴 Put | 0.40–0.60x | Tactical | Hedge inside bull regime (fallback when core CALL is blocked by cooldown, or fusion = NO_TRADE) |
 | 3 | OPTION_CALL | 🟢 Long | 0.75x | Rule | MVRV cheap (2+ flags) + Sentiment fear |
 | 3 | OPTION_PUT | 🔴 Short | 0.75x | Rule | MVRV hot + Sentiment greed + Whale distribution |
 | 4 | NO_TRADE | — | 0 | — | Stay flat |
@@ -85,8 +85,8 @@ The system evaluates trades in this order — first match wins:
 Short setups historically suffer from false positives during choppy structures. The new hierarchy applies a strict `mdia_inflow` gate—shorts cannot fire if the market is experiencing active near-term capital inflow.
 
 Key rules:
-- **BEAR_CONTINUATION**: Requires definitive whale distribution + MVRV macro bearishness.
-- **DISTRIBUTION_RISK**: Fires when whales and MVRV align bearishly, even if trailing momentum hasn't fully collapsed. Very strict.
+- **BEAR_CONTINUATION**: Requires definitive whale distribution + (MVRV put OR bear).
+- **DISTRIBUTION_RISK**: Fires when whales are distributing and MVRV is not macro bullish, provided there is no active MDIA inflow.
 - **BEAR_PROBE**: Weakest short state. Triggers on strong distribution alone, but is heavily vetted by overlays and size penalized.
 
 ---
