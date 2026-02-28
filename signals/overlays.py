@@ -34,7 +34,6 @@ class OverlayResult:
     long_veto_strength: int     # 0=none, 1=moderate, 2=strong veto
     short_veto_strength: int    # 0=none, 1=soft, 2=hard veto
     short_edge_strength: int    # 0=none, 1=partial, 2=full edge (for shorts)
-    score_adjustment: int       # +2/+1/0/-1/-2 (for logging/interpretability)
     extended_dte: bool          # Should extend DTE for mean reversion
     reduced_size: bool          # Should reduce size due to veto
     reason: str                 # Human-readable explanation
@@ -322,7 +321,6 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
             long_veto_strength=0,
             short_veto_strength=0,
             short_edge_strength=0,
-            score_adjustment=0,
             extended_dte=False,
             reduced_size=False,
             reason="NO_TRADE state - overlays not applied"
@@ -343,29 +341,24 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
             veto_str = 2 if "STRONG" in veto_reason else 1
         
         # Apply veto dominance rules
-        score_adj = 0
         extended_dte = False
         reduced_size = False
         reason = ""
         
         if veto_str == 2:
             # STRONG veto always wins
-            score_adj = -2
             reduced_size = True
             reason = f"LONG VETO (STRONG wins): {veto_reason}"
         elif veto_str == 1 and edge_str < 2:
             # Moderate veto beats partial edge
-            score_adj = -1
             reduced_size = True
             reason = f"LONG VETO (moderate wins over partial): {veto_reason}"
         elif edge_str == 2:
             # Full edge (can override moderate veto)
-            score_adj = +2
             extended_dte = True
             reason = f"LONG EDGE (FULL): {edge_reason}"
         elif edge_str == 1 and veto_str == 0:
             # Partial edge, no veto
-            score_adj = +1
             reason = f"LONG EDGE (PARTIAL): {edge_reason}"
         else:
             reason = "No overlay active"
@@ -375,7 +368,6 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
             long_veto_strength=veto_str,
             short_veto_strength=0,
             short_edge_strength=0,
-            score_adjustment=score_adj,
             extended_dte=extended_dte,
             reduced_size=reduced_size,
             reason=reason
@@ -390,33 +382,28 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
         # BEAR_PROBE uses stricter thresholds (soft veto at 0.45, hard at 0.30)
         short_edge_str, veto_str, reason = compute_short_overlay(row, is_confirmed_bear, is_bear_probe)
         
-        # Determine score_adjustment and flags
-        score_adj = 0
+        # Determine flags
         reduced_size = False
         extended_dte = False
         
         if veto_str == 2:
             # Hard veto
-            score_adj = -2
             reduced_size = True
         elif veto_str == 1:
             # Soft veto
-            score_adj = -1
             reduced_size = True
         elif short_edge_str == 2:
             # Full edge
-            score_adj = +2
             extended_dte = True  # Let mean reversion play out
         elif short_edge_str == 1:
             # Partial edge
-            score_adj = +1
+            pass
         
         return OverlayResult(
             edge_strength=0,
             long_veto_strength=0,
             short_veto_strength=veto_str,
             short_edge_strength=short_edge_str,
-            score_adjustment=score_adj,
             extended_dte=extended_dte,
             reduced_size=reduced_size,
             reason=reason
@@ -428,7 +415,6 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
         long_veto_strength=0,
         short_veto_strength=0,
         short_edge_strength=0,
-        score_adjustment=0,
         extended_dte=False,
         reduced_size=False,
         reason="Unknown state"
@@ -445,7 +431,7 @@ def adjust_confidence_with_overlay(base_confidence: Confidence, overlay: Overlay
     """
     Adjust confidence level based on overlay result.
     
-    Uses edge/veto strengths directly (not just score_adjustment).
+    Uses edge/veto strengths directly.
     """
     conf_map = {Confidence.LOW: 0, Confidence.MEDIUM: 1, Confidence.HIGH: 2}
     reverse_map = {0: Confidence.LOW, 1: Confidence.MEDIUM, 2: Confidence.HIGH}

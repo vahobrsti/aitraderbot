@@ -71,7 +71,7 @@ class SignalResult:
     decision_version: str
     model_versions: dict
     # Short signal source tracking
-    short_source: Optional[str] = None  # 'rule' or 'score' for short setups
+    short_source: Optional[str] = None  # Tracks specific rule origin for short setups
 
 
 class SignalService:

@@ -10,10 +10,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RemoveField(
-            model_name='dailysignal',
-            name='effective_dte_range',
-        ),
+        # migrations.RemoveField(
+        #     model_name='dailysignal',
+        #     name='effective_dte_range',
+        # ),
         migrations.AddField(
             model_name='dailysignal',
             name='decision_version',

@@ -11,9 +11,9 @@ The system evaluates trades in this order — first match wins:
 | Priority | Type | Direction | Sizing | Source | Strategy |
 |----------|------|-----------|--------|--------|----------|
 | 1 | CALL | 🟢 Long | overlay × base | Fusion (STRONG_BULLISH, EARLY_RECOVERY, MOMENTUM) | Long call / call spread |
-| 1 | PUT | 🔴 Short | overlay × base | Fusion (DISTRIBUTION_RISK, BEAR_CONTINUATION, BEAR_PROBE) | Put spread / put diagonal |
+| 1 | PUT | 🔴 Short | overlay × base | Fusion (DISTRIBUTION_RISK, BEAR_CONTINUATION, BEAR_PROBE) | Put spread |
 | 1 | CALL | 🟢 Long | overlay × base | Fusion (BULL_PROBE) | Call spread (defined risk) |
-| 2 | TACTICAL_PUT | 🔴 Put | 0.40–0.60x | Tactical | Hedge inside bull regime (fusion = NO_TRADE only) |
+| 2 | TACTICAL_PUT | 🔴 Put | 0.40–0.60x | Tactical | Hedge inside bull regime (fallback when core CALL is blocked by cooldown, or fusion = NO_TRADE) |
 | 3 | OPTION_CALL | 🟢 Long | 0.75x | Rule | MVRV cheap (2+ flags) + Sentiment fear |
 | 3 | OPTION_PUT | 🔴 Short | 0.75x | Rule | MVRV hot + Sentiment greed + Whale distribution |
 | 4 | NO_TRADE | — | 0 | — | Stay flat |
@@ -80,17 +80,14 @@ The system evaluates trades in this order — first match wins:
 
 ---
 
-## Score-Based Short Detection
+## Stricter Short Logic
 
-When fusion rules return `NO_TRADE`, a weighted short score catches distribution tops that rules miss. `MEGA_WHALE_WEIGHT = 1.5` amplifies mega whale signals.
+Short setups historically suffer from false positives during choppy structures. The new hierarchy applies a strict `mdia_inflow` gate—shorts cannot fire if the market is experiencing active near-term capital inflow.
 
-| Short Score | State | Notes |
-|-------------|-------|-------|
-| ≤ −3.5 | BEAR_CONTINUATION | Strong distribution |
-| −3.5 to −2.5 | DISTRIBUTION_RISK | Moderate distribution |
-| −2.5 to −2.0 | BEAR_PROBE | Weak but tradeable |
-
-Check `short_source` field: `'rule'` or `'score'`.
+Key rules:
+- **BEAR_CONTINUATION**: Requires definitive whale distribution + (MVRV put OR bear).
+- **DISTRIBUTION_RISK**: Fires when whales are distributing and MVRV is not macro bullish, provided there is no active MDIA inflow.
+- **BEAR_PROBE**: Weakest short state. Triggers on strong distribution alone, but is heavily vetted by overlays and size penalized.
 
 ---
 
@@ -195,15 +192,13 @@ Based on 114 successful trades (hits) from 2017–2025:
 
 3. **Fusion beats everything** — Never override a fusion directional view with tactical or option signals. The system enforces this.
 
-4. **Probes need score filtering** — Score ≥ +3 or ≤ −3: trade normally. Score ±2: be cautious (45% hit rate at weak scores).
+4. **Short signals are solid** — BEAR_CONTINUATION (79%) and DISTRIBUTION_RISK (62.5%) both work organically via the strict empirical ruleset.
 
-5. **Short signals are solid** — BEAR_CONTINUATION (79%) and DISTRIBUTION_RISK (62.5%) both work. Score-based shorts catch distribution tops rules miss.
+5. **Watch BEAR_PROBE overlays** — Stricter thresholds (0.50/0.40 vs standard 0.35/0.25) filter best here.
 
-6. **Watch BEAR_PROBE overlays** — Stricter thresholds (0.50/0.40 vs standard 0.35/0.25) filter best here.
+6. **OPTION_PUT needs EFB confirmation** — 44% raw HR, but EFB veto filters the worst setups (69% veto accuracy).
 
-7. **OPTION_PUT needs EFB confirmation** — 44% raw HR, but EFB veto filters the worst setups (69% veto accuracy).
-
-8. **TACTICAL_PUT is insurance** — ~40% hit rate. Only fires when fusion = NO_TRADE. Don't size up.
+7. **TACTICAL_PUT is insurance** — ~40% hit rate. Only fires when fusion = NO_TRADE. Don't size up.
 
 ---
 

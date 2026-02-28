@@ -12,8 +12,6 @@ from .fusion import (
     MarketState,
     Confidence,
     FusionResult,
-    compute_confidence_score,
-    score_to_confidence,
     classify_market_state,
     fuse_signals,
 )
@@ -129,14 +127,14 @@ class TestMarketStateClassification(SimpleTestCase):
         )
         self.assertEqual(classify_market_state(row), MarketState.MOMENTUM_CONTINUATION)
     
-    def test_momentum_with_weak_uptrend(self):
-        """MOMENTUM accepts weak_uptrend (looser MVRV condition)."""
+    def test_momentum_with_weak_uptrend_rejected(self):
+        """MOMENTUM no longer accepts weak_uptrend (looser MVRV condition) per strict v1 macro rules."""
         row = make_row(
             mdia_regime_inflow=1,
             whale_regime_mixed=1,
             mvrv_ls_weak_uptrend=1,
         )
-        self.assertEqual(classify_market_state(row), MarketState.MOMENTUM_CONTINUATION)
+        self.assertEqual(classify_market_state(row), MarketState.NO_TRADE)
     
     def test_bull_probe(self):
         """BULL_PROBE: MDIA inflow + whale sponsorship + MVRV neutral."""
@@ -190,17 +188,7 @@ class TestMarketStateClassification(SimpleTestCase):
         self.assertEqual(classify_market_state(row), MarketState.NO_TRADE)
     
     def test_known_gap_fixed_inflow_sponsored_trend(self):
-        """FIXED GAP: inflow + whale_sponsored + mvrv_trend → MOMENTUM.
-        
-        Previously fell through to NO_TRADE because MOMENTUM required
-        whale_neutral/mixed. Fixed by expanding MOMENTUM to accept any
-        non-distributing whale state.
-        
-        Backtested: 45 days at score ≥ +3, 80% hit rate (5% target, 14d),
-        avg +15.1% return. Key clusters at major rally starts (Apr 2019,
-        Dec 2020, Feb 2024).
-        """
-        # inflow + strategic + trend_confirm = score +3 → MOMENTUM
+        """FIXED GAP: inflow + whale_sponsored + mvrv_trend → MOMENTUM."""
         row = make_row(
             mdia_regime_inflow=1,
             whale_regime_strategic_accum=1,
@@ -208,164 +196,13 @@ class TestMarketStateClassification(SimpleTestCase):
         )
         state = classify_market_state(row)
         self.assertEqual(state, MarketState.MOMENTUM_CONTINUATION)
-        
-        # Verify score is ≥ +3
-        score, components = compute_confidence_score(row)
-        self.assertGreaterEqual(score, 3)
-    
-    def test_high_score_coverage_no_silent_gaps(self):
-        """Coverage test: no bullish component combo at score ≥ +3 should
-        silently fall to NO_TRADE without being in KNOWN_GAPS.
-        
-        This catches future metric refactors that add new regimes without
-        updating classify_market_state(). If a new combo produces score ≥ +3
-        but maps to NO_TRADE, this test fails — forcing the developer to
-        either fix the gap or explicitly add it to KNOWN_GAPS.
-        """
-        # Combos that are known to produce NO_TRADE at score ≥ +3.
-        # Each entry: (mdia_field, whale_field, mvrv_field)
-        # When a gap is FIXED, remove it from this set.
-        # Combos known to produce NO_TRADE at score ≥ +3.
-        # When a gap is FIXED, remove it from this set.
-        # All previous gaps (inflow/strong_inflow + sponsored + trend/call)
-        # were fixed by expanding MOMENTUM to accept whale_sponsored and
-        # adding mvrv_call to mvrv_improving.
-        KNOWN_GAPS = set()
-        
-        # All bullish MDIA options
-        mdia_options = [
-            ('mdia_regime_inflow', 1),
-            ('mdia_regime_strong_inflow', 1),
-        ]
-        # All bullish whale options
-        whale_options = [
-            ('whale_regime_strategic_accum', 1),
-            ('whale_regime_broad_accum', 1),
-        ]
-        # All bullish MVRV options
-        mvrv_options = [
-            ('mvrv_ls_regime_call_confirm', 1),
-            ('mvrv_ls_regime_call_confirm_recovery', 1),
-            ('mvrv_ls_regime_call_confirm_trend', 1),
-        ]
-        
-        unexpected_gaps = []
-        for mdia_field, mdia_val in mdia_options:
-            for whale_field, whale_val in whale_options:
-                for mvrv_field, mvrv_val in mvrv_options:
-                    row = make_row(**{
-                        mdia_field: mdia_val,
-                        whale_field: whale_val,
-                        mvrv_field: mvrv_val,
-                    })
-                    score, _ = compute_confidence_score(row)
-                    state = classify_market_state(row)
-                    
-                    if score >= 3 and state == MarketState.NO_TRADE:
-                        combo_key = (mdia_field, whale_field, mvrv_field)
-                        if combo_key not in KNOWN_GAPS:
-                            unexpected_gaps.append(
-                                f"{mdia_field}+{whale_field}+{mvrv_field} "
-                                f"→ score={score}, state=NO_TRADE"
-                            )
-        
-        if unexpected_gaps:
-            self.fail(
-                f"Found {len(unexpected_gaps)} unexpected high-score NO_TRADE gap(s). "
-                f"Either fix classify_market_state() or add to KNOWN_GAPS:\n"
-                + "\n".join(f"  - {g}" for g in unexpected_gaps)
-            )
-
-
-class TestConfidenceScore(SimpleTestCase):
-    """Test compute_confidence_score function."""
-    
-    def test_max_bullish_score(self):
-        """Maximum bullish score: +6 (strong_inflow + broad_accum + early_recovery)."""
-        row = make_row(
-            mdia_regime_strong_inflow=1,
-            whale_regime_broad_accum=1,
-            mvrv_ls_regime_call_confirm_recovery=1,
-        )
-        score, components = compute_confidence_score(row)
-        self.assertEqual(score, 6)
-        self.assertEqual(components['mdia']['score'], 2)
-        self.assertEqual(components['whale']['score'], 2)
-        self.assertEqual(components['mvrv_ls']['score'], 2)
-    
-    def test_max_bearish_score(self):
-        """Maximum bearish score: -5 (distrib + strong_distrib + put_confirm)."""
-    def test_max_bearish_score(self):
-        """Maximum bearish score: -4 (whales + MVRV only, MDIA is neutral)."""
-        row = make_row(
-            mdia_regime_aging=1,  # Neutral (0)
-            whale_regime_distribution_strong=1,
-            mvrv_ls_regime_put_confirm=1,
-        )
-        score, components = compute_confidence_score(row)
-        self.assertEqual(score, -4)  # MDIA is 0 (neutral)
-        self.assertEqual(components['mdia']['score'], 0) # MDIA is neutral in fusion.py
-        self.assertEqual(components['whale']['score'], -2)
-        self.assertEqual(components['mvrv_ls']['score'], -2)
-    
-    def test_neutral_score(self):
-        """Neutral: All components at 0."""
-        row = make_row()
-        score, components = compute_confidence_score(row)
-        self.assertEqual(score, 0)
-        self.assertEqual(components['mdia']['score'], 0)
-        self.assertEqual(components['whale']['score'], 0)
-        self.assertEqual(components['mvrv_ls']['score'], 0)
-    
-    def test_conflict_penalty(self):
-        """Conflicts reduce score."""
-        row = make_row(
-            mdia_regime_strong_inflow=1,  # +2
-            whale_regime_broad_accum=1,   # +2
-            mvrv_ls_conflict=1,           # -1
-            whale_mega_conflict=1,        # -1
-        )
-        score, components = compute_confidence_score(row)
-        self.assertEqual(score, 2)  # 2+2-2 = 2
-        self.assertEqual(components['conflicts']['score'], -2)
-    
-    def test_mvrv_recovery_before_trend(self):
-        """Recovery is checked before trend (recovery is more specific)."""
-        row = make_row(
-            mvrv_ls_regime_call_confirm_recovery=1,
-            mvrv_ls_regime_call_confirm_trend=1,  # Also set, but recovery wins
-        )
-        score, components = compute_confidence_score(row)
-        self.assertEqual(components['mvrv_ls']['score'], 2)
-        self.assertEqual(components['mvrv_ls']['label'], 'early_recovery')
-
-
-class TestScoreToConfidence(SimpleTestCase):
-    """Test score_to_confidence thresholds."""
-    
-    def test_high_confidence(self):
-        """Score >= 4 is HIGH."""
-        self.assertEqual(score_to_confidence(4), Confidence.HIGH)
-        self.assertEqual(score_to_confidence(6), Confidence.HIGH)
-    
-    def test_medium_confidence(self):
-        """Score 2-3 is MEDIUM."""
-        self.assertEqual(score_to_confidence(2), Confidence.MEDIUM)
-        self.assertEqual(score_to_confidence(3), Confidence.MEDIUM)
-    
-    def test_low_confidence(self):
-        """Score < 2 is LOW."""
-        self.assertEqual(score_to_confidence(1), Confidence.LOW)
-        self.assertEqual(score_to_confidence(0), Confidence.LOW)
-        self.assertEqual(score_to_confidence(-3), Confidence.LOW)
 
 
 class TestFuseSignals(SimpleTestCase):
     """Test fuse_signals integration."""
     
     def test_fuse_strong_bullish(self):
-        """Integration test for STRONG_BULLISH with HIGH confidence."""
-        # Note: Use call_confirm, not recovery (recovery triggers EARLY_RECOVERY state)
+        """Integration test for STRONG_BULLISH with statically assigned HIGH confidence & score 5."""
         row = make_row(
             mdia_regime_strong_inflow=1,
             whale_regime_broad_accum=1,
@@ -374,7 +211,7 @@ class TestFuseSignals(SimpleTestCase):
         result = fuse_signals(row)
         self.assertEqual(result.state, MarketState.STRONG_BULLISH)
         self.assertEqual(result.confidence, Confidence.HIGH)
-        self.assertGreaterEqual(result.score, 4)  # HIGH confidence threshold
+        self.assertEqual(result.score, 5)
 
 
 # =============================================================================
@@ -563,7 +400,6 @@ class TestApplyOverlays(SimpleTestCase):
         )
         row = make_row()
         overlay = apply_overlays(fusion_result, row)
-        self.assertEqual(overlay.score_adjustment, 0)
         self.assertFalse(overlay.reduced_size)
     
     def test_long_state_with_edge(self):
@@ -580,7 +416,6 @@ class TestApplyOverlays(SimpleTestCase):
         )
         overlay = apply_overlays(fusion_result, row)
         self.assertGreater(overlay.edge_strength, 0)
-        self.assertTrue(overlay.score_adjustment > 0)
     
     def test_long_state_with_strong_veto(self):
         """Strong veto overrides edge."""
@@ -598,7 +433,6 @@ class TestApplyOverlays(SimpleTestCase):
         overlay = apply_overlays(fusion_result, row)
         self.assertEqual(overlay.long_veto_strength, 2)
         self.assertTrue(overlay.reduced_size)
-        self.assertEqual(overlay.score_adjustment, -2)
     
     def test_short_state_with_edge(self):
         """Short state near peak gets edge boost."""
@@ -624,7 +458,6 @@ class TestSizeMultiplier(SimpleTestCase):
             long_veto_strength=2,
             short_veto_strength=0,
             short_edge_strength=0,
-            score_adjustment=-2,
             extended_dte=False,
             reduced_size=True,
             reason="test",
@@ -638,7 +471,6 @@ class TestSizeMultiplier(SimpleTestCase):
             long_veto_strength=1,
             short_veto_strength=0,
             short_edge_strength=0,
-            score_adjustment=-1,
             extended_dte=False,
             reduced_size=True,
             reason="test",
@@ -652,7 +484,6 @@ class TestSizeMultiplier(SimpleTestCase):
             long_veto_strength=0,
             short_veto_strength=0,
             short_edge_strength=0,
-            score_adjustment=2,
             extended_dte=True,
             reduced_size=False,
             reason="test",
@@ -666,7 +497,6 @@ class TestSizeMultiplier(SimpleTestCase):
             long_veto_strength=0,
             short_veto_strength=0,
             short_edge_strength=0,
-            score_adjustment=0,
             extended_dte=False,
             reduced_size=False,
             reason="test",
@@ -684,7 +514,6 @@ class TestDteMultiplier(SimpleTestCase):
             long_veto_strength=0,
             short_veto_strength=0,
             short_edge_strength=0,
-            score_adjustment=2,
             extended_dte=True,
             reduced_size=False,
             reason="test",
@@ -698,7 +527,6 @@ class TestDteMultiplier(SimpleTestCase):
             long_veto_strength=0,
             short_veto_strength=0,
             short_edge_strength=2,
-            score_adjustment=2,
             extended_dte=True,
             reduced_size=False,
             reason="test",
@@ -712,7 +540,6 @@ class TestDteMultiplier(SimpleTestCase):
             long_veto_strength=2,
             short_veto_strength=0,
             short_edge_strength=0,
-            score_adjustment=-2,
             extended_dte=False,
             reduced_size=True,
             reason="test",
@@ -730,7 +557,6 @@ class TestConfidenceAdjustment(SimpleTestCase):
             long_veto_strength=2,
             short_veto_strength=0,
             short_edge_strength=0,
-            score_adjustment=-2,
             extended_dte=False,
             reduced_size=True,
             reason="test",
@@ -745,7 +571,6 @@ class TestConfidenceAdjustment(SimpleTestCase):
             long_veto_strength=0,
             short_veto_strength=0,
             short_edge_strength=0,
-            score_adjustment=2,
             extended_dte=True,
             reduced_size=False,
             reason="test",
@@ -760,7 +585,6 @@ class TestConfidenceAdjustment(SimpleTestCase):
             long_veto_strength=0,
             short_veto_strength=0,
             short_edge_strength=0,
-            score_adjustment=0,
             extended_dte=False,
             reduced_size=False,
             reason="test",
@@ -795,14 +619,14 @@ class TestOptionSignalTradeDecision(SimpleTestCase):
     def _make_overlay_clean(self):
         return OverlayResult(
             edge_strength=0, long_veto_strength=0, short_veto_strength=0,
-            short_edge_strength=0, score_adjustment=0, extended_dte=False,
+            short_edge_strength=0, extended_dte=False,
             reduced_size=False, reason="",
         )
     
     def _make_overlay_vetoed(self):
         return OverlayResult(
             edge_strength=0, long_veto_strength=2, short_veto_strength=0,
-            short_edge_strength=0, score_adjustment=-2, extended_dte=False,
+            short_edge_strength=0, extended_dte=False,
             reduced_size=True, reason="STRONG VETO",
         )
     

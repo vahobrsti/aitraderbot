@@ -176,10 +176,8 @@ class Command(BaseCommand):
                 is_long_state = result.state in long_states and not is_bull_probe
                 is_short_state = result.state in short_states and not is_bear_probe
 
-                if is_bull_probe and result.score < 2:
-                    continue
-                if is_bear_probe and result.score > -2:
-                    continue
+                # Probes are now statically gated by the fusion engine itself.
+                # No dynamic score thresholding needed here.
 
                 can_long_fire = True
                 can_short_fire = True
@@ -193,10 +191,9 @@ class Command(BaseCommand):
                     if is_bear_probe and last_short_date is not None and (date - last_short_date).days < probe_cooldown_days:
                         can_short_fire = False
 
-                if is_bull_probe:
-                    size_mult = min(size_mult, 0.60 if result.score >= 4 else (0.50 if result.score == 3 else 0.35))
-                if is_bear_probe:
-                    size_mult = min(size_mult, 0.60 if result.score <= -4 else (0.50 if result.score == -3 else 0.35))
+                # Probe sizing (simplified: limit to 0.5x base overlay)
+                if is_bull_probe or is_bear_probe:
+                    size_mult = min(size_mult, 0.50)
 
                 long_trade_fired = False
                 if result.state in long_states and size_mult > 0 and not long_veto and can_long_fire:

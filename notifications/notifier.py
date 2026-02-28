@@ -74,16 +74,20 @@ class TelegramNotifier:
             "CALL": "🟢",
             "PUT": "🔴",
             "TACTICAL_PUT": "🟠",
+            "OPTION_CALL": "🟢",
+            "OPTION_PUT": "🔴",
             "NO_TRADE": "⚪",
         }.get(decision, "❓")
     
     def _get_confidence_emoji(self, confidence: str) -> str:
         """Map confidence level to emoji."""
+        if not confidence:
+            return ""
         return {
             "HIGH": "🔥",
             "MEDIUM": "✨",
             "LOW": "💤",
-        }.get(confidence, "")
+        }.get(confidence.upper(), "")
     
     def _format_message(self, signal: SignalMessage) -> str:
         """Format signal data into Telegram message with markdown."""
@@ -105,12 +109,14 @@ class TelegramNotifier:
         
         # Score breakdown (if available)
         if signal.score_components:
-            mdia = signal.score_components.get('mdia', {})
-            whale = signal.score_components.get('whale', {})
-            mvrv = signal.score_components.get('mvrv_ls', {})
-            msg += f"  • MDIA: `{mdia.get('score', 0):+d}` (`{mdia.get('label', 'n/a')}`)\n"
-            msg += f"  • Whales: `{whale.get('score', 0):+d}` (`{whale.get('label', 'n/a')}`)\n"
-            msg += f"  • MVRV: `{mvrv.get('score', 0):+d}` (`{mvrv.get('label', 'n/a')}`)\n"
+            c = signal.score_components
+            mdia_label = 'strong_inflow' if c.get('mdia_strong') else 'inflow' if c.get('mdia_inflow') else 'aging' if c.get('mdia_aging') else 'neutral'
+            whale_label = 'strong_distrib' if c.get('whale_distrib_strong') else 'distrib' if c.get('whale_distrib') else 'sponsored' if c.get('whale_sponsored') else 'mixed' if c.get('whale_mixed') else 'neutral'
+            mvrv_label = 'bullish' if c.get('mvrv_macro_bullish') else 'bearish' if c.get('mvrv_macro_bearish') else 'neutral'
+            
+            msg += f"  • MDIA: `{mdia_label}`\n"
+            msg += f"  • Whales: `{whale_label}`\n"
+            msg += f"  • MVRV: `{mvrv_label}`\n"
         msg += "\n"
         
         # ML Probabilities

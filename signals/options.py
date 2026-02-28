@@ -469,13 +469,12 @@ def generate_trade_signal(row: dict, date: str) -> TradeSignal:
                      row.get('whale_mega_campaign_distrib', 0) == 1
 
     # Runtime structure gating:
-    # - Backspreads only for extreme, high-confidence continuation
+    # - Backspreads for robust structural states
     # - Credit spreads only in high-IV environment and reduced by policy outside this function
     structures = list(strategy.primary_structures)
-    high_conf_extreme = result.confidence == Confidence.HIGH and abs(result.score) >= 4
-    if result.state == MarketState.MOMENTUM_CONTINUATION and high_conf_extreme:
+    if result.state == MarketState.STRONG_BULLISH:
         structures.append(OptionStructure.CALL_BACKSPREAD)
-    if result.state == MarketState.BEAR_CONTINUATION and high_conf_extreme:
+    if result.state == MarketState.BEAR_CONTINUATION:
         structures.append(OptionStructure.PUT_BACKSPREAD)
 
     iv_keys = ("iv_percentile", "btc_iv_percentile", "options_iv_percentile")
