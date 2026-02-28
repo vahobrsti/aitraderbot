@@ -332,10 +332,11 @@ Data-driven three-layer exit system calibrated from `analyze_path_stats` (7 stat
 | `/api/v1/signals/` | GET | ✅ Token | List signals (paginated, summary view) |
 | `/api/v1/signals/latest/` | GET | ✅ Token | Latest signal (full detail) |
 | `/api/v1/signals/<date>/` | GET | ✅ Token | Signal by date (YYYY-MM-DD format) |
-| `/api/v1/fusion/analysis/metric-stats/` | GET | ✅ Token | Research metric distribution |
-| `/api/v1/fusion/analysis/combo-stats/` | GET | ✅ Token | Research group-by combos |
-| `/api/v1/fusion/analysis/state-stats/` | GET | ✅ Token | Research state hit-rates |
-| `/api/v1/fusion/analysis/score-validation/` | GET | ✅ Token | Research monotonicity validation |
+| `/api/v1/fusion/explain/` | GET | ✅ Token | Explain fusion logic. Requires `?date=YYYY-MM-DD`. Optional: `?year=YYYY` |
+| `/api/v1/fusion/analysis/metric-stats/` | GET | ✅ Token | Metric distribution. Requires `?metric=<mdia_bucket\|whale_bucket\|mvrv_ls_bucket>`. Optional: `?min_count=10&year=YYYY` |
+| `/api/v1/fusion/analysis/combo-stats/` | GET | ✅ Token | Group-by combos. Requires `?group_by=<comma_separated_columns>` (e.g. `mdia_bucket,whale_bucket`). Optional: `?min_count=10&year=YYYY` |
+| `/api/v1/fusion/analysis/state-stats/` | GET | ✅ Token | State hit-rates. Optional: `?min_count=10&year=YYYY` |
+| `/api/v1/fusion/analysis/score-validation/` | GET | ✅ Token | Score validation. Optional: `?type=<monotonicity\|stability>&min_count=10&year=YYYY` |
 
 ### Authentication
 
