@@ -162,6 +162,10 @@ sudo systemctl restart gunicorn
 | `/api/v1/signals/` | Yes | List all signals |
 | `/api/v1/signals/latest/` | Yes | Get latest signal |
 | `/api/v1/signals/<date>/` | Yes | Get signal by date |
+| `/api/v1/fusion/analysis/metric-stats/` | Yes | Research metric distribution |
+| `/api/v1/fusion/analysis/combo-stats/` | Yes | Research group-by combos |
+| `/api/v1/fusion/analysis/state-stats/` | Yes | Research state hit-rates |
+| `/api/v1/fusion/analysis/score-validation/` | Yes | Research monotonicity validation |
 
 **Authentication:** Use `Authorization: Token YOUR_TOKEN` header.
 

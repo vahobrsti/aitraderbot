@@ -1,8 +1,7 @@
 # signals/management/commands/analyze_hit_rate.py
 """
 Analyze hit rates for all trades across all years.
-Uses list_trades logic to enumerate trades, then checks if they hit target
-using label_good_move_long / label_good_move_short from the features.
+Checks if trades hit target using label_good_move_long / label_good_move_short.
 
 Usage:
     python manage.py analyze_hit_rate --csv features_14d_5pct.csv --year 2024
@@ -68,7 +67,7 @@ class Command(BaseCommand):
             "--source",
             type=str,
             default=None,
-            help="Filter by source: rule, score, tactical",
+            help="Filter by source: rule, tactical, option_rule",
         )
         parser.add_argument(
             "--direction",
@@ -186,11 +185,8 @@ class Command(BaseCommand):
                 is_long_state = result.state in long_states and not is_bull_probe
                 is_short_state = result.state in short_states and not is_bear_probe
 
-                # Gate probes by score
-                if is_bull_probe and result.score < 2:
-                    continue
-                if is_bear_probe and result.score > -2:
-                    continue
+                # Probes are now statically gated by the fusion engine itself.
+                # No dynamic score thresholding needed here.
 
                 # Cooldown checks
                 can_long_fire = True
@@ -209,22 +205,9 @@ class Command(BaseCommand):
                         if (date - last_short_date).days < probe_cooldown_days:
                             can_short_fire = False
 
-                # Probe sizing
-                if is_bull_probe:
-                    if result.score >= 4:
-                        size_mult = min(size_mult, 0.60)
-                    elif result.score == 3:
-                        size_mult = min(size_mult, 0.50)
-                    else:
-                        size_mult = min(size_mult, 0.35)
-
-                if is_bear_probe:
-                    if result.score <= -4:
-                        size_mult = min(size_mult, 0.60)
-                    elif result.score == -3:
-                        size_mult = min(size_mult, 0.50)
-                    else:
-                        size_mult = min(size_mult, 0.35)
+                # Probe sizing (simplified: limit to 0.5x base overlay)
+                if is_bull_probe or is_bear_probe:
+                    size_mult = min(size_mult, 0.50)
 
                 # === LONG TRADES ===
                 long_trade_fired = False

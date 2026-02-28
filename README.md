@@ -86,7 +86,7 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
 
 ```
 🚀 STRONG_BULLISH
-   └─ MDIA strong_inflow + Whale sponsored + MVRV call_confirm
+   └─ MDIA strong_inflow + Whale sponsored + MVRV macro bullish
 
 📈 EARLY_RECOVERY  
    └─ MDIA inflow + Whale sponsored + MVRV recovery
@@ -95,16 +95,16 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
    └─ NOT MDIA inflow + Whale distrib + (MVRV put OR bear)
 
 ⚠️ DISTRIBUTION_RISK
-   └─ Whale distrib + not MDIA strong + (MVRV rollover/weak_down/warning)
+   └─ Whale distrib + NOT MDIA inflow + NOT MVRV macro bullish
 
 🔥 MOMENTUM_CONTINUATION
-   └─ MDIA inflow + Whale mixed/neutral + MVRV improving
+   └─ MDIA inflow + Whale sponsored/mixed + MVRV macro bullish
 
 🎯 BULL_PROBE (0.5x sizing)
-   └─ MDIA inflow + Whale sponsored + MVRV neutral
+   └─ MDIA inflow + Whale sponsored + MVRV macro neutral
 
 🔴 BEAR_PROBE (0.5x sizing)
-   └─ Whale strong_distribution + MVRV neutral (no MDIA requirement)
+   └─ NOT MDIA inflow + Whale strong_distribution + MVRV macro neutral
 
 🟡 NO_TRADE
    └─ No alignment (fallback)
@@ -116,22 +116,14 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
    └─ MVRV overheated + Sentiment greed + Whale distrib — promoted when fusion=NO_TRADE
 ```
 
-### Hybrid Classification for Shorts
+### Stricter Short Logic
 
-Short setups use a **hybrid approach** to catch distribution tops that rule-based logic misses:
+Short setups historically suffer from false positives during choppy structures. The new hierarchy applies a strict `mdia_inflow` gate—shorts cannot fire if the market is experiencing active near-term capital inflow.
 
-1. **Rule-based shorts**: Traditional logic (BEAR_CONTINUATION, DISTRIBUTION_RISK, BEAR_PROBE)
-2. **Score-based shorts**: When rules return NO_TRADE, check weighted short score
-
-**Score-based Short Detection** uses `MEGA_WHALE_WEIGHT = 1.5` to amplify mega whale distribution signals:
-
-| Short Score | State | Notes |
-|-------------|-------|-------|
-| ≤ -3.5 | BEAR_CONTINUATION | Strong distribution |
-| -3.5 to -2.5 | DISTRIBUTION_RISK | Moderate distribution |
-| -2.5 to -2.0 | BEAR_PROBE | Weak but tradeable |
-
-The `short_source` field tracks origin: `'rule'` or `'score'`. Use `analyze_fusion --explain` to see breakdown.
+Key rules:
+- **BEAR_CONTINUATION**: Requires definitive whale distribution + MVRV macro bearishness.
+- **DISTRIBUTION_RISK**: Fires when whales and MVRV align bearishly, even if trailing momentum hasn't fully collapsed. Very strict.
+- **BEAR_PROBE**: Weakest short state. Triggers on strong distribution alone, but is heavily vetted by overlays and size penalized to 0.35-0.60x.
 
 ### Option Signal Fallback
 
@@ -153,47 +145,20 @@ Use `analyze_fusion --explain --date YYYY-MM-DD` to see both fusion state and op
 
 ---
 
-## Scoring System
+## Static Confidence Mapping
 
-### Confidence Score Calculation
+Instead of dynamic linear scoring, states have static, empirically validated properties mapped directly to execution parameters (`fusion.STATE_PROPERTIES`):
 
-Each indicator contributes to a numeric score (-6 to +6 range):
-
-| Indicator | Condition | Score |
-|-----------|-----------|-------|
-| **MDIA** | `strong_inflow` | +2 |
-| **MDIA** | `inflow` (moderate) | +1 |
-| **MDIA** | `aging` (rising) | 0 (Neutral) |
-| **Whales** | `broad_accum` | +2 |
-| **Whales** | `strategic_accum` | +1 |
-| **Whales** | `strong_distribution` | -2 |
-| **Whales** | `distribution` | -1 |
-| **MVRV-LS** | `call_confirm_recovery` | +2 |
-| **MVRV-LS** | `trend_confirm` | +1 |
-| **MVRV-LS** | `put_confirm` | -2 |
-| **MVRV-LS** | `distribution_warning` | -1 |
-| **Conflicts** | Mega whale or MVRV conflict | -1 each |
-
-> **Note**: Small whale conflicts (`whale_small_conflict`) are **not penalized**. 
-> Mega whales (100-10k BTC) have significantly more market impact than small whales (1-100 BTC).
-> When small whales show mixed signals but mega whales have clear direction, trust the mega whales.
-
-### Score → Confidence Mapping
-
-| Score | Confidence | Position Sizing |
-|-------|------------|-----------------|
-| ≥ +4 | HIGH | Full size (1.0x) |
-| +2 to +3 | MEDIUM | Normal size |
-| < +2 | LOW | Reduced or no trade |
-
-### Score Thresholds for Trade Entry
-
-| State | Min Score | Effect |
-|-------|-----------|--------|
-| BULL_PROBE | ≥ +2 | Gates weak probes |
-| BEAR_PROBE | ≤ -2 | Gates weak shorts |
-| HIGH confidence | ≥ +4 | Full sizing |
-| MEDIUM confidence | +2 to +3 | Normal sizing |
+| State | Static Confidence | Static Score | Impact |
+|-------|-------------------|--------------|--------|
+| `STRONG_BULLISH` | HIGH | +5 | Full Sizing |
+| `EARLY_RECOVERY` | HIGH | +4 | Full Sizing |
+| `BEAR_CONTINUATION` | HIGH | -5 | Full Sizing |
+| `MOMENTUM_CONTINUATION` | MEDIUM | +3 | Standard Sizing |
+| `DISTRIBUTION_RISK` | MEDIUM | -3 | Standard Sizing |
+| `BULL_PROBE` | LOW | +1 | Gated 0.5x sizing |
+| `BEAR_PROBE` | LOW | -2 | Gated 0.5x sizing |
+| `NO_TRADE` | LOW | 0 | No Trade |
 
 ---
 
@@ -323,9 +288,9 @@ When a state's invalidation-before-hit rate ≥ 30% (or combined inv + ambiguous
 | **MOMENTUM** | **31.8%** | ✅ | Messiest long state |
 | **DISTRIBUTION_RISK** | **50.0%** | ✅ | Conservative (small sample) |
 
-**Runtime Structure Gating** (`generate_trade_signal`): Advanced structures are conditionally added:
-- **Backspreads**: Only for HIGH confidence + score ≥ 4 (MOMENTUM → call backspread, BEAR_CONTINUATION → put backspread)
-- **Short call spreads**: Only when IV percentile ≥ 85% in DISTRIBUTION_RISK or BEAR_CONTINUATION
+**Runtime Structure Gating** (`generate_trade_signal`): Advanced structures are conditionally added by state:
+- **Backspreads**: Only for high-confidence structural continuations (STRONG_BULLISH → call backspread, BEAR_CONTINUATION → put backspread)
+- **Credit Spreads**: Scaled by IV percentile policy.
 
 ### Stop Loss Strategy
 
@@ -367,6 +332,10 @@ Data-driven three-layer exit system calibrated from `analyze_path_stats` (7 stat
 | `/api/v1/signals/` | GET | ✅ Token | List signals (paginated, summary view) |
 | `/api/v1/signals/latest/` | GET | ✅ Token | Latest signal (full detail) |
 | `/api/v1/signals/<date>/` | GET | ✅ Token | Signal by date (YYYY-MM-DD format) |
+| `/api/v1/fusion/analysis/metric-stats/` | GET | ✅ Token | Research metric distribution |
+| `/api/v1/fusion/analysis/combo-stats/` | GET | ✅ Token | Research group-by combos |
+| `/api/v1/fusion/analysis/state-stats/` | GET | ✅ Token | Research state hit-rates |
+| `/api/v1/fusion/analysis/score-validation/` | GET | ✅ Token | Research monotonicity validation |
 
 ### Authentication
 
@@ -400,9 +369,10 @@ curl -H "Authorization: Token YOUR_API_TOKEN" \
 | `p_short` | float | ML probability for short position |
 | `signal_option_call` | int | Call signal (0/1) |
 | `signal_option_put` | int | Put signal (0/1) |
-| `fusion_state` | string | Market state (e.g., `strong_bullish`) |
-| `fusion_confidence` | string | Confidence level (HIGH/MEDIUM/LOW) |
-| `fusion_score` | int | Numeric fusion score (-6 to +6) |
+| `fusion_state` | string | Core regime identifier (e.g. `strong_bullish`) |
+| `fusion_confidence` | string | Sizing conviction (`high`, `medium`, `low`) |
+| `fusion_score` | int | Static integer score assigned to the state |
+| `score_components` | dict | Dictionary showing which boolean traits contributed |
 | `overlay_reason` | string | Explanation from overlay logic |
 | `size_multiplier` | float | Position size multiplier |
 | `dte_multiplier` | float | DTE adjustment multiplier |
@@ -465,6 +435,12 @@ python manage.py train_models
 
 # Train with walk-forward validation
 python manage.py train_walk_forward
+
+# Analyze historical path performance and exits
+python manage.py analyze_path_stats --target 0.05 --horizon 14
+
+# Diagnose why trades didn't fire
+python manage.py diagnose_notrade --year 2025
 ```
 
 ### Data Sync

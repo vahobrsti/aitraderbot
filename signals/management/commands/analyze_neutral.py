@@ -79,15 +79,18 @@ class Command(BaseCommand):
         for idx, row in df.iterrows():
             fusion = fuse_signals(row)
             
-            # Derive LS status
+            # Derive LS status (sync with v1 fusion mvrv_macro definitions)
             ls_permissive = (
                 row.get('mvrv_ls_regime_call_confirm', 0) == 1 or
                 row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1 or
-                row.get('mvrv_ls_weak_uptrend', 0) == 1
+                row.get('mvrv_ls_regime_call_confirm_trend', 0) == 1
             )
             ls_bearish = (
                 row.get('mvrv_ls_regime_distribution_warning', 0) == 1 or
-                row.get('mvrv_ls_regime_put_confirm', 0) == 1
+                row.get('mvrv_ls_regime_put_confirm', 0) == 1 or
+                row.get('mvrv_ls_regime_bear_continuation', 0) == 1 or
+                row.get('mvrv_ls_early_rollover', 0) == 1 or
+                row.get('mvrv_ls_weak_downtrend', 0) == 1
             )
             
             if ls_permissive:
@@ -100,7 +103,7 @@ class Command(BaseCommand):
             # Get NEUTRAL subgroup indicators
             rising_count = int(row.get('mvrv_ls_rising_count', 0))
             falling_count = int(row.get('mvrv_ls_falling_count', 0))
-            conflicts = 1 if 'conflicts' in str(fusion.components) else 0
+            conflicts = 0  # Replaced by flat components in v1, no longer used
             
             # Determine subgroup
             if ls_status == 'NEUTRAL':
@@ -108,8 +111,6 @@ class Command(BaseCommand):
                     subgroup = 'NEUTRAL-IMPROVING'
                 elif falling_count >= 1:
                     subgroup = 'NEUTRAL-DETERIORATING'
-                elif conflicts == 1:
-                    subgroup = 'NEUTRAL-CONFLICTED'
                 else:
                     subgroup = 'NEUTRAL-FLAT'
             else:
@@ -247,16 +248,8 @@ class Command(BaseCommand):
             hit = (sub['fwd_max'] >= threshold).mean() * 100
             self.stdout.write(f"  falling_count={fc}: n={len(sub):3d}, avg={avg:+.1f}%, hit>{threshold*100:.0f}%={hit:.0f}%")
         
-        # By score within NEUTRAL
-        self.stdout.write("\n📊 NEUTRAL by fusion score:")
-        for score in sorted(neutral_with_returns['score'].unique()):
-            sub = neutral_with_returns[neutral_with_returns['score'] == score]
-            if len(sub) < 5:
-                continue
-            avg = sub['fwd_return'].mean() * 100
-            hit = (sub['fwd_max'] >= threshold).mean() * 100
-            flag = "⚡" if avg > 3 and hit > 60 else ""
-            self.stdout.write(f"  score={score:+d}: n={len(sub):3d}, avg={avg:+.1f}%, hit>{threshold*100:.0f}%={hit:.0f}% {flag}")
+        # Note: Score slicing within NEUTRAL is deprecated as NO_TRADE 
+        # statically returns 0 score.
         
         # === FINAL SUMMARY ===
         self.stdout.write("\n" + "=" * 80)
