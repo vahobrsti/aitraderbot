@@ -79,6 +79,10 @@ class Command(BaseCommand):
             df = df.loc[f'{year}-01-01':f'{year}-12-31']
             self.stdout.write(f"Filtered to {year}: {len(df)} rows\n")
         
+        if len(df) == 0:
+            self.stderr.write("No rows after filtering. Nothing to analyze.\n")
+            return
+        
         # If explain mode, show detailed breakdown and exit
         if options.get("explain"):
             self._show_explain(df, options.get("date"))
@@ -130,7 +134,7 @@ class Command(BaseCommand):
             # Track overlay effects
             overlay = apply_long_overlays(result, row)
             
-            if result.state in {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION}:
+            if result.state in {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE}:
                 long_signals += 1
                 if overlay.edge_strength == 2:
                     edge_full += 1
@@ -154,7 +158,7 @@ class Command(BaseCommand):
                     else:
                         tactical_put_partial += 1
             
-            if result.state in {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION}:
+            if result.state in {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, MarketState.BEAR_PROBE}:
                 short_signals += 1
                 if overlay.short_veto_strength == 2:
                     short_veto_hard += 1
@@ -242,7 +246,7 @@ class Command(BaseCommand):
         tactical_put_list = []
         for idx, row in df.iterrows():
             result = fuse_signals(row)
-            if result.state in {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION}:
+            if result.state in {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE}:
                 tactical_result = tactical_put_inside_bull(result, row)
                 if tactical_result.active:
                     date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
@@ -267,7 +271,7 @@ class Command(BaseCommand):
         short_vetoed_list = []
         for idx, row in df.iterrows():
             result = fuse_signals(row)
-            if result.state in {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION}:
+            if result.state in {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, MarketState.BEAR_PROBE}:
                 overlay = apply_long_overlays(result, row)
                 if overlay.short_veto_active:
                     date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
@@ -326,7 +330,7 @@ class Command(BaseCommand):
                 dir_emoji = "📗"
             elif sig['type'] == 'OPTION_PUT':
                 dir_emoji = "📕"
-            elif sig['state'] in ['strong_bullish', 'early_recovery', 'momentum']:
+            elif sig['state'] in ['strong_bullish', 'early_recovery', 'momentum', 'bull_probe']:
                 dir_emoji = "🟢"
             else:
                 dir_emoji = "🔴"
@@ -335,6 +339,50 @@ class Command(BaseCommand):
         
         if len(trade_signals) > 50:
             self.stdout.write(f"  ... (showing last 50 of {len(trade_signals)})")
+
+        # === HIT RATE BY STATE ===
+        self.stdout.write("\n" + "=" * 60)
+        self.stdout.write("HIT RATE BY STATE (Price Validation)")
+        self.stdout.write("=" * 60)
+        
+        long_states_set = {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE}
+        short_states_set = {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, MarketState.BEAR_PROBE}
+        
+        has_labels = 'label_good_move_long' in df.columns and 'label_good_move_short' in df.columns
+        if has_labels:
+            state_hits = {}  # {state_value: {'count': N, 'hits': N}}
+            for idx, row in df.iterrows():
+                result = fuse_signals(row)
+                sv = result.state.value
+                if sv not in state_hits:
+                    state_hits[sv] = {'count': 0, 'long_hits': 0, 'short_hits': 0}
+                state_hits[sv]['count'] += 1
+                if result.state in long_states_set:
+                    state_hits[sv]['long_hits'] += int(row.get('label_good_move_long', 0))
+                elif result.state in short_states_set:
+                    state_hits[sv]['short_hits'] += int(row.get('label_good_move_short', 0))
+            
+            self.stdout.write(f"\n{'State':25s} | {'Hit Rate':>10s} | {'Hits':>5s} | {'Count':>5s} | {'Dir':>5s}")
+            self.stdout.write("-" * 65)
+            for state in MarketState:
+                sv = state.value
+                if sv not in state_hits or state == MarketState.NO_TRADE:
+                    continue
+                info = state_hits[sv]
+                count = info['count']
+                if state in long_states_set:
+                    hits = info['long_hits']
+                    direction_label = 'long'
+                elif state in short_states_set:
+                    hits = info['short_hits']
+                    direction_label = 'short'
+                else:
+                    continue
+                hit_rate = hits / count * 100 if count > 0 else 0
+                bar = "█" * int(hit_rate / 5)
+                self.stdout.write(f"  {sv:23s} | {hit_rate:8.1f}%  | {hits:5d} | {count:5d} | {direction_label:>5s} {bar}")
+        else:
+            self.stdout.write("\n(label_good_move_long/short columns not found — skipping hit rate)")
 
         # === LATEST SIGNALS ===
         self.stdout.write("\n" + "=" * 60)
@@ -391,8 +439,8 @@ class Command(BaseCommand):
         """Show last N setups filtered by direction after overlay filter."""
         from signals.overlays import apply_overlays
         
-        long_states = {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION}
-        short_states = {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION}
+        long_states = {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE}
+        short_states = {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, MarketState.BEAR_PROBE}
         
         setups = []
         
@@ -428,6 +476,17 @@ class Command(BaseCommand):
                         'overlay': f"TACTICAL PUT: {tactical_result.reason[:30]}",
                         'type': 'tactical_put',
                     })
+                
+                # Option call signals
+                if int(row.get('signal_option_call', 0)) == 1:
+                    setups.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'overlay': 'MVRV cheap + fear',
+                        'type': 'OPTION_CALL',
+                    })
             
             elif direction == "short" and result.state in short_states:
                 # PRIMARY_SHORT: Keep if not hard vetoed
@@ -456,6 +515,18 @@ class Command(BaseCommand):
                         'confidence': result.confidence.value,
                         'overlay': f"{str_label}: {tactical_result.reason[tactical_result.reason.find('MVRV'):][:35]}",
                         'type': 'TACTICAL_PUT',
+                    })
+            
+            if direction == "short":
+                # Option put signals (independent of fusion state)
+                if int(row.get('signal_option_put', 0)) == 1:
+                    setups.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'overlay': 'MVRV hot + greed',
+                        'type': 'OPTION_PUT',
                     })
             
             elif direction == "all":
@@ -775,7 +846,6 @@ class Command(BaseCommand):
         # Helper lookups (same as classify_market_state)
         mdia_strong = row.get('mdia_regime_strong_inflow', 0) == 1
         mdia_inflow = row.get('mdia_regime_inflow', 0) == 1 or mdia_strong
-        mdia_distrib = row.get('mdia_regime_distribution', 0) == 1
         
         whale_broad = row.get('whale_regime_broad_accum', 0) == 1
         whale_strategic = row.get('whale_regime_strategic_accum', 0) == 1
@@ -799,21 +869,24 @@ class Command(BaseCommand):
         mvrv_neutral = (not mvrv_bullish) and (not mvrv_bearish)
         
         # Check each rule
+        whale_distrib_strong = row.get('whale_regime_distribution_strong', 0) == 1
+        mvrv_improving = mvrv_call or mvrv_trend or mvrv_weak_up
+        
         rules = [
             ("STRONG_BULLISH", mdia_strong and whale_sponsored and mvrv_call,
              f"mdia_strong={mdia_strong}, whale_sponsored={whale_sponsored}, mvrv_call={mvrv_call}"),
             ("EARLY_RECOVERY", mdia_inflow and whale_sponsored and mvrv_recovery,
              f"mdia_inflow={mdia_inflow}, whale_sponsored={whale_sponsored}, mvrv_recovery={mvrv_recovery}"),
-            ("BEAR_CONTINUATION", (mdia_distrib or not mdia_inflow) and whale_distrib and (mvrv_put or mvrv_bear),
-             f"mdia_distrib/no_inflow={mdia_distrib or not mdia_inflow}, whale_distrib={whale_distrib}, mvrv_put/bear={mvrv_put or mvrv_bear}"),
+            ("BEAR_CONTINUATION", not mdia_inflow and whale_distrib and (mvrv_put or mvrv_bear),
+             f"not_mdia_inflow={not mdia_inflow}, whale_distrib={whale_distrib}, mvrv_put/bear={mvrv_put or mvrv_bear}"),
             ("DISTRIBUTION_RISK", whale_distrib and not mdia_strong and (mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn),
-             f"whale_distrib={whale_distrib}, mdia_strong={mdia_strong}, mvrv_rollover/weak_down={mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn}"),
-            ("MOMENTUM", mdia_inflow and (whale_mixed or whale_neutral) and (mvrv_trend or mvrv_weak_up),
-             f"mdia_inflow={mdia_inflow}, whale_mixed/neutral={whale_mixed or whale_neutral}, mvrv_improving={mvrv_trend or mvrv_weak_up}"),
+             f"whale_distrib={whale_distrib}, not_mdia_strong={not mdia_strong}, mvrv_rollover/weak_down={mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn}"),
+            ("MOMENTUM", mdia_inflow and not whale_distrib and mvrv_improving,
+             f"mdia_inflow={mdia_inflow}, not_whale_distrib={not whale_distrib}, mvrv_improving={mvrv_improving}"),
             ("BULL_PROBE", mdia_inflow and whale_sponsored and mvrv_neutral,
              f"mdia_inflow={mdia_inflow}, whale_sponsored={whale_sponsored}, mvrv_neutral={mvrv_neutral}"),
-            ("BEAR_PROBE", mdia_distrib and whale_distrib and mvrv_neutral,
-             f"mdia_distrib={mdia_distrib}, whale_distrib={whale_distrib}, mvrv_neutral={mvrv_neutral}"),
+            ("BEAR_PROBE", whale_distrib_strong and mvrv_neutral,
+             f"whale_distrib_strong={whale_distrib_strong}, mvrv_neutral={mvrv_neutral}"),
         ]
         
         matched = None
