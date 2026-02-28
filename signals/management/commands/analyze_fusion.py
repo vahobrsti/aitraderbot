@@ -59,6 +59,18 @@ class Command(BaseCommand):
             default=None,
             help="Target date for --explain mode (YYYY-MM-DD), defaults to latest",
         )
+        parser.add_argument(
+            "--research",
+            action="store_true",
+            help="Run full research pipeline (bucket stats, modeling, validation)",
+        )
+        parser.add_argument(
+            "--stats",
+            type=str,
+            choices=["metric", "combo", "state", "score"],
+            default=None,
+            help="Show stats: metric (per-bucket), combo (pairwise), state, or score",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["csv"])
@@ -79,9 +91,23 @@ class Command(BaseCommand):
             df = df.loc[f'{year}-01-01':f'{year}-12-31']
             self.stdout.write(f"Filtered to {year}: {len(df)} rows\n")
         
+        if len(df) == 0:
+            self.stderr.write("No rows after filtering. Nothing to analyze.\n")
+            return
+        
         # If explain mode, show detailed breakdown and exit
         if options.get("explain"):
             self._show_explain(df, options.get("date"))
+            return
+        
+        # Research pipeline mode
+        if options.get("research"):
+            self._show_research(df)
+            return
+        
+        # Stats mode
+        if options.get("stats"):
+            self._show_stats(df, options["stats"])
             return
         
         # If direction specified, show filtered setups and exit
@@ -130,7 +156,7 @@ class Command(BaseCommand):
             # Track overlay effects
             overlay = apply_long_overlays(result, row)
             
-            if result.state in {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION}:
+            if result.state in {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE}:
                 long_signals += 1
                 if overlay.edge_strength == 2:
                     edge_full += 1
@@ -154,7 +180,7 @@ class Command(BaseCommand):
                     else:
                         tactical_put_partial += 1
             
-            if result.state in {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION}:
+            if result.state in {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, MarketState.BEAR_PROBE}:
                 short_signals += 1
                 if overlay.short_veto_strength == 2:
                     short_veto_hard += 1
@@ -242,7 +268,7 @@ class Command(BaseCommand):
         tactical_put_list = []
         for idx, row in df.iterrows():
             result = fuse_signals(row)
-            if result.state in {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION}:
+            if result.state in {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE}:
                 tactical_result = tactical_put_inside_bull(result, row)
                 if tactical_result.active:
                     date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
@@ -267,7 +293,7 @@ class Command(BaseCommand):
         short_vetoed_list = []
         for idx, row in df.iterrows():
             result = fuse_signals(row)
-            if result.state in {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION}:
+            if result.state in {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, MarketState.BEAR_PROBE}:
                 overlay = apply_long_overlays(result, row)
                 if overlay.short_veto_active:
                     date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
@@ -326,7 +352,7 @@ class Command(BaseCommand):
                 dir_emoji = "📗"
             elif sig['type'] == 'OPTION_PUT':
                 dir_emoji = "📕"
-            elif sig['state'] in ['strong_bullish', 'early_recovery', 'momentum']:
+            elif sig['state'] in ['strong_bullish', 'early_recovery', 'momentum', 'bull_probe']:
                 dir_emoji = "🟢"
             else:
                 dir_emoji = "🔴"
@@ -335,6 +361,50 @@ class Command(BaseCommand):
         
         if len(trade_signals) > 50:
             self.stdout.write(f"  ... (showing last 50 of {len(trade_signals)})")
+
+        # === HIT RATE BY STATE ===
+        self.stdout.write("\n" + "=" * 60)
+        self.stdout.write("HIT RATE BY STATE (Price Validation)")
+        self.stdout.write("=" * 60)
+        
+        long_states_set = {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE}
+        short_states_set = {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, MarketState.BEAR_PROBE}
+        
+        has_labels = 'label_good_move_long' in df.columns and 'label_good_move_short' in df.columns
+        if has_labels:
+            state_hits = {}  # {state_value: {'count': N, 'hits': N}}
+            for idx, row in df.iterrows():
+                result = fuse_signals(row)
+                sv = result.state.value
+                if sv not in state_hits:
+                    state_hits[sv] = {'count': 0, 'long_hits': 0, 'short_hits': 0}
+                state_hits[sv]['count'] += 1
+                if result.state in long_states_set:
+                    state_hits[sv]['long_hits'] += int(row.get('label_good_move_long', 0))
+                elif result.state in short_states_set:
+                    state_hits[sv]['short_hits'] += int(row.get('label_good_move_short', 0))
+            
+            self.stdout.write(f"\n{'State':25s} | {'Hit Rate':>10s} | {'Hits':>5s} | {'Count':>5s} | {'Dir':>5s}")
+            self.stdout.write("-" * 65)
+            for state in MarketState:
+                sv = state.value
+                if sv not in state_hits or state == MarketState.NO_TRADE:
+                    continue
+                info = state_hits[sv]
+                count = info['count']
+                if state in long_states_set:
+                    hits = info['long_hits']
+                    direction_label = 'long'
+                elif state in short_states_set:
+                    hits = info['short_hits']
+                    direction_label = 'short'
+                else:
+                    continue
+                hit_rate = hits / count * 100 if count > 0 else 0
+                bar = "█" * int(hit_rate / 5)
+                self.stdout.write(f"  {sv:23s} | {hit_rate:8.1f}%  | {hits:5d} | {count:5d} | {direction_label:>5s} {bar}")
+        else:
+            self.stdout.write("\n(label_good_move_long/short columns not found — skipping hit rate)")
 
         # === LATEST SIGNALS ===
         self.stdout.write("\n" + "=" * 60)
@@ -386,13 +456,183 @@ class Command(BaseCommand):
             self.stdout.write(f"  Sizing: H={strategy.sizing.high_confidence*100:.0f}% M={strategy.sizing.medium_confidence*100:.0f}% L={strategy.sizing.low_confidence*100:.0f}%")
 
         self.stdout.write("\nDone.\n")
-    
+
+    # ── Research pipeline methods (use signals.research services) ──
+    def _show_research(self, df: pd.DataFrame):
+        """Run full research pipeline: stats, modeling, validation."""
+        from signals.research.fusion_table import build_research_table
+        from signals.research.stats import compute_bucket_stats, compute_state_stats
+        from signals.research.modeling import run_model_comparison
+        from signals.research.reporting import (
+            generate_weighting_proposal,
+            validate_monotonicity,
+            validate_state_stability,
+        )
+
+        self.stdout.write("\n" + "=" * 70)
+        self.stdout.write("RESEARCH PIPELINE")
+        self.stdout.write("=" * 70)
+
+        # 1. Build research table
+        self.stdout.write("\n[1/5] Building research table...")
+        rt = build_research_table(df)
+        self.stdout.write(f"  → {len(rt)} rows, {len(rt.columns)} columns")
+        self.stdout.write(f"  → Date range: {rt.index.min()} → {rt.index.max()}")
+
+        # 2. Bucket stats
+        self.stdout.write("\n[2/5] Computing bucket stats...")
+        for metric in ("mdia_bucket", "whale_bucket", "mvrv_ls_bucket"):
+            stats = compute_bucket_stats(rt, metric)
+            label = metric.replace("_bucket", "").upper()
+            self.stdout.write(f"\n  {label}:")
+            self.stdout.write(f"  {'Bucket':25s} | {'N':>5s} | {'Long HR':>8s} | {'Short HR':>8s} | {'Ret14d':>8s} | {'Flag':>4s}")
+            self.stdout.write("  " + "-" * 65)
+            for _, row in stats.iterrows():
+                bucket = row.get(metric, "?")
+                flag = "⚠️" if row.get("_flagged", False) else ""
+                self.stdout.write(
+                    f"  {bucket:25s} | {int(row['n']):5d} | "
+                    f"{row.get('long_hit_rate', 0)*100:7.1f}% | "
+                    f"{row.get('short_hit_rate', 0)*100:7.1f}% | "
+                    f"{row.get('ret_14d_median', 0)*100:7.2f}% | {flag}"
+                )
+
+        # 3. Modeling
+        self.stdout.write("\n[3/5] Running model comparison (logistic regression)...")
+        for target in ("label_good_move_long", "label_good_move_short"):
+            result = run_model_comparison(rt, target_col=target, n_splits=5)
+            short_label = "LONG" if "long" in target else "SHORT"
+            self.stdout.write(f"\n  TARGET: {short_label}")
+            self.stdout.write(f"  {'Model':30s} | {'AUC':>6s} | {'LogLoss':>8s}")
+            self.stdout.write("  " + "-" * 50)
+            for mr in sorted(result["model_results"], key=lambda x: -x["mean_auc"]):
+                self.stdout.write(
+                    f"  {mr['model_name']:30s} | {mr['mean_auc']:.4f} | {mr['mean_logloss']:.4f}"
+                )
+
+            summary = result["summary"]
+            self.stdout.write(f"\n  Best standalone:   {summary['best_standalone']}")
+            self.stdout.write(f"  Best incremental:  {summary['best_incremental']}")
+            if summary["confirmer_metrics"]:
+                self.stdout.write(f"  Confirmer metrics: {', '.join(summary['confirmer_metrics'])}")
+
+            self.stdout.write(f"\n  Permutation importance:")
+            for m, imp in sorted(result["feature_importance"].items(), key=lambda x: -x[1]):
+                self.stdout.write(f"    {m:10s}: {imp:+.4f} AUC drop")
+
+        # 4. Monotonicity
+        self.stdout.write("\n[4/5] Score monotonicity validation...")
+        mono = validate_monotonicity(rt)
+        self.stdout.write(f"\n  {'Score':>6s} | {'N':>5s} | {'Long HR':>8s} | {'Short HR':>8s} | {'Ret14d':>8s}")
+        self.stdout.write("  " + "-" * 50)
+        for _, row in mono.iterrows():
+            flag = " ⚠️" if row.get("_flagged", False) else ""
+            self.stdout.write(
+                f"  {int(row['score']):6d} | {int(row['n']):5d} | "
+                f"{row.get('long_hit_rate', 0)*100:7.1f}% | "
+                f"{row.get('short_hit_rate', 0)*100:7.1f}% | "
+                f"{row.get('ret_14d_median', 0)*100:7.2f}%{flag}"
+            )
+        if "monotonic_long" in mono.columns:
+            self.stdout.write(f"\n  Monotonic (long):  {'✓' if mono['monotonic_long'].iloc[0] else '✗'}")
+        if "monotonic_short" in mono.columns:
+            self.stdout.write(f"  Monotonic (short): {'✓' if mono['monotonic_short'].iloc[0] else '✗'}")
+
+        # 5. State stability
+        self.stdout.write("\n[5/5] State stability by year...")
+        stability = validate_state_stability(rt)
+        current_state = None
+        for _, row in stability.iterrows():
+            st = row["fusion_state"]
+            if st != current_state:
+                self.stdout.write(f"\n  {st.upper()}")
+                current_state = st
+            flag = " ⚠️" if row.get("_flagged", False) else ""
+            self.stdout.write(
+                f"    {int(row['year'])} | n={int(row['n']):4d} | "
+                f"long={row.get('long_hit_rate', 0)*100:5.1f}% | "
+                f"short={row.get('short_hit_rate', 0)*100:5.1f}% | "
+                f"ret14d={row.get('ret_14d_median', 0)*100:6.2f}%{flag}"
+            )
+
+        self.stdout.write("\n\nDone.\n")
+
+    def _show_stats(self, df: pd.DataFrame, stats_type: str):
+        """Show standalone stats using the research service layer."""
+        from signals.research.fusion_table import build_research_table
+        from signals.research.stats import (
+            compute_bucket_stats,
+            compute_combo_stats,
+            compute_state_stats,
+            compute_score_stats,
+        )
+
+        self.stdout.write("\nBuilding research table...")
+        rt = build_research_table(df)
+        self.stdout.write(f"  → {len(rt)} rows\n")
+
+        if stats_type == "metric":
+            for metric in ("mdia_bucket", "whale_bucket", "mvrv_ls_bucket"):
+                stats = compute_bucket_stats(rt, metric)
+                label = metric.replace("_bucket", "").upper()
+                self.stdout.write(f"\n{'=' * 60}")
+                self.stdout.write(f"{label} BUCKET STATS")
+                self.stdout.write(f"{'=' * 60}")
+                self._print_stats_table(stats, metric)
+
+        elif stats_type == "combo":
+            from signals.research.constants import BUCKET_COLS
+            pairs = [
+                (BUCKET_COLS[0], BUCKET_COLS[1]),
+                (BUCKET_COLS[0], BUCKET_COLS[2]),
+                (BUCKET_COLS[1], BUCKET_COLS[2]),
+            ]
+            for col_a, col_b in pairs:
+                stats = compute_combo_stats(rt, [col_a, col_b])
+                label = f"{col_a} × {col_b}".upper()
+                self.stdout.write(f"\n{'=' * 60}")
+                self.stdout.write(f"{label}")
+                self.stdout.write(f"{'=' * 60}")
+                self._print_stats_table(stats, col_a)
+
+        elif stats_type == "state":
+            stats = compute_state_stats(rt)
+            self.stdout.write(f"\n{'=' * 60}")
+            self.stdout.write("FUSION STATE STATS")
+            self.stdout.write(f"{'=' * 60}")
+            self._print_stats_table(stats, "fusion_state")
+
+        elif stats_type == "score":
+            stats = compute_score_stats(rt)
+            self.stdout.write(f"\n{'=' * 60}")
+            self.stdout.write("FUSION SCORE STATS")
+            self.stdout.write(f"{'=' * 60}")
+            self._print_stats_table(stats, "fusion_score")
+
+        self.stdout.write("\nDone.\n")
+
+    def _print_stats_table(self, stats: 'pd.DataFrame', group_col: str):
+        """Pretty-print a stats DataFrame."""
+        self.stdout.write(f"\n{'Group':30s} | {'N':>5s} | {'Long HR':>8s} | {'Short HR':>8s} | {'Ret14d med':>10s} | {'MFE14d':>8s} | {'MAE14d':>8s}")
+        self.stdout.write("-" * 95)
+        for _, row in stats.iterrows():
+            group = str(row.get(group_col, "?"))
+            flag = " ⚠️" if row.get("_flagged", False) else ""
+            self.stdout.write(
+                f"{group:30s} | {int(row['n']):5d} | "
+                f"{row.get('long_hit_rate', 0)*100:7.1f}% | "
+                f"{row.get('short_hit_rate', 0)*100:7.1f}% | "
+                f"{row.get('ret_14d_median', 0)*100:9.2f}% | "
+                f"{row.get('mfe_14d_median', 0)*100:7.2f}% | "
+                f"{row.get('mae_14d_median', 0)*100:7.2f}%{flag}"
+            )
+
     def _show_direction_setups(self, df, direction: str, n: int):
         """Show last N setups filtered by direction after overlay filter."""
         from signals.overlays import apply_overlays
         
-        long_states = {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION}
-        short_states = {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION}
+        long_states = {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE}
+        short_states = {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, MarketState.BEAR_PROBE}
         
         setups = []
         
@@ -428,6 +668,17 @@ class Command(BaseCommand):
                         'overlay': f"TACTICAL PUT: {tactical_result.reason[:30]}",
                         'type': 'tactical_put',
                     })
+                
+                # Option call signals
+                if int(row.get('signal_option_call', 0)) == 1:
+                    setups.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'overlay': 'MVRV cheap + fear',
+                        'type': 'OPTION_CALL',
+                    })
             
             elif direction == "short" and result.state in short_states:
                 # PRIMARY_SHORT: Keep if not hard vetoed
@@ -456,6 +707,18 @@ class Command(BaseCommand):
                         'confidence': result.confidence.value,
                         'overlay': f"{str_label}: {tactical_result.reason[tactical_result.reason.find('MVRV'):][:35]}",
                         'type': 'TACTICAL_PUT',
+                    })
+            
+            if direction == "short":
+                # Option put signals (independent of fusion state)
+                if int(row.get('signal_option_put', 0)) == 1:
+                    setups.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'overlay': 'MVRV hot + greed',
+                        'type': 'OPTION_PUT',
                     })
             
             elif direction == "all":
@@ -613,37 +876,20 @@ class Command(BaseCommand):
         
         # === OVERALL SCORE ===
         self.stdout.write(f"\nCONFIDENCE SCORE: {score:+d} → {result.confidence.value.upper()}")
-        self.stdout.write(f"├── MDIA:     {components.get('mdia', {}).get('score', 0):+d} ({components.get('mdia', {}).get('label', 'neutral')})")
-        self.stdout.write(f"├── Whale:    {components.get('whale', {}).get('score', 0):+d} ({components.get('whale', {}).get('label', 'neutral')})")
-        self.stdout.write(f"├── MVRV-LS:  {components.get('mvrv_ls', {}).get('score', 0):+d} ({components.get('mvrv_ls', {}).get('label', 'neutral')})")
-        conflicts = components.get('conflicts', {}).get('score', 0)
-        # Show conflict detail
-        mega_conflict = row.get('whale_mega_conflict', 0) == 1
-        mvrv_conflict = row.get('mvrv_ls_conflict', 0) == 1
-        small_conflict = row.get('whale_small_conflict', 0) == 1
-        conflict_detail = []
-        if mega_conflict:
-            conflict_detail.append("mega_whale")
-        if mvrv_conflict:
-            conflict_detail.append("mvrv_ls")
-        if small_conflict:
-            conflict_detail.append("small_whale(ignored)")
-        conflict_str = ", ".join(conflict_detail) if conflict_detail else "none"
-        self.stdout.write(f"└── Conflicts: {conflicts} [{conflict_str}]")
+        
+        c = components
+        mdia_label = 'strong_inflow' if c.get('mdia_strong') else 'inflow' if c.get('mdia_inflow') else 'aging' if c.get('mdia_aging') else 'neutral/distrib'
+        whale_label = 'strong_distrib' if c.get('whale_distrib_strong') else 'distrib' if c.get('whale_distrib') else 'sponsored' if c.get('whale_sponsored') else 'mixed' if c.get('whale_mixed') else 'neutral'
+        mvrv_label = 'bullish' if c.get('mvrv_macro_bullish') else 'bearish' if c.get('mvrv_macro_bearish') else 'neutral'
+        
+        self.stdout.write(f"├── MDIA:     ({mdia_label})")
+        self.stdout.write(f"├── Whale:    ({whale_label})")
+        self.stdout.write(f"└── MVRV-LS:  ({mvrv_label})")
         
         # === SHORT SOURCE (if applicable) ===
         if result.short_source:
             self.stdout.write(f"\n📊 SHORT SOURCE: {result.short_source.upper()}")
-            if result.short_source == 'score':
-                # Show weighted short score details
-                short_score_info = components.get('short_score', {})
-                short_score_val = short_score_info.get('score', 0)
-                short_comps = short_score_info.get('components', {})
-                self.stdout.write(f"   Weighted Short Score: {short_score_val:+.1f}")
-                self.stdout.write(f"   ├── MDIA:    {short_comps.get('mdia', {}).get('score', 0):+.1f} ({short_comps.get('mdia', {}).get('label', 'neutral')})")
-                self.stdout.write(f"   ├── Whale:   {short_comps.get('whale', {}).get('score', 0):+.1f} ({short_comps.get('whale', {}).get('label', 'neutral')}) [1.5x weight]")
-                self.stdout.write(f"   ├── MVRV-LS: {short_comps.get('mvrv_ls', {}).get('score', 0):+.1f} ({short_comps.get('mvrv_ls', {}).get('label', 'neutral')})")
-                self.stdout.write(f"   └── Note: Score-based catches distribution tops rules miss")
+            # (Score-based short fallback was removed in v1 redesign)
         
         # === MDIA BREAKDOWN ===
         self.stdout.write("\n" + "─" * 70)
@@ -675,13 +921,13 @@ class Command(BaseCommand):
             aging = row.get('mdia_regime_aging', 0) == 1
             
             if strong_inflow:
-                self.stdout.write("→ Current Regime: STRONG_INFLOW (+2)")
+                self.stdout.write("→ Current Regime: STRONG_INFLOW")
             elif inflow:
-                self.stdout.write("→ Current Regime: INFLOW (+1)")
+                self.stdout.write("→ Current Regime: INFLOW")
             elif aging:
-                self.stdout.write("→ Current Regime: AGING (0, trend-unfriendly, not bearish)")
+                self.stdout.write("→ Current Regime: AGING (trend-unfriendly)")
             else:
-                self.stdout.write("→ Current Regime: NEUTRAL (0)")
+                self.stdout.write("→ Current Regime: NEUTRAL/DISTRIB")
         else:
             self.stdout.write("(MDIA bucket features not found in data)")
         
@@ -717,9 +963,7 @@ class Command(BaseCommand):
                 self.stdout.write(f"    accum_count={accum_count}, distrib_count={distrib_count} → any_accum={any_accum}")
         
         # Cross-group regime
-        whale_regime = components.get('whale', {}).get('label', 'neutral')
-        whale_score = components.get('whale', {}).get('score', 0)
-        self.stdout.write(f"\n→ Cross-Group Regime: {whale_regime.upper()} ({whale_score:+d})")
+        self.stdout.write(f"\n→ Cross-Group Regime: {whale_label.upper()}")
         
         # === MVRV-LS BREAKDOWN ===
         self.stdout.write("\n" + "─" * 70)
@@ -763,63 +1007,48 @@ class Command(BaseCommand):
         self.stdout.write(f"    rising={rising_count}, falling={falling_count}")
         
         # Current regime
-        mvrv_regime = components.get('mvrv_ls', {}).get('label', 'neutral')
-        mvrv_score = components.get('mvrv_ls', {}).get('score', 0)
-        self.stdout.write(f"\n→ Current Regime: {mvrv_regime.upper()} ({mvrv_score:+d})")
+        self.stdout.write(f"\n→ Current Macro Regime: {mvrv_label.upper()}")
         
         # === CLASSIFICATION TRACE ===
         self.stdout.write("\n" + "─" * 70)
-        self.stdout.write("CLASSIFICATION TRACE")
+        self.stdout.write("CLASSIFICATION TRACE (Empirical Hierarchy)")
         self.stdout.write("─" * 70)
         
-        # Helper lookups (same as classify_market_state)
-        mdia_strong = row.get('mdia_regime_strong_inflow', 0) == 1
-        mdia_inflow = row.get('mdia_regime_inflow', 0) == 1 or mdia_strong
-        mdia_distrib = row.get('mdia_regime_distribution', 0) == 1
+        mdia_strong = c.get('mdia_strong', 0) == 1
+        mdia_inflow = c.get('mdia_inflow', 0) == 1
+        mdia_non_inflow = not mdia_inflow
         
-        whale_broad = row.get('whale_regime_broad_accum', 0) == 1
-        whale_strategic = row.get('whale_regime_strategic_accum', 0) == 1
-        whale_sponsored = whale_broad or whale_strategic
-        whale_distrib = row.get('whale_regime_distribution', 0) == 1
-        whale_mixed = row.get('whale_regime_mixed', 0) == 1
-        whale_neutral = not whale_sponsored and not whale_distrib
+        whale_sponsored = c.get('whale_sponsored', 0) == 1
+        whale_mixed = c.get('whale_mixed', 0) == 1
+        whale_distrib = c.get('whale_distrib', 0) == 1
+        whale_distrib_strong = c.get('whale_distrib_strong', 0) == 1
         
-        mvrv_call = row.get('mvrv_ls_regime_call_confirm', 0) == 1
+        mvrv_macro_bullish = c.get('mvrv_macro_bullish', 0) == 1
         mvrv_recovery = row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1
-        mvrv_trend = row.get('mvrv_ls_regime_call_confirm_trend', 0) == 1
-        mvrv_weak_up = row.get('mvrv_ls_weak_uptrend', 0) == 1
-        mvrv_put = row.get('mvrv_ls_regime_put_confirm', 0) == 1
-        mvrv_bear = row.get('mvrv_ls_regime_bear_continuation', 0) == 1
-        mvrv_rollover = row.get('mvrv_ls_early_rollover', 0) == 1
-        mvrv_weak_down = row.get('mvrv_ls_weak_downtrend', 0) == 1
-        mvrv_distrib_warn = row.get('mvrv_ls_regime_distribution_warning', 0) == 1
+        mvrv_macro_neutral = c.get('mvrv_macro_neutral', 0) == 1
+        mvrv_put_or_bear = row.get('mvrv_ls_regime_put_confirm', 0) == 1 or row.get('mvrv_ls_regime_bear_continuation', 0) == 1
         
-        mvrv_bullish = mvrv_call or mvrv_recovery or mvrv_trend or mvrv_weak_up
-        mvrv_bearish = mvrv_put or mvrv_bear or mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn
-        mvrv_neutral = (not mvrv_bullish) and (not mvrv_bearish)
-        
-        # Check each rule
         rules = [
-            ("STRONG_BULLISH", mdia_strong and whale_sponsored and mvrv_call,
-             f"mdia_strong={mdia_strong}, whale_sponsored={whale_sponsored}, mvrv_call={mvrv_call}"),
+            ("STRONG_BULLISH", mdia_strong and whale_sponsored and mvrv_macro_bullish,
+             f"mdia_strong={mdia_strong}, whale_sponsored={whale_sponsored}, macro_bullish={mvrv_macro_bullish}"),
             ("EARLY_RECOVERY", mdia_inflow and whale_sponsored and mvrv_recovery,
              f"mdia_inflow={mdia_inflow}, whale_sponsored={whale_sponsored}, mvrv_recovery={mvrv_recovery}"),
-            ("BEAR_CONTINUATION", (mdia_distrib or not mdia_inflow) and whale_distrib and (mvrv_put or mvrv_bear),
-             f"mdia_distrib/no_inflow={mdia_distrib or not mdia_inflow}, whale_distrib={whale_distrib}, mvrv_put/bear={mvrv_put or mvrv_bear}"),
-            ("DISTRIBUTION_RISK", whale_distrib and not mdia_strong and (mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn),
-             f"whale_distrib={whale_distrib}, mdia_strong={mdia_strong}, mvrv_rollover/weak_down={mvrv_rollover or mvrv_weak_down or mvrv_distrib_warn}"),
-            ("MOMENTUM", mdia_inflow and (whale_mixed or whale_neutral) and (mvrv_trend or mvrv_weak_up),
-             f"mdia_inflow={mdia_inflow}, whale_mixed/neutral={whale_mixed or whale_neutral}, mvrv_improving={mvrv_trend or mvrv_weak_up}"),
-            ("BULL_PROBE", mdia_inflow and whale_sponsored and mvrv_neutral,
-             f"mdia_inflow={mdia_inflow}, whale_sponsored={whale_sponsored}, mvrv_neutral={mvrv_neutral}"),
-            ("BEAR_PROBE", mdia_distrib and whale_distrib and mvrv_neutral,
-             f"mdia_distrib={mdia_distrib}, whale_distrib={whale_distrib}, mvrv_neutral={mvrv_neutral}"),
+            ("BEAR_CONTINUATION", mdia_non_inflow and whale_distrib and mvrv_put_or_bear,
+             f"not_mdia_inflow={mdia_non_inflow}, whale_distrib={whale_distrib}, mvrv_put/bear={mvrv_put_or_bear}"),
+            ("BEAR_PROBE", mdia_non_inflow and whale_distrib_strong and mvrv_macro_neutral,
+             f"not_mdia_inflow={mdia_non_inflow}, whale_distrib_strong={whale_distrib_strong}, macro_neutral={mvrv_macro_neutral}"),
+            ("DISTRIBUTION_RISK", mdia_non_inflow and whale_distrib and not mvrv_macro_bullish,
+             f"not_mdia_inflow={mdia_non_inflow}, whale_distrib={whale_distrib}, not_macro_bullish={not mvrv_macro_bullish}"),
+            ("MOMENTUM_CONTINUATION", mdia_inflow and (whale_sponsored or whale_mixed) and mvrv_macro_bullish,
+             f"mdia_inflow={mdia_inflow}, whale_sponsored/mixed={(whale_sponsored or whale_mixed)}, macro_bullish={mvrv_macro_bullish}"),
+            ("BULL_PROBE", mdia_inflow and whale_sponsored and mvrv_macro_neutral,
+             f"mdia_inflow={mdia_inflow}, whale_sponsored={whale_sponsored}, macro_neutral={mvrv_macro_neutral}"),
         ]
         
         matched = None
         for rule_name, condition, details in rules:
             status = "✓" if condition else "✗"
-            self.stdout.write(f"{status} {rule_name:20s} {details}")
+            self.stdout.write(f"{status} {rule_name:25s} {details}")
             if condition and matched is None:
                 matched = rule_name
         

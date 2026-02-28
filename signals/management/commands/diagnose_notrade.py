@@ -78,11 +78,13 @@ class Command(BaseCommand):
             ls_permissive = (
                 row.get('mvrv_ls_regime_call_confirm', 0) == 1 or
                 row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1 or
-                row.get('mvrv_ls_weak_uptrend', 0) == 1
+                row.get('mvrv_ls_regime_call_confirm_trend', 0) == 1
             )
             ls_bearish = (
                 row.get('mvrv_ls_regime_distribution_warning', 0) == 1 or
-                row.get('mvrv_ls_regime_put_confirm', 0) == 1
+                row.get('mvrv_ls_regime_put_confirm', 0) == 1 or
+                row.get('mvrv_ls_regime_bear_continuation', 0) == 1 or
+                row.get('mvrv_ls_weak_downtrend', 0) == 1
             )
             ls_fragile = row.get('mvrv_ls_early_rollover', 0) == 1
             
@@ -95,16 +97,16 @@ class Command(BaseCommand):
             else:
                 ls_status = 'NEUTRAL'
             
-            # Derive MDIA_STATUS
+            # Derive MDIA_STATUS (v1 treats MDIA as inflow, aging, or generic non-inflow)
             mdia_inflow = (
                 row.get('mdia_regime_strong_inflow', 0) == 1 or
                 row.get('mdia_regime_inflow', 0) == 1
             )
-            mdia_distrib = row.get('mdia_regime_distribution', 0) == 1
+            mdia_aging = row.get('mdia_regime_aging', 0) == 1
             if mdia_inflow:
                 mdia_status = 'INFLOW'
-            elif mdia_distrib:
-                mdia_status = 'DISTRIBUTION'
+            elif mdia_aging:
+                mdia_status = 'AGING'
             else:
                 mdia_status = 'NEUTRAL'
             
@@ -211,44 +213,13 @@ class Command(BaseCommand):
         self.stdout.write(f"  {'MDIA neutral → inflow':30s} | -{mdia_unlock_potential:3d} ({mdia_unlock_potential/notrade_days*100:5.1f}%) | Timing friction")
         self.stdout.write(f"  {'Whale neutral → sponsored':30s} | -{whale_unlock_potential:3d} ({whale_unlock_potential/notrade_days*100:5.1f}%) | Sponsorship strictness")
         
-        # === PHASE 4: Near-Miss Analysis ===
-        self.stdout.write("\n" + "=" * 80)
-        self.stdout.write("PHASE 4: Regime Near-Miss Analysis")
-        self.stdout.write("=" * 80)
+        # === PHASE 4: Near-Miss Analysis (DEPRECATED) ===
+        # The v1 empirical hierarchy uses static confidence mapping instead of 
+        # linear integers. NO_TRADE states are statically assigned a score of 0.
+        # Near-miss analysis by score is no longer mathematically possible or relevant.
         
-        # High score but NO_TRADE
-        high_score_notrade = notrade_df[notrade_df['score'] >= 2]
-        low_score_notrade = notrade_df[notrade_df['score'] <= -2]
-        
-        self.stdout.write("\n📊 NEAR-MISS OPPORTUNITIES")
-        self.stdout.write("-" * 50)
-        self.stdout.write(f"  Score >= +2 but NO_TRADE: {len(high_score_notrade):3d} (potential LONG)")
-        self.stdout.write(f"  Score <= -2 but NO_TRADE: {len(low_score_notrade):3d} (potential SHORT)")
-        
-        if len(high_score_notrade) > 0:
-            self.stdout.write("\n  High-score near-misses breakdown:")
-            for blocker, count in high_score_notrade['primary_blocker'].value_counts().items():
-                self.stdout.write(f"    {blocker}: {count}")
-        
-        if len(low_score_notrade) > 0:
-            self.stdout.write("\n  Low-score near-misses breakdown:")
-            for blocker, count in low_score_notrade['primary_blocker'].value_counts().items():
-                self.stdout.write(f"    {blocker}: {count}")
-        
-        # === PHASE 5: Score vs State Consistency ===
-        self.stdout.write("\n" + "=" * 80)
-        self.stdout.write("PHASE 5: Score vs State Consistency Check")
-        self.stdout.write("=" * 80)
-        
-        # Score distribution for NO_TRADE
-        score_dist = notrade_df['score'].value_counts().sort_index()
-        
-        self.stdout.write("\n📊 SCORE DISTRIBUTION IN NO_TRADE DAYS")
-        self.stdout.write("-" * 50)
-        for score, count in score_dist.items():
-            bar = "█" * min(50, count // 5)
-            flag = "⚠️ INCONSISTENT" if abs(score) >= 2 else ""
-            self.stdout.write(f"  Score {score:+2d}: {count:4d} {bar} {flag}")
+        # === PHASE 5: Score vs State Consistency (DEPRECATED) ===
+        # Consistency is enforced via the `STATE_PROPERTIES` static map in fusion.py.
         
         # === PHASE 6: Time-Series Block Analysis ===
         self.stdout.write("\n" + "=" * 80)
