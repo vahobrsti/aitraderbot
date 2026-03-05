@@ -21,11 +21,10 @@ class FusionExplainTests(APITestCase):
             'mvrv_ls_bucket': ['trend_confirm', 'bear_continuation'],
             'mvrv_ls_regime_call_confirm': [1, 0],
             'mdia_regime_strong_inflow': [1, 0],
+            'mdia_regime_inflow': [0, 1],
             'whale_regime_broad_accum': [1, 0],
             'cycle_days_since_halving': [100, 600],
-            'mvrv_60d_bucket': ['profitable', 'deep_underwater'],
-            'mdia_inflow': [1, 1],
-            'mvrv_macro_bearish': [0, 0]
+            'mvrv_60d': [1.50, 0.70],
         }, index=dates)
 
     @patch('api.research_views.BaseResearchAPIView.get_research_table')
@@ -52,8 +51,8 @@ class FusionExplainTests(APITestCase):
         
         # Verify trace order matches classifier order
         expected_order = [
-            "STRONG_BULLISH", "EARLY_RECOVERY", "BEAR_CONTINUATION", 
-            "BEAR_PROBE", "DISTRIBUTION_RISK", "MOMENTUM_CONTINUATION", "BULL_PROBE"
+            "strong_bullish", "early_recovery", "bear_continuation", 
+            "bear_probe", "distribution_risk", "momentum", "bull_probe"
         ]
         actual_order = [t['state'] for t in trace]
         self.assertEqual(actual_order, expected_order)
@@ -63,16 +62,16 @@ class FusionExplainTests(APITestCase):
         if matched_states:
             # The first matched state should be the one elected, but our mock might hit NO_TRADE
             # Let's check if the result state is one of the matched states, or if none matched, it's NO_TRADE
-            if result['state'].upper() != 'NO_TRADE':
-                self.assertEqual(matched_states[0], result['state'].upper())
+            if result['state'] != 'no_trade':
+                self.assertEqual(matched_states[0], result['state'])
         else:
-            self.assertEqual(result['state'].upper(), 'NO_TRADE')
+            self.assertEqual(result['state'], 'no_trade')
             
         # Verify boolean details are correct for our fixture
         # Our fixture has: strong_inflow, broad_accum (val=1), so mdia_strong=True, whale_sponsored=True
         # mvrv=trend_confirm (which means macro_bullish=True)
         # So STRONG_BULLISH should be matched=True
-        strong_bullish_rule = next(t for t in trace if t['state'] == 'STRONG_BULLISH')
+        strong_bullish_rule = next(t for t in trace if t['state'] == 'strong_bullish')
         self.assertTrue(strong_bullish_rule['matched'])
         self.assertIn("mdia_strong=True", strong_bullish_rule['details'])
         self.assertIn("whale_sponsored=True", strong_bullish_rule['details'])
@@ -94,13 +93,13 @@ class FusionExplainTests(APITestCase):
         self.assertEqual(len(trace), 5)
         
         expected_order = [
-            "BEAR_EXHAUSTION_LONG", "BEAR_RALLY_LONG", "BEAR_CONTINUATION_SHORT", 
-            "LATE_DISTRIBUTION_SHORT", "TRANSITION_CHOP"
+            "bear_exhaustion_long", "bear_rally_long", "bear_continuation_short", 
+            "late_distribution_short", "transition_chop"
         ]
         
         # Verify specific match state (based on mock returning mvrv_60d_bucket='deep_underwater' and mdia_inflow=True and not mvrv_macro_bearish)
-        # So BEAR_EXHAUSTION_LONG should be matched=True
-        exhaustion_rule = next(t for t in trace if t['state'] == 'BEAR_EXHAUSTION_LONG')
+        # So bear_exhaustion_long should be matched=True
+        exhaustion_rule = next(t for t in trace if t['state'] == 'bear_exhaustion_long')
         self.assertTrue(exhaustion_rule['matched'])
         self.assertIn("mvrv_60d=deep_underwater", exhaustion_rule['details'])
         self.assertIn("mdia_inflow=True", exhaustion_rule['details'])
