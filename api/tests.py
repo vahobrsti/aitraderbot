@@ -14,15 +14,17 @@ class FusionExplainTests(APITestCase):
         self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.token.key)
         
         # Create a mock research table for the endpoint
-        dates = pd.date_range('2024-01-01', periods=1, freq='D')
+        dates = pd.date_range('2024-01-01', periods=2, freq='D')
         self.mock_rt = pd.DataFrame({
-            'mdia_bucket': ['strong_inflow'],
-            'whale_bucket': ['broad_accum'],
-            'mvrv_ls_bucket': ['trend_confirm'],
-            'mvrv_ls_regime_call_confirm': [1],
-            'mdia_regime_strong_inflow': [1],
-            'whale_regime_broad_accum': [1],
-            # Minimal required for fuse_signals
+            'mdia_bucket': ['strong_inflow', 'outflow'],
+            'whale_bucket': ['broad_accum', 'neutral'],
+            'mvrv_ls_bucket': ['trend_confirm', 'bear_continuation'],
+            'mvrv_ls_regime_call_confirm': [1, 0],
+            'mdia_regime_strong_inflow': [1, 0],
+            'mdia_regime_inflow': [0, 1],
+            'whale_regime_broad_accum': [1, 0],
+            'cycle_days_since_halving': [100, 600],
+            'mvrv_60d': [1.50, 0.70],
         }, index=dates)
 
     @patch('api.research_views.BaseResearchAPIView.get_research_table')
@@ -49,8 +51,8 @@ class FusionExplainTests(APITestCase):
         
         # Verify trace order matches classifier order
         expected_order = [
-            "STRONG_BULLISH", "EARLY_RECOVERY", "BEAR_CONTINUATION", 
-            "BEAR_PROBE", "DISTRIBUTION_RISK", "MOMENTUM_CONTINUATION", "BULL_PROBE"
+            "strong_bullish", "early_recovery", "bear_continuation", 
+            "bear_probe", "distribution_risk", "momentum", "bull_probe"
         ]
         actual_order = [t['state'] for t in trace]
         self.assertEqual(actual_order, expected_order)
@@ -60,20 +62,48 @@ class FusionExplainTests(APITestCase):
         if matched_states:
             # The first matched state should be the one elected, but our mock might hit NO_TRADE
             # Let's check if the result state is one of the matched states, or if none matched, it's NO_TRADE
-            if result['state'].upper() != 'NO_TRADE':
-                self.assertEqual(matched_states[0], result['state'].upper())
+            if result['state'] != 'no_trade':
+                self.assertEqual(matched_states[0], result['state'])
         else:
-            self.assertEqual(result['state'].upper(), 'NO_TRADE')
+            self.assertEqual(result['state'], 'no_trade')
             
         # Verify boolean details are correct for our fixture
         # Our fixture has: strong_inflow, broad_accum (val=1), so mdia_strong=True, whale_sponsored=True
         # mvrv=trend_confirm (which means macro_bullish=True)
         # So STRONG_BULLISH should be matched=True
-        strong_bullish_rule = next(t for t in trace if t['state'] == 'STRONG_BULLISH')
+        strong_bullish_rule = next(t for t in trace if t['state'] == 'strong_bullish')
         self.assertTrue(strong_bullish_rule['matched'])
         self.assertIn("mdia_strong=True", strong_bullish_rule['details'])
         self.assertIn("whale_sponsored=True", strong_bullish_rule['details'])
         self.assertIn("macro_bullish=True", strong_bullish_rule['details'])
+
+    @patch('api.research_views.BaseResearchAPIView.get_research_table')
+    def test_fusion_explain_bear_mode(self, mock_get_rt):
+        mock_get_rt.return_value = (self.mock_rt, None)
+
+        url = reverse('api:fusion-explain')
+        response = self.client.get(url, {'date': '2024-01-02'})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        
+        result = response.data['result']
+        trace = result['trace']
+        
+        # Bear trace has 5 states
+        self.assertEqual(len(trace), 5)
+        
+        expected_order = [
+            "bear_exhaustion_long", "bear_rally_long", "bear_continuation_short", 
+            "late_distribution_short", "transition_chop"
+        ]
+        
+        # Verify specific match state (based on mock returning mvrv_60d_bucket='deep_underwater' and mdia_inflow=True and not mvrv_macro_bearish)
+        # So bear_exhaustion_long should be matched=True
+        exhaustion_rule = next(t for t in trace if t['state'] == 'bear_exhaustion_long')
+        self.assertTrue(exhaustion_rule['matched'])
+        self.assertIn("mvrv_60d=deep_underwater", exhaustion_rule['details'])
+        self.assertIn("mdia_inflow=True", exhaustion_rule['details'])
+        self.assertIn("not_macro_bearish=True", exhaustion_rule['details'])
 
     @patch('api.research_views.BaseResearchAPIView.get_research_table')
     def test_fusion_explain_missing_date(self, mock_get_rt):

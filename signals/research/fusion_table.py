@@ -171,6 +171,7 @@ def build_research_table(
     rt["mdia_bucket"] = rt_with_buckets["mdia_bucket"].values
     rt["whale_bucket"] = rt_with_buckets["whale_bucket"].values
     rt["mvrv_ls_bucket"] = rt_with_buckets["mvrv_ls_bucket"].values
+    rt["mvrv_60d_bucket"] = rt_with_buckets["mvrv_60d_bucket"].values
 
     # ── 4. Combination columns ──────────────────────────────────────
     _add_combo_columns(rt)

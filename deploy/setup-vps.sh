@@ -106,7 +106,9 @@ iptables -A OUTPUT -o lo -j ACCEPT
 # Allow established connections
 iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-# Allow SSH (port 22)
+
+# Allow SSH (ports 22 and 422)
+iptables -A INPUT -p tcp --dport 422 -j ACCEPT
 iptables -A INPUT -p tcp --dport 22 -j ACCEPT
 
 # Allow HTTP (port 80)
@@ -117,9 +119,6 @@ iptables -A INPUT -p tcp --dport 443 -j ACCEPT
 
 # Allow ping (optional, comment out if not desired)
 iptables -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
-
-# Log dropped packets (optional)
-iptables -A INPUT -m limit --limit 5/min -j LOG --log-prefix "iptables-dropped: " --log-level 4
 
 # Save rules to persist across reboots
 netfilter-persistent save
