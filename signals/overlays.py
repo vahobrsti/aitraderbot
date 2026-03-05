@@ -184,7 +184,7 @@ def compute_near_peak_score(row: pd.Series) -> Optional[float]:
     return near_peak_score
 
 
-def compute_short_overlay(row: pd.Series, is_confirmed_bear: bool, is_bear_probe: bool = False) -> tuple[int, int, str]:
+def compute_short_overlay(row: pd.Series, is_confirmed_bear: bool, is_bear_probe: bool = False, is_base_bear_short: bool = False) -> tuple[int, int, str]:
     """
     Compute short overlay using blended near_peak_score.
     
@@ -230,9 +230,13 @@ def compute_short_overlay(row: pd.Series, is_confirmed_bear: bool, is_bear_probe
     
     # Edge/veto logic (mutually exclusive)
     if score >= 0.85:
+        if is_base_bear_short:
+            return 1, 0, f"PARTIAL EDGE (demoted to avoid double-count): MVRV-60d (score={score:.2f})"
         return 2, 0, f"FULL EDGE: MVRV-60d near peak (score={score:.2f})"
     
     if score >= 0.75:
+        if is_base_bear_short:
+            return 0, 0, f"NO EDGE (demoted to avoid double-count): MVRV-60d (score={score:.2f})"
         return 1, 0, f"PARTIAL EDGE: MVRV-60d elevated (score={score:.2f})"
     
     # Below 0.75: check for vetoes (thresholds differ by state)
@@ -307,11 +311,15 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
         MarketState.EARLY_RECOVERY,
         MarketState.MOMENTUM_CONTINUATION,
         MarketState.BULL_PROBE,  # Trade smaller, but still a long state
+        MarketState.BEAR_EXHAUSTION_LONG,
+        MarketState.BEAR_RALLY_LONG,
     }
     short_states = {
         MarketState.DISTRIBUTION_RISK,
         MarketState.BEAR_CONTINUATION,
         MarketState.BEAR_PROBE,  # Trade smaller, but still a short state
+        MarketState.BEAR_CONTINUATION_SHORT,
+        MarketState.LATE_DISTRIBUTION_SHORT,
     }
     
     # Neutral overlay for NO_TRADE
@@ -339,6 +347,15 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
             edge_str = 2 if "FULL:" in edge_reason else 1
         if veto_active:
             veto_str = 2 if "STRONG" in veto_reason else 1
+
+        # Bear Market Adjustment: reduce veto strength if deeply washed out
+        # (Since we anchor on valuation pain, we shouldn't veto a long setup purely because of it)
+        is_bear_long = fusion_result.state in {MarketState.BEAR_EXHAUSTION_LONG, MarketState.BEAR_RALLY_LONG}
+        mvrv_60d_raw = row.get("mvrv_60d", None)
+        if is_bear_long and mvrv_60d_raw is not None and not pd.isna(mvrv_60d_raw):
+            if mvrv_60d_raw < 0.85 and veto_str > 0:
+                veto_str -= 1
+                veto_reason = f"(Reduced by bear-market washout < 0.85) " + veto_reason
         
         # Apply veto dominance rules
         extended_dte = False
@@ -375,12 +392,15 @@ def apply_overlays(fusion_result: FusionResult, row: pd.Series) -> OverlayResult
     
     # === SHORT STATE OVERLAYS (MVRV-60d ONLY, blended score) ===
     if fusion_result.state in short_states:
-        is_confirmed_bear = fusion_result.state == MarketState.BEAR_CONTINUATION
+        is_confirmed_bear = fusion_result.state in (MarketState.BEAR_CONTINUATION, MarketState.BEAR_CONTINUATION_SHORT)
         is_bear_probe = fusion_result.state == MarketState.BEAR_PROBE
+        is_base_bear_short = fusion_result.state in (MarketState.BEAR_CONTINUATION_SHORT, MarketState.LATE_DISTRIBUTION_SHORT)
         
         # Compute overlay using blended score (edge/veto mutually exclusive)
         # BEAR_PROBE uses stricter thresholds (soft veto at 0.45, hard at 0.30)
-        short_edge_str, veto_str, reason = compute_short_overlay(row, is_confirmed_bear, is_bear_probe)
+        short_edge_str, veto_str, reason = compute_short_overlay(
+            row, is_confirmed_bear, is_bear_probe, is_base_bear_short
+        )
         
         # Determine flags
         reduced_size = False

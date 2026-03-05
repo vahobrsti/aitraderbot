@@ -34,6 +34,10 @@ PATH_RISK_BY_STATE = {
     MarketState.DISTRIBUTION_RISK:       (0.500, 0.000),  # n=5, small sample, conservative
     MarketState.BEAR_CONTINUATION:       (0.250, 0.000),  # n=4, small sample
     MarketState.BEAR_PROBE:              (0.269, 0.000),  # n=45, moderate
+    MarketState.BEAR_EXHAUSTION_LONG:    (0.500, 0.000),  # n=1, small sample, conservative
+    MarketState.BEAR_RALLY_LONG:         (0.286, 0.000),  # n=20, moderate
+    MarketState.BEAR_CONTINUATION_SHORT: (0.500, 0.000),  # n=2, small sample, conservative
+    MarketState.LATE_DISTRIBUTION_SHORT: (0.533, 0.000),  # n=17, messy short path
 }
 
 
@@ -358,11 +362,15 @@ class SignalService:
             is_long = fusion_result.state in {
                 MarketState.STRONG_BULLISH,
                 MarketState.EARLY_RECOVERY,
-                MarketState.MOMENTUM_CONTINUATION
+                MarketState.MOMENTUM_CONTINUATION,
+                MarketState.BEAR_EXHAUSTION_LONG,
+                MarketState.BEAR_RALLY_LONG
             }
             is_short = fusion_result.state in {
                 MarketState.DISTRIBUTION_RISK,
-                MarketState.BEAR_CONTINUATION
+                MarketState.BEAR_CONTINUATION,
+                MarketState.BEAR_CONTINUATION_SHORT,
+                MarketState.LATE_DISTRIBUTION_SHORT
             }
 
             core_decision = None
