@@ -13,6 +13,7 @@ from .fusion import (
     Confidence,
     FusionResult,
     classify_market_state,
+    classify_bear_market_state,
     fuse_signals,
 )
 from .overlays import (
@@ -196,6 +197,61 @@ class TestMarketStateClassification(SimpleTestCase):
         )
         state = classify_market_state(row)
         self.assertEqual(state, MarketState.MOMENTUM_CONTINUATION)
+
+
+class TestBearMarketStateClassification(SimpleTestCase):
+    """Test classify_bear_market_state function for the 5 bear-specific market states."""
+    
+    def test_bear_exhaustion_long(self):
+        """BEAR_EXHAUSTION_LONG: deep_underwater + inflow + NOT bearish macro."""
+        row = make_row(
+            mvrv_60d=0.80,  # deep_underwater (< 0.85)
+            mdia_regime_inflow=1,
+            mvrv_ls_regime_put_confirm=0,  # neutral macro
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_EXHAUSTION_LONG)
+
+    def test_bear_rally_long(self):
+        """BEAR_RALLY_LONG: underwater + inflow + neutral/bullish macro."""
+        row = make_row(
+            mvrv_60d=0.95,  # underwater (0.85-1.0)
+            mdia_regime_inflow=1,
+            mvrv_ls_regime_put_confirm=0,  # neutral macro
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_RALLY_LONG)
+
+    def test_bear_continuation_short(self):
+        """BEAR_CONTINUATION_SHORT: profitable + NO inflow + (aging or bearish macro)."""
+        row = make_row(
+            mvrv_60d=1.15,  # profitable (>= 1.1)
+            mdia_regime_inflow=0,
+            mdia_regime_aging=1,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_CONTINUATION_SHORT)
+
+    def test_late_distribution_short(self):
+        """LATE_DISTRIBUTION_SHORT: breakeven + NO inflow + neutral macro."""
+        row = make_row(
+            mvrv_60d=1.05,  # breakeven (1.0-1.1)
+            mdia_regime_inflow=0,
+            mvrv_ls_regime_put_confirm=0,  # neutral macro
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.LATE_DISTRIBUTION_SHORT)
+
+    def test_transition_chop(self):
+        """TRANSITION_CHOP: profitable + inflow."""
+        row = make_row(
+            mvrv_60d=1.15,  # profitable
+            mdia_regime_inflow=1,  # conflicting inflow
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.TRANSITION_CHOP)
+        
+    def test_no_trade_fallback(self):
+        """NO_TRADE: unknown mvrv bucket or unhandled combo."""
+        row = make_row(
+            mvrv_60d=None,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.NO_TRADE)
 
 
 class TestFuseSignals(SimpleTestCase):

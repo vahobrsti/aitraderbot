@@ -27,15 +27,20 @@ _METRIC_COLS = {
     "mvrv_ls": "mvrv_ls_bucket",
 }
 
-_MODEL_SETS: list[tuple[str, list[str]]] = [
-    ("mdia", ["mdia"]),
-    ("whales", ["whales"]),
-    ("mvrv_ls", ["mvrv_ls"]),
-    ("mdia+whales", ["mdia", "whales"]),
-    ("mdia+mvrv_ls", ["mdia", "mvrv_ls"]),
-    ("whales+mvrv_ls", ["whales", "mvrv_ls"]),
-    ("mdia+whales+mvrv_ls", ["mdia", "whales", "mvrv_ls"]),
-]
+
+def _build_model_sets(metric_names: list[str]) -> list[tuple[str, list[str]]]:
+    """Build the 7 model variants (singles, pairs, triple) from metric names."""
+    from itertools import combinations
+    sets = []
+    # Singles
+    for m in metric_names:
+        sets.append((m, [m]))
+    # Pairs
+    for combo in combinations(metric_names, 2):
+        sets.append(("+".join(combo), list(combo)))
+    # Triple
+    sets.append(("+".join(metric_names), list(metric_names)))
+    return sets
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -45,6 +50,7 @@ def _evaluate_model(
     X_raw: pd.DataFrame,
     y: pd.Series,
     metrics: list[str],
+    metric_cols: dict[str, str],
     n_splits: int = 5,
 ) -> dict:
     """Fit logistic regression with TimeSeriesSplit, return per-fold metrics.
@@ -56,7 +62,7 @@ def _evaluate_model(
     fold_losses = []
     coef_list = []
 
-    cols = [_METRIC_COLS[m] for m in metrics]
+    cols = [metric_cols[m] for m in metrics]
 
     for train_idx, test_idx in tscv.split(X_raw):
         X_train_str = X_raw.iloc[train_idx][cols]
@@ -110,6 +116,7 @@ def _evaluate_model(
 def _permutation_importance_cv(
     X_raw: pd.DataFrame,
     y: pd.Series,
+    metric_cols: dict[str, str],
     n_splits: int = 5,
     n_repeats: int = 5,
 ) -> dict[str, float]:
@@ -122,8 +129,8 @@ def _permutation_importance_cv(
     importance_dicts = []
     
     # We use all available metrics for the full model importance
-    all_metrics = list(_METRIC_COLS.keys())
-    cols = list(_METRIC_COLS.values())
+    all_metrics = list(metric_cols.keys())
+    cols = list(metric_cols.values())
 
     for train_idx, test_idx in tscv.split(X_raw):
         X_train_str = X_raw.iloc[train_idx][cols]
@@ -144,7 +151,7 @@ def _permutation_importance_cv(
 
         fold_imp = {}
         for metric_name in all_metrics:
-            bucket_col = _METRIC_COLS[metric_name]
+            bucket_col = metric_cols[metric_name]
             
             # Note: We must check if the metric is even present in the aligned columns
             # But the simplest way to permute is to shuffle the raw string column
@@ -187,6 +194,7 @@ def run_model_comparison(
     research_df: pd.DataFrame,
     target_col: str = "label_good_move_long",
     n_splits: int = 5,
+    metric_cols: dict[str, str] | None = None,
 ) -> dict:
     """Run all 7 model variants and return comparison results.
 
@@ -209,6 +217,8 @@ def run_model_comparison(
         summary : dict
             best_standalone, best_incremental, confirmer_metrics.
     """
+    if metric_cols is None:
+        metric_cols = dict(_METRIC_COLS)
     # Drop rows with missing target
     clean = research_df.dropna(subset=[target_col]).copy()
     
@@ -219,16 +229,18 @@ def run_model_comparison(
         
     y = clean[target_col].astype(int)
 
+    model_sets = _build_model_sets(list(metric_cols.keys()))
+
     # Run each model variant
     model_results = []
-    for name, metrics in _MODEL_SETS:
-        result = _evaluate_model(clean, y, metrics, n_splits=n_splits)
+    for name, metrics in model_sets:
+        result = _evaluate_model(clean, y, metrics, metric_cols, n_splits=n_splits)
         result["model_name"] = name
         result["metrics_used"] = metrics
         model_results.append(result)
 
     # Permutation importance from CV on the full model
-    importance = _permutation_importance_cv(clean, y, n_splits=n_splits)
+    importance = _permutation_importance_cv(clean, y, metric_cols, n_splits=n_splits)
 
     # Build summary
     singles = [r for r in model_results if len(r["metrics_used"]) == 1]
@@ -240,14 +252,16 @@ def run_model_comparison(
         best_standalone = None
 
     # Incremental value: which metric adds the most when going from 2→3?
+    metric_names = list(metric_cols.keys())
+    full_name = "+".join(metric_names)
     full_auc = next(
-        (r["mean_auc"] for r in model_results if r["model_name"] == "mdia+whales+mvrv_ls"),
+        (r["mean_auc"] for r in model_results if r["model_name"] == full_name),
         np.nan,
     )
     pairs = [r for r in model_results if len(r["metrics_used"]) == 2]
     incremental = {}
     for pair in pairs:
-        missing = [m for m in ("mdia", "whales", "mvrv_ls") if m not in pair["metrics_used"]]
+        missing = [m for m in metric_names if m not in pair["metrics_used"]]
         if missing and not np.isnan(full_auc) and not np.isnan(pair["mean_auc"]):
             gain = full_auc - pair["mean_auc"]
             if gain > 0:  # Must have positive incremental value to be considered

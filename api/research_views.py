@@ -163,30 +163,8 @@ class FusionExplainView(BaseResearchAPIView):
             row = rt.loc[target_date]
             fusion_result = fuse_signals(row)
             
-            c = fusion_result.components
-            mdia_strong = c.get('mdia_strong', 0) == 1
-            mdia_inflow = c.get('mdia_inflow', 0) == 1
-            mdia_non_inflow = not mdia_inflow
-            
-            whale_sponsored = c.get('whale_sponsored', 0) == 1
-            whale_mixed = c.get('whale_mixed', 0) == 1
-            whale_distrib = c.get('whale_distrib', 0) == 1
-            whale_distrib_strong = c.get('whale_distrib_strong', 0) == 1
-            
-            mvrv_macro_bullish = c.get('mvrv_macro_bullish', 0) == 1
-            mvrv_recovery = row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1
-            mvrv_macro_neutral = c.get('mvrv_macro_neutral', 0) == 1
-            mvrv_put_or_bear = row.get('mvrv_ls_regime_put_confirm', 0) == 1 or row.get('mvrv_ls_regime_bear_continuation', 0) == 1
-            
-            trace = [
-                {"state": "STRONG_BULLISH", "matched": bool(mdia_strong and whale_sponsored and mvrv_macro_bullish), "details": f"mdia_strong={mdia_strong}, whale_sponsored={whale_sponsored}, macro_bullish={mvrv_macro_bullish}"},
-                {"state": "EARLY_RECOVERY", "matched": bool(mdia_inflow and whale_sponsored and mvrv_recovery), "details": f"mdia_inflow={mdia_inflow}, whale_sponsored={whale_sponsored}, mvrv_recovery={mvrv_recovery}"},
-                {"state": "BEAR_CONTINUATION", "matched": bool(mdia_non_inflow and whale_distrib and mvrv_put_or_bear), "details": f"not_mdia_inflow={mdia_non_inflow}, whale_distrib={whale_distrib}, mvrv_put/bear={mvrv_put_or_bear}"},
-                {"state": "BEAR_PROBE", "matched": bool(mdia_non_inflow and whale_distrib_strong and mvrv_macro_neutral), "details": f"not_mdia_inflow={mdia_non_inflow}, whale_distrib_strong={whale_distrib_strong}, macro_neutral={mvrv_macro_neutral}"},
-                {"state": "DISTRIBUTION_RISK", "matched": bool(mdia_non_inflow and whale_distrib and not mvrv_macro_bullish), "details": f"not_mdia_inflow={mdia_non_inflow}, whale_distrib={whale_distrib}, not_macro_bullish={not mvrv_macro_bullish}"},
-                {"state": "MOMENTUM_CONTINUATION", "matched": bool(mdia_inflow and (whale_sponsored or whale_mixed) and mvrv_macro_bullish), "details": f"mdia_inflow={mdia_inflow}, whale_sponsored/mixed={(whale_sponsored or whale_mixed)}, macro_bullish={mvrv_macro_bullish}"},
-                {"state": "BULL_PROBE", "matched": bool(mdia_inflow and whale_sponsored and mvrv_macro_neutral), "details": f"mdia_inflow={mdia_inflow}, whale_sponsored={whale_sponsored}, macro_neutral={mvrv_macro_neutral}"},
-            ]
+            from signals.fusion import build_explain_trace
+            trace = build_explain_trace(row, fusion_result)
 
             return Response({
                 "meta": {

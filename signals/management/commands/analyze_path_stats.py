@@ -128,11 +128,15 @@ class Command(BaseCommand):
             MarketState.EARLY_RECOVERY,
             MarketState.MOMENTUM_CONTINUATION,
             MarketState.BULL_PROBE,
+            MarketState.BEAR_EXHAUSTION_LONG,
+            MarketState.BEAR_RALLY_LONG,
         }
         short_states = {
             MarketState.DISTRIBUTION_RISK,
             MarketState.BEAR_CONTINUATION,
             MarketState.BEAR_PROBE,
+            MarketState.BEAR_CONTINUATION_SHORT,
+            MarketState.LATE_DISTRIBUTION_SHORT,
         }
 
         all_years = sorted(df.index.year.unique())

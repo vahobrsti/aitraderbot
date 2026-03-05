@@ -55,8 +55,8 @@ def _build_fixture_csv(path: str):
         'regime_mvrv_put_supportive',
         # MVRV-60d (overlay)
         'mvrv_60d', 'mvrv_60d_pct_rank', 'mvrv_60d_dist_from_max',
-        # Labels
         'label_good_move_long', 'label_good_move_short',
+        'cycle_days_since_halving',
         # Option signals
         'signal_option_call', 'signal_option_put',
         # Sentiment (for display)
@@ -160,9 +160,45 @@ def _build_fixture_csv(path: str):
 
     # --- NO_TRADE ---
     rows.append(_row('2024-01-08', {}, label_long=0, label_short=0))
+    
+    # --- BEAR MARKET SPECIFIC ROWS (Cycle day 700) ---
+    
+    # --- BEAR_EXHAUSTION_LONG ---
+    rows.append(_row('2024-01-10', {
+        'cycle_days_since_halving': 700,
+        'mvrv_60d': 0.80,
+        'mdia_regime_inflow': 1,
+    }, label_long=1))
+
+    # --- BEAR_RALLY_LONG ---
+    rows.append(_row('2024-01-11', {
+        'cycle_days_since_halving': 700,
+        'mvrv_60d': 0.95,
+        'mdia_regime_inflow': 1,
+    }, label_long=1))
+
+    # --- BEAR_CONTINUATION_SHORT ---
+    rows.append(_row('2024-01-12', {
+        'cycle_days_since_halving': 700,
+        'mvrv_60d': 1.15,
+        'mdia_regime_aging': 1,
+    }, label_short=1))
+
+    # --- LATE_DISTRIBUTION_SHORT ---
+    rows.append(_row('2024-01-13', {
+        'cycle_days_since_halving': 700,
+        'mvrv_60d': 1.05,
+    }, label_short=1))
+
+    # --- TRANSITION_CHOP ---
+    rows.append(_row('2024-01-14', {
+        'cycle_days_since_halving': 700,
+        'mvrv_60d': 1.15,
+        'mdia_regime_inflow': 1,
+    }, label_long=0))
 
     # --- Extra row with OPTION_CALL + OPTION_PUT signals ---
-    rows.append(_row('2024-01-09', {
+    rows.append(_row('2024-01-15', {
         'mdia_regime_inflow': 1,
         'whale_regime_broad_accum': 1,
         'mvrv_ls_regime_call_confirm': 1,
@@ -351,7 +387,7 @@ class TestAnalyzeFusionExplainTrace(SimpleTestCase):
 
         out, _ = _call(['--explain', '--date', '2024-01-01'])
         self.assertIn('STRONG_BULLISH', out)
-        self.assertIn('Matched: STRONG_BULLISH', out)
+        self.assertIn('Matched: strong_bullish', out)
 
 
 class TestAnalyzeFusionDirection(SimpleTestCase):
@@ -406,3 +442,54 @@ class TestAnalyzeFusionTradeSignals(SimpleTestCase):
         trade_section = out[out.find('ALL TRADE SIGNALS'):]
         self.assertIn('OPTION_CALL', trade_section)
         self.assertIn('OPTION_PUT', trade_section)
+
+
+class TestAnalyzeFusionBearFilter(SimpleTestCase):
+    """--bear flag must filter to cycle_days_since_halving 540-900."""
+
+    def test_bear_missing_column_shows_error(self):
+        """--bear on a CSV without cycle_days_since_halving gives clear error."""
+        path = os.path.join(tempfile.gettempdir(), 'test_bear_missing.csv')
+        df = pd.read_csv(_FIXTURE_CSV, index_col=0)
+        if 'cycle_days_since_halving' in df.columns:
+            df = df.drop(columns=['cycle_days_since_halving'])
+        df.to_csv(path)
+        _, err = _call(['--csv', path, '--bear'])
+        self.assertIn("Cannot apply --bear", err)
+        self.assertIn("cycle_days_since_halving", err)
+
+    def test_bear_filters_correctly(self):
+        """--bear keeps only rows with cycle_days_since_halving in [540, 900]."""
+        # Build a special CSV with cycle_days_since_halving
+        path = os.path.join(tempfile.gettempdir(), 'test_bear_fixture.csv')
+        df = pd.read_csv(_FIXTURE_CSV, index_col=0)
+        # Assign cycle_days: first 4 rows inside bear window, rest outside
+        days = [100] * len(df)
+        days[0] = 550
+        days[1] = 600
+        days[2] = 700
+        days[3] = 899
+        df['cycle_days_since_halving'] = days
+        df.to_csv(path)
+
+        out = StringIO()
+        err = StringIO()
+        call_command('analyze_fusion', '--csv', path, '--bear',
+                     stdout=out, stderr=err)
+        output = out.getvalue()
+        # Should report 4 feature rows (the ones in the 540-900 range)
+        self.assertIn('Bear-market filter (day 540-900): 4 feature rows', output)
+
+    def test_bear_empty_result_shows_error(self):
+        """--bear with no rows in range exits cleanly."""
+        path = os.path.join(tempfile.gettempdir(), 'test_bear_empty.csv')
+        df = pd.read_csv(_FIXTURE_CSV, index_col=0)
+        # All rows outside bear window
+        df['cycle_days_since_halving'] = [100] * len(df)
+        df.to_csv(path)
+
+        out = StringIO()
+        err = StringIO()
+        call_command('analyze_fusion', '--csv', path, '--bear',
+                     stdout=out, stderr=err)
+        self.assertIn('No rows after filtering', err.getvalue())
