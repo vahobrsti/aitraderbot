@@ -85,10 +85,36 @@ def map_mvrv_ls_bucket(row: pd.Series) -> str:
 
 
 # ────────────────────────────────────────────────────────────────────
+# MVRV-60d buckets  (raw ratio → category)
+# ────────────────────────────────────────────────────────────────────
+def map_mvrv_60d_bucket(row: pd.Series) -> str:
+    """
+    Discretise raw ``mvrv_60d`` ratio into valuation buckets.
+
+    Thresholds based on the 60-day MVRV meaning:
+      < 0.85  → deep_underwater   (heavy recent-buyer losses)
+      < 1.00  → underwater        (recent buyers in loss)
+      < 1.10  → breakeven         (near cost-basis)
+      >= 1.10 → profitable        (recent buyers in profit)
+    """
+    val = row.get("mvrv_60d", None)
+    if val is None or pd.isna(val):
+        return "unknown"
+    if val < 0.85:
+        return "deep_underwater"
+    if val < 1.0:
+        return "underwater"
+    if val < 1.10:
+        return "breakeven"
+    return "profitable"
+
+
+# ────────────────────────────────────────────────────────────────────
 # Bulk helpers
 # ────────────────────────────────────────────────────────────────────
 def add_bucket_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Add ``mdia_bucket``, ``whale_bucket``, ``mvrv_ls_bucket`` columns.
+    """Add ``mdia_bucket``, ``whale_bucket``, ``mvrv_ls_bucket``,
+    ``mvrv_60d_bucket`` columns.
 
     Returns a **copy** — does not mutate the input.
     """
@@ -96,4 +122,5 @@ def add_bucket_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["mdia_bucket"] = df.apply(map_mdia_bucket, axis=1)
     out["whale_bucket"] = df.apply(map_whale_bucket, axis=1)
     out["mvrv_ls_bucket"] = df.apply(map_mvrv_ls_bucket, axis=1)
+    out["mvrv_60d_bucket"] = df.apply(map_mvrv_60d_bucket, axis=1)
     return out

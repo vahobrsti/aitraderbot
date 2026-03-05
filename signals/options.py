@@ -228,6 +228,75 @@ STRATEGY_MAP = {
         spread=SpreadGuidance(width_pct=0.07, take_profit_pct=0.70, max_hold_days=7, stop_loss_pct=0.04, scale_down_day=6),
     ),
     
+    # --- BEAR MARKET RULES (Cycle Days 540-900) ---
+    
+    MarketState.BEAR_EXHAUSTION_LONG: StrategyRecommendation(
+        market_state=MarketState.BEAR_EXHAUSTION_LONG,
+        primary_structures=[
+            OptionStructure.CALL_SPREAD,
+            OptionStructure.LONG_CALL,
+        ],
+        secondary_structures=[],
+        strike_guidance=StrikeSelection.SLIGHT_ITM,
+        dte=DTEGuidance(min_dte=7, max_dte=14, optimal_dte=11),
+        sizing=PositionSizing(high_confidence=0.07, medium_confidence=0.04, low_confidence=0.02),
+        rationale="Holder capitulation verified by capital inflow. High conviction bounce.",
+        spread=SpreadGuidance(width_pct=0.09, take_profit_pct=0.70, max_hold_days=6, stop_loss_pct=0.04, scale_down_day=5),
+    ),
+    
+    MarketState.BEAR_RALLY_LONG: StrategyRecommendation(
+        market_state=MarketState.BEAR_RALLY_LONG,
+        primary_structures=[
+            OptionStructure.CALL_SPREAD,
+        ],
+        secondary_structures=[],
+        strike_guidance=StrikeSelection.SLIGHT_ITM,
+        dte=DTEGuidance(min_dte=7, max_dte=12, optimal_dte=9),
+        sizing=PositionSizing(high_confidence=0.04, medium_confidence=0.02, low_confidence=0.01),
+        rationale="Underwater holders getting temporary relief. Defined-risk spreads for quick hits.",
+        spread=SpreadGuidance(width_pct=0.07, take_profit_pct=0.70, max_hold_days=5, stop_loss_pct=0.035, scale_down_day=4),
+    ),
+    
+    MarketState.BEAR_CONTINUATION_SHORT: StrategyRecommendation(
+        market_state=MarketState.BEAR_CONTINUATION_SHORT,
+        primary_structures=[
+            OptionStructure.PUT_SPREAD,
+        ],
+        secondary_structures=[
+            OptionStructure.PUT_BACKSPREAD,
+        ],
+        strike_guidance=StrikeSelection.SLIGHT_ITM,
+        dte=DTEGuidance(min_dte=7, max_dte=14, optimal_dte=12),
+        sizing=PositionSizing(high_confidence=0.05, medium_confidence=0.03, low_confidence=0.01),
+        rationale="Profitable holders selling into weakness/aging flows. Strong downside expected.",
+        spread=SpreadGuidance(width_pct=0.10, take_profit_pct=0.70, max_hold_days=6, stop_loss_pct=0.035, scale_down_day=4),
+    ),
+    
+    MarketState.LATE_DISTRIBUTION_SHORT: StrategyRecommendation(
+        market_state=MarketState.LATE_DISTRIBUTION_SHORT,
+        primary_structures=[
+            OptionStructure.PUT_SPREAD,
+        ],
+        secondary_structures=[],
+        strike_guidance=StrikeSelection.SLIGHT_ITM,
+        dte=DTEGuidance(min_dte=7, max_dte=12, optimal_dte=9),
+        sizing=PositionSizing(high_confidence=0.03, medium_confidence=0.02, low_confidence=0.0),
+        rationale="Breakeven/profitable holders losing conviction. Late stage short probe.",
+        spread=SpreadGuidance(width_pct=0.08, take_profit_pct=0.70, max_hold_days=7, stop_loss_pct=0.04, scale_down_day=5),
+    ),
+    
+    MarketState.TRANSITION_CHOP: StrategyRecommendation(
+        market_state=MarketState.TRANSITION_CHOP,
+        primary_structures=[
+            OptionStructure.NO_TRADE,
+        ],
+        secondary_structures=[],
+        strike_guidance=StrikeSelection.ATM,
+        dte=DTEGuidance(min_dte=0, max_dte=0, optimal_dte=0),
+        sizing=PositionSizing(high_confidence=0.0, medium_confidence=0.0, low_confidence=0.0),
+        rationale="Conflicting valuation and flow data during bear market. Stand down.",
+    ),
+    
     # 🟡 NO TRADE
     MarketState.NO_TRADE: StrategyRecommendation(
         market_state=MarketState.NO_TRADE,
@@ -457,9 +526,11 @@ def generate_trade_signal(row: dict, date: str) -> TradeSignal:
     
     # Determine direction
     if result.state in [MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, 
-                        MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE]:
+                        MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE,
+                        MarketState.BEAR_EXHAUSTION_LONG, MarketState.BEAR_RALLY_LONG]:
         direction = 'long'
-    elif result.state in [MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, MarketState.BEAR_PROBE]:
+    elif result.state in [MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, MarketState.BEAR_PROBE,
+                          MarketState.BEAR_CONTINUATION_SHORT, MarketState.LATE_DISTRIBUTION_SHORT]:
         direction = 'short'
     else:
         direction = 'neutral'
@@ -472,9 +543,9 @@ def generate_trade_signal(row: dict, date: str) -> TradeSignal:
     # - Backspreads for robust structural states
     # - Credit spreads only in high-IV environment and reduced by policy outside this function
     structures = list(strategy.primary_structures)
-    if result.state == MarketState.STRONG_BULLISH:
+    if result.state in [MarketState.STRONG_BULLISH, MarketState.BEAR_EXHAUSTION_LONG]:
         structures.append(OptionStructure.CALL_BACKSPREAD)
-    if result.state == MarketState.BEAR_CONTINUATION:
+    if result.state in [MarketState.BEAR_CONTINUATION, MarketState.BEAR_CONTINUATION_SHORT]:
         structures.append(OptionStructure.PUT_BACKSPREAD)
 
     iv_keys = ("iv_percentile", "btc_iv_percentile", "options_iv_percentile")
@@ -482,6 +553,7 @@ def generate_trade_signal(row: dict, date: str) -> TradeSignal:
     if iv_percentile is not None and iv_percentile >= 0.85 and result.state in {
         MarketState.DISTRIBUTION_RISK,
         MarketState.BEAR_CONTINUATION,
+        MarketState.BEAR_CONTINUATION_SHORT,
     }:
         structures.append(OptionStructure.SHORT_CALL_SPREAD)
     
