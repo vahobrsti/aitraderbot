@@ -387,7 +387,7 @@ class TestAnalyzeFusionExplainTrace(SimpleTestCase):
 
         out, _ = _call(['--explain', '--date', '2024-01-01'])
         self.assertIn('STRONG_BULLISH', out)
-        self.assertIn('Matched: STRONG_BULLISH', out)
+        self.assertIn('Matched: strong_bullish', out)
 
 
 class TestAnalyzeFusionDirection(SimpleTestCase):
