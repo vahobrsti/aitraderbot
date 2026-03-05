@@ -221,14 +221,16 @@ def fuse_signals(row: pd.Series) -> FusionResult:
     
     # Track the basic components for UI explainability
     components = {}
-    components['bear_mode'] = is_bear_mode
-    components['cycle_day'] = row.get('cycle_days_since_halving', None)
+    components['bear_mode'] = bool(is_bear_mode)
+    _cd = row.get('cycle_days_since_halving', None)
+    components['cycle_day'] = float(_cd) if _cd is not None and not pd.isna(_cd) else None
     
     components['mdia_inflow'] = int(row.get('mdia_regime_inflow', 0) == 1 or row.get('mdia_regime_strong_inflow', 0) == 1)
     components['mdia_aging'] = int(row.get('mdia_regime_aging', 0) == 1)
     
     if is_bear_mode:
-        components['mvrv_60d_raw'] = row.get('mvrv_60d', None)
+        _m60 = row.get('mvrv_60d', None)
+        components['mvrv_60d_raw'] = float(_m60) if _m60 is not None and not pd.isna(_m60) else None
         components['mvrv_60d_bucket'] = map_mvrv_60d_bucket(row)
     else:
         components['mdia_strong'] = int(row.get('mdia_regime_strong_inflow', 0) == 1)
