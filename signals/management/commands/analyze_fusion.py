@@ -113,8 +113,8 @@ class Command(BaseCommand):
             self.stderr.write("No rows after filtering. Nothing to analyze.\n")
             return
         
-        # If explain mode, show detailed breakdown and exit
-        if options.get("explain"):
+        # If explain mode or date is provided, show detailed breakdown and exit
+        if options.get("explain") or options.get("date"):
             self._show_explain(df, options.get("date"))
             return
         
