@@ -16,7 +16,7 @@ from signals.models import DailySignal
 from signals.fusion import fuse_signals, MarketState
 from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier, compute_efb_veto
 from signals.tactical_puts import tactical_put_inside_bull
-from signals.options import get_strategy_with_path_risk, get_decision_strategy_summary, DECISION_STRATEGY_MAP
+from signals.options import get_strategy_with_path_risk, get_decision_strategy_summary, DECISION_STRATEGY_MAP, format_stop_loss_string
 
 # Option signal constants
 OPTION_SIGNAL_COOLDOWN_DAYS = 5   # was 7 — OPTION_CALL hits 81%, let more through
@@ -24,20 +24,21 @@ OPTION_SIGNAL_SIZE_MULT = 0.75    # was 0.50 — size up on best-performing sign
 CORE_SIGNAL_COOLDOWN_DAYS = 7
 TACTICAL_PUT_COOLDOWN_DAYS = 7
 
-# Per-state path-risk rates from analyze_path_stats (14d horizon, 5% target)
+# Per-state path-risk rates from analyze_path_stats (14d horizon, 5% target, 4% invalidation, 569 trades)
+# Recalibrated 2026-03-05 after fusion+bear-market revamp.
 # Format: MarketState -> (invalid_before_hit_rate, same_day_ambiguous_rate)
 PATH_RISK_BY_STATE = {
-    MarketState.STRONG_BULLISH:          (0.000, 0.000),  # n=1, clean
-    MarketState.EARLY_RECOVERY:          (0.091, 0.000),  # n=16, very clean at 5%
-    MarketState.MOMENTUM_CONTINUATION:   (0.318, 0.000),  # n=62, messiest long state
-    MarketState.BULL_PROBE:              (0.114, 0.000),  # n=53, clean at 5%
-    MarketState.DISTRIBUTION_RISK:       (0.500, 0.000),  # n=5, small sample, conservative
-    MarketState.BEAR_CONTINUATION:       (0.250, 0.000),  # n=4, small sample
-    MarketState.BEAR_PROBE:              (0.269, 0.000),  # n=45, moderate
-    MarketState.BEAR_EXHAUSTION_LONG:    (0.500, 0.000),  # n=1, small sample, conservative
-    MarketState.BEAR_RALLY_LONG:         (0.286, 0.000),  # n=20, moderate
-    MarketState.BEAR_CONTINUATION_SHORT: (0.500, 0.000),  # n=2, small sample, conservative
-    MarketState.LATE_DISTRIBUTION_SHORT: (0.533, 0.000),  # n=17, messy short path
+    MarketState.STRONG_BULLISH:          (0.286, 0.000),  # n=11, was 0.0% (n=1)
+    MarketState.EARLY_RECOVERY:          (0.067, 0.000),  # n=17, very clean
+    MarketState.MOMENTUM_CONTINUATION:   (0.263, 0.000),  # n=191, dropped below 30% threshold
+    MarketState.BULL_PROBE:              (0.190, 0.000),  # n=83, moderate
+    MarketState.DISTRIBUTION_RISK:       (0.174, 0.000),  # n=35, was 50% (n=5)
+    MarketState.BEAR_CONTINUATION:       (0.167, 0.000),  # n=7, clean
+    MarketState.BEAR_PROBE:              (0.550, 0.000),  # n=36, messiest — triggers path-risk
+    MarketState.BEAR_EXHAUSTION_LONG:    (0.500, 0.000),  # n=5, unchanged
+    MarketState.BEAR_RALLY_LONG:         (0.212, 0.000),  # n=66, improved
+    MarketState.BEAR_CONTINUATION_SHORT: (0.250, 0.000),  # n=4, improved
+    MarketState.LATE_DISTRIBUTION_SHORT: (0.286, 0.000),  # n=59, was 53% (n=17)
 }
 
 
@@ -278,13 +279,7 @@ class SignalService:
                 f"max-hold={strategy.spread.max_hold_days}d]"
             )
 
-        stop_loss = ""
-        if strategy.spread and strategy.spread.stop_loss_pct > 0:
-            stop_loss = (
-                f"{strategy.spread.stop_loss_pct*100:.1f}% stop | "
-                f"scale to 25% on day {strategy.spread.scale_down_day} | "
-                f"hard cut day {strategy.spread.max_hold_days}"
-            )
+        stop_loss = format_stop_loss_string(strategy.spread)
 
         return {
             "primary_structures": structures,

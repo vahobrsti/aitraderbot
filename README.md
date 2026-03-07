@@ -67,7 +67,11 @@ Think of it as: **MDIA = ignition, Whales = fuel, MVRV-LS = terrain**
 
 ## Market Regimes & States
 
-### 8 Canonical Market States
+The fusion engine (`signals/fusion.py`) operates in two distinct modes based on the current cycle phase.
+
+### Standard Mode (8 Canonical States)
+
+Active outside of the bear market window.
 
 The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states using hierarchical rules:
 
@@ -82,7 +86,21 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
 | `BEAR_PROBE` | Selling + distribution, macro neutral | 🔴 Short | 0.35-0.60x |
 | `NO_TRADE` | Conflicting signals, stay flat | ⚪ None | 0x |
 
-### Classification Hierarchy
+### Bear Mode (5 Specialized States)
+
+Active during the expected bear market window (**Days 540–900 after a halving event**). Classification anchors on valuation pain and capital velocity.
+
+| State | Description | Direction | Sizing |
+|-------|-------------|-----------|--------|
+| `BEAR_EXHAUSTION_LONG` | Holder capitulation verified by capital inflow | 🟢 Long | Full Sizing |
+| `BEAR_RALLY_LONG` | Underwater holders getting temporary relief | 🟢 Long | Standard Sizing |
+| `BEAR_CONTINUATION_SHORT`| Profitable holders selling into weakness/aging flows | 🔴 Short | Full Sizing |
+| `LATE_DISTRIBUTION_SHORT`| Breakeven/profitable holders losing conviction | 🔴 Short | Standard Sizing |
+| `TRANSITION_CHOP` | Conflicting valuation and flow data, stand down | ⚪ None | 0x |
+
+*Note: Bear mode can still return `NO_TRADE` in some edge cases (e.g., absent/unmatched MVRV data) outside of these 5 states.*
+
+### Classification Hierarchy (Standard Mode)
 
 ```
 🚀 STRONG_BULLISH
@@ -114,6 +132,27 @@ The fusion engine (`signals/fusion.py`) classifies each day into one of 8 states
 
 📕 OPTION_PUT (0.75x sizing, rule-based fallback)
    └─ MVRV overheated + Sentiment greed + Whale distrib — promoted when fusion=NO_TRADE
+```
+
+### Classification Hierarchy (Bear Mode: Days 540-900 Post-Halving)
+
+During the bear market window (days 540-900 since last halving), the engine uses valuation pain (`mvrv_60d` bucket) and capital velocity (`mdia`) as primary anchors.
+
+```
+🚀 BEAR_EXHAUSTION_LONG
+   └─ MVRV-60d deep underwater + MDIA inflow + NOT MVRV macro bearish
+
+📈 BEAR_RALLY_LONG  
+   └─ MVRV-60d underwater/deep + MDIA inflow + (MVRV macro neutral OR bullish)
+
+🐻 BEAR_CONTINUATION_SHORT
+   └─ MVRV-60d profitable + NOT MDIA inflow + (MDIA aging OR MVRV macro bearish)
+
+⚠️ LATE_DISTRIBUTION_SHORT
+   └─ MVRV-60d breakeven/profitable + NOT MDIA inflow + (MVRV macro bearish OR neutral)
+
+🟡 TRANSITION_CHOP
+   └─ Conflicting valuation and flow signals (fallback)
 ```
 
 ### Stricter Short Logic
@@ -159,6 +198,11 @@ Instead of dynamic linear scoring, states have static, empirically validated pro
 | `BULL_PROBE` | LOW | +1 | Gated 0.5x sizing |
 | `BEAR_PROBE` | LOW | -2 | Gated 0.5x sizing |
 | `NO_TRADE` | LOW | 0 | No Trade |
+| `BEAR_EXHAUSTION_LONG` | HIGH | +4 | Full Sizing |
+| `BEAR_RALLY_LONG` | MEDIUM | +2 | Standard Sizing |
+| `BEAR_CONTINUATION_SHORT`| HIGH | -4 | Full Sizing |
+| `LATE_DISTRIBUTION_SHORT`| MEDIUM | -2 | Standard Sizing |
+| `TRANSITION_CHOP` | LOW | 0 | No Trade |
 
 ---
 
@@ -262,7 +306,11 @@ Strategies tuned from `analyze_path_stats` (14d horizon, 5% target, 213 trades).
 | DISTRIBUTION_RISK | Put spread | SLIGHT_ITM | 7–14d (opt 12) | 9% | 70% | 6d |
 | BEAR_CONTINUATION | Put spread | SLIGHT_ITM | 7–14d (opt 12) | 10% | 70% | 6d |
 | BULL_PROBE | Call spread | SLIGHT_ITM | 7–12d (opt 9) | 7% | 70% | 5d |
-| BEAR_PROBE | Put spread | SLIGHT_ITM | 7–12d (opt 9) | 7% | 70% | 7d |
+| BEAR_PROBE | Put spread | SLIGHT_ITM | 12–16d (opt 14) | 7% | 70% | 10d |
+| BEAR_EXHAUSTION_LONG | Call spread, long call | SLIGHT_ITM | 8–14d (opt 11) | 9% | 70% | 6d |
+| BEAR_RALLY_LONG | Call spread | SLIGHT_ITM | 10–14d (opt 12) | 8% | 70% | 8d |
+| BEAR_CONTINUATION_SHORT | Put spread | SLIGHT_ITM | 8–14d (opt 12) | 10% | 70% | 6d |
+| LATE_DISTRIBUTION_SHORT | Put spread | SLIGHT_ITM | 10–14d (opt 12) | 8% | 70% | 8d |
 
 ### Option Strategy Selection — Decision Overrides (`DECISION_STRATEGY_MAP` in `options.py`)
 
@@ -280,13 +328,17 @@ When a state's invalidation-before-hit rate ≥ 30% (or combined inv + ambiguous
 
 | State | Inv Rate | Triggers? | Notes |
 |-------|----------|-----------|-------|
-| STRONG_BULLISH | 0.0% | ❌ | n=1, clean |
-| EARLY_RECOVERY | 9.1% | ❌ | Very clean paths at 5% |
-| BULL_PROBE | 11.4% | ❌ | Wide stop absorbs shakeouts |
-| BEAR_CONTINUATION | 25.0% | ❌ | Small sample (n=4) |
-| BEAR_PROBE | 26.9% | ❌ | Moderate |
-| **MOMENTUM** | **31.8%** | ✅ | Messiest long state |
-| **DISTRIBUTION_RISK** | **50.0%** | ✅ | Conservative (small sample) |
+| EARLY_RECOVERY | 6.7% | ❌ | n=17, very clean |
+| BEAR_CONTINUATION | 16.7% | ❌ | n=7, clean |
+| DISTRIBUTION_RISK | 17.4% | ❌ | n=35, clean |
+| BULL_PROBE | 19.0% | ❌ | n=83, moderate |
+| BEAR_RALLY_LONG | 21.2% | ❌ | n=66 |
+| BEAR_CONTINUATION_SHORT | 25.0% | ❌ | n=4 |
+| MOMENTUM_CONTINUATION | 26.3% | ❌ | n=191, dropped below 30% |
+| STRONG_BULLISH | 28.6% | ❌ | n=11 |
+| LATE_DISTRIBUTION_SHORT | 28.6% | ❌ | n=59 |
+| **BEAR_EXHAUSTION_LONG** | **50.0%** | ✅ | n=5, runtime shifts strike -> ITM, DTE -> 10-14d |
+| **BEAR_PROBE** | **55.0%** | ✅ | n=36, messiest state, triggers path-risk |
 
 **Runtime Structure Gating** (`generate_trade_signal`): Advanced structures are conditionally added by state:
 - **Backspreads**: Only for high-confidence structural continuations (STRONG_BULLISH → call backspread, BEAR_CONTINUATION → put backspread)
@@ -306,7 +358,11 @@ Data-driven three-layer exit system calibrated from `analyze_path_stats` (7 stat
 | DISTRIBUTION_RISK | 4.0% | Day 5 (→25%) | Day 6 | 44% |
 | BEAR_CONTINUATION | 3.5% | Day 4 (→25%) | Day 6 | 35% |
 | BULL_PROBE | 3.5% | Day 4 (→25%) | Day 5 | 50% |
-| BEAR_PROBE | 4.0% | Day 6 (→25%) | Day 7 | 57% |
+| BEAR_PROBE | 4.0% | Day 7 (→25%) | Day 10 | 57% |
+| BEAR_EXHAUSTION_LONG | 4.0% | Day 5 (→25%) | Day 6 | 44% |
+| BEAR_RALLY_LONG | 3.5% | Day 4 (→25%) | Day 8 | 44% |
+| BEAR_CONTINUATION_SHORT | 3.5% | Day 4 (→25%) | Day 6 | 35% |
+| LATE_DISTRIBUTION_SHORT | 4.0% | Day 5 (→25%) | Day 8 | 50% |
 
 **Exit timeline:**
 1. **Fixed price stop**: Underlying moves `stop_loss_pct` against you → close all
