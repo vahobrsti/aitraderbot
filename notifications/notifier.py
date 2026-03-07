@@ -111,12 +111,18 @@ class TelegramNotifier:
         if signal.score_components:
             c = signal.score_components
             mdia_label = 'strong_inflow' if c.get('mdia_strong') else 'inflow' if c.get('mdia_inflow') else 'aging' if c.get('mdia_aging') else 'neutral'
-            whale_label = 'strong_distrib' if c.get('whale_distrib_strong') else 'distrib' if c.get('whale_distrib') else 'sponsored' if c.get('whale_sponsored') else 'mixed' if c.get('whale_mixed') else 'neutral'
             mvrv_label = 'bullish' if c.get('mvrv_macro_bullish') else 'bearish' if c.get('mvrv_macro_bearish') else 'neutral'
             
             msg += f"  • MDIA: `{mdia_label}`\n"
-            msg += f"  • Whales: `{whale_label}`\n"
-            msg += f"  • MVRV: `{mvrv_label}`\n"
+            
+            if c.get('bear_mode'):
+                mvrv_60d_label = c.get('mvrv_60d_bucket', 'unknown')
+                msg += f"  • MVRV 60d: `{mvrv_60d_label}`\n"
+            else:
+                whale_label = 'strong_distrib' if c.get('whale_distrib_strong') else 'distrib' if c.get('whale_distrib') else 'sponsored' if c.get('whale_sponsored') else 'mixed' if c.get('whale_mixed') else 'neutral'
+                msg += f"  • Whales: `{whale_label}`\n"
+                
+            msg += f"  • MVRV Macro: `{mvrv_label}`\n"
         msg += "\n"
         
         # ML Probabilities
