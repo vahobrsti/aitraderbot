@@ -103,9 +103,12 @@ class Command(BaseCommand):
         df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
         df = add_fusion_features(df)
 
-        # Pre-compute ML probabilities for all rows
-        df["p_long"] = long_model.predict_proba(df[long_feats])[:, 1]
-        df["p_short"] = short_model.predict_proba(df[short_feats])[:, 1]
+        # Pre-compute ML probabilities for all rows using concat to avoid fragmentation
+        prob_df = pd.DataFrame({
+            "p_long": long_model.predict_proba(df[long_feats])[:, 1],
+            "p_short": short_model.predict_proba(df[short_feats])[:, 1],
+        }, index=df.index)
+        df = pd.concat([df, prob_df], axis=1)
 
         # Define state categories
         long_states = {

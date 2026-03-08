@@ -329,34 +329,42 @@ def fuse_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 # === CONVENIENCE FEATURE GENERATION ===
 
-def add_fusion_features(feats: dict) -> dict:
+def add_fusion_features(feats: pd.DataFrame | dict) -> pd.DataFrame:
     """
-    Add fusion features directly into feature dict during build.
-    Called from feature_builder.py.
+    Add fusion features directly into feature DataFrame during build.
+    Called from feature_builder.py and analyze_hit_rate.py.
+    
+    Accepts either a dict or DataFrame. Returns a defragmented DataFrame
+    with all fusion columns added via pd.concat to avoid PerformanceWarning.
     """
-    # Build temp DataFrame for classification
-    temp_df = pd.DataFrame(feats)
+    # Convert to DataFrame if dict
+    if isinstance(feats, dict):
+        feats = pd.DataFrame(feats)
     
     states = []
     scores = []
     confidences = []
     
-    for idx in range(len(temp_df)):
-        row = temp_df.iloc[idx]
+    for idx in range(len(feats)):
+        row = feats.iloc[idx]
         result = fuse_signals(row)
         states.append(result.state.value)
         scores.append(result.score)
         confidences.append(result.confidence.value)
     
-    # Add as features
-    feats['fusion_market_state'] = states
-    feats['fusion_score'] = scores
-    feats['fusion_confidence'] = confidences
+    # Build all new columns at once to avoid fragmentation
+    new_cols = {
+        'fusion_market_state': states,
+        'fusion_score': scores,
+        'fusion_confidence': confidences,
+    }
     
     # Add binary state flags for ML
     for state in MarketState:
-        feats[f'fusion_state_{state.value}'] = [
+        new_cols[f'fusion_state_{state.value}'] = [
             1 if s == state.value else 0 for s in states
         ]
     
-    return feats
+    # Create DataFrame with same index and concat once
+    new_df = pd.DataFrame(new_cols, index=feats.index)
+    return pd.concat([feats, new_df], axis=1)
