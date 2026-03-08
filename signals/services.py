@@ -18,10 +18,12 @@ from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multip
 from signals.tactical_puts import tactical_put_inside_bull
 from signals.options import get_strategy_with_path_risk, get_decision_strategy_summary, DECISION_STRATEGY_MAP, format_stop_loss_string
 
-# Option signal constants
+# Cooldown constants — single source of truth for live + backtest alignment
+# These values must match analyze_path_stats.py for calibration consistency
 OPTION_SIGNAL_COOLDOWN_DAYS = 5   # was 7 — OPTION_CALL hits 81%, let more through
-OPTION_SIGNAL_SIZE_MULT = 0.75    # was 0.50 — size up on best-performing signal
+OPTION_SIGNAL_SIZE_MULT = 0.75   # base size for option signals (before overlay scaling)
 CORE_SIGNAL_COOLDOWN_DAYS = 7
+PROBE_COOLDOWN_DAYS = 5
 TACTICAL_PUT_COOLDOWN_DAYS = 7
 
 # Per-state path-risk rates from analyze_path_stats (14d horizon, 5% target, 4% invalidation, 569 trades)
@@ -67,6 +69,12 @@ class SignalResult:
     dte_range: str
     strategy_rationale: str
     stop_loss: str
+    # Numeric execution fields for exchange integration
+    stop_loss_pct: Optional[float]
+    scale_down_day: Optional[int]
+    max_hold_days: Optional[int]
+    spread_width_pct: Optional[float]
+    take_profit_pct: Optional[float]
     # NO_TRADE diagnostics
     no_trade_reasons: list
     decision_trace: list
@@ -202,9 +210,9 @@ class SignalService:
             size_mult = 0.0
             dte_mult = 0.0
         elif trade_decision in ("OPTION_CALL", "OPTION_PUT"):
-            # Option signals use reduced sizing
-            effective_size = OPTION_SIGNAL_SIZE_MULT
-            size_mult = OPTION_SIGNAL_SIZE_MULT
+            # Option signals use base size scaled by overlay (soft scaling)
+            effective_size = min(OPTION_SIGNAL_SIZE_MULT, OPTION_SIGNAL_SIZE_MULT * size_mult)
+            size_mult = effective_size
         else:
             effective_size = size_mult
         
@@ -237,6 +245,11 @@ class SignalService:
             dte_range=strategy_summary["dte_range"],
             strategy_rationale=strategy_summary["rationale"],
             stop_loss=strategy_summary.get("stop_loss", ""),
+            stop_loss_pct=strategy_summary.get("stop_loss_pct"),
+            scale_down_day=strategy_summary.get("scale_down_day"),
+            max_hold_days=strategy_summary.get("max_hold_days"),
+            spread_width_pct=strategy_summary.get("spread_width_pct"),
+            take_profit_pct=strategy_summary.get("take_profit_pct"),
             no_trade_reasons=no_trade_reasons,
             decision_trace=decision_trace,
             score_components=fusion_result.components,
@@ -254,6 +267,11 @@ class SignalService:
                 "dte_range": "",
                 "rationale": "",
                 "stop_loss": "",
+                "stop_loss_pct": None,
+                "scale_down_day": None,
+                "max_hold_days": None,
+                "spread_width_pct": None,
+                "take_profit_pct": None,
             }
 
         rates = PATH_RISK_BY_STATE.get(state)
@@ -271,7 +289,20 @@ class SignalService:
         structures = ", ".join(s.value for s in strategy.primary_structures)
         dte_range = f"{strategy.dte.min_dte}-{strategy.dte.max_dte}d"
         rationale = strategy.rationale
+        
+        # Extract numeric fields from spread guidance
+        stop_loss_pct = None
+        scale_down_day = None
+        max_hold_days = None
+        spread_width_pct = None
+        take_profit_pct = None
+        
         if strategy.spread is not None:
+            stop_loss_pct = strategy.spread.stop_loss_pct
+            scale_down_day = strategy.spread.scale_down_day
+            max_hold_days = strategy.spread.max_hold_days
+            spread_width_pct = strategy.spread.width_pct
+            take_profit_pct = strategy.spread.take_profit_pct
             rationale = (
                 f"{rationale} "
                 f"[spread width={strategy.spread.width_pct*100:.0f}%, "
@@ -287,6 +318,11 @@ class SignalService:
             "dte_range": dte_range,
             "rationale": rationale,
             "stop_loss": stop_loss,
+            "stop_loss_pct": stop_loss_pct,
+            "scale_down_day": scale_down_day,
+            "max_hold_days": max_hold_days,
+            "spread_width_pct": spread_width_pct,
+            "take_profit_pct": take_profit_pct,
         }
     
     def _check_trade_cooldown(self, current_date: date, decision_type: str, cooldown_days: int) -> bool:
@@ -431,7 +467,9 @@ class SignalService:
                 no_trade_reasons.append("FUSION_STATE_NO_TRADE")
                 no_trade_reasons.append("OPTION_CALL_OVERLAY_VETO")
                 return "NO_TRADE", "Option call fired but overlay vetoed", no_trade_reasons, decision_trace
-            decision_trace.append(f"option_call=fired(cooldown_ok) -> OPTION_CALL (size={OPTION_SIGNAL_SIZE_MULT})")
+            # Apply soft overlay scaling to option size
+            scaled_size = min(OPTION_SIGNAL_SIZE_MULT, OPTION_SIGNAL_SIZE_MULT * size_mult)
+            decision_trace.append(f"option_call=fired(cooldown_ok) -> OPTION_CALL (base={OPTION_SIGNAL_SIZE_MULT}, overlay={size_mult:.2f}, effective={scaled_size:.2f})")
             return "OPTION_CALL", "Rule: MVRV cheap (2+ flags) + Sentiment fear", [], decision_trace
         elif signal_option_call == 1:
             decision_trace.append("option_call=fired but cooldown_active -> skip")
@@ -449,7 +487,9 @@ class SignalService:
                 decision_trace.append(f"option_put=fired but {efb_reason} -> NO_TRADE")
                 no_trade_reasons.append("EFB_VETO_OPTION_PUT")
                 return "NO_TRADE", f"Option put fired but EFB vetoed ({efb_reason})", no_trade_reasons, decision_trace
-            decision_trace.append(f"option_put=fired(cooldown_ok) -> OPTION_PUT (size={OPTION_SIGNAL_SIZE_MULT})")
+            # Apply soft overlay scaling to option size
+            scaled_size = min(OPTION_SIGNAL_SIZE_MULT, OPTION_SIGNAL_SIZE_MULT * size_mult)
+            decision_trace.append(f"option_put=fired(cooldown_ok) -> OPTION_PUT (base={OPTION_SIGNAL_SIZE_MULT}, overlay={size_mult:.2f}, effective={scaled_size:.2f})")
             return "OPTION_PUT", "Rule: MVRV overheated + Sentiment greed + Whale distrib", [], decision_trace
         elif signal_option_put == 1:
             decision_trace.append("option_put=fired but cooldown_active -> skip")
@@ -493,6 +533,11 @@ class SignalService:
                 'dte_range': result.dte_range,
                 'strategy_rationale': result.strategy_rationale,
                 'stop_loss': result.stop_loss,
+                'stop_loss_pct': result.stop_loss_pct,
+                'scale_down_day': result.scale_down_day,
+                'max_hold_days': result.max_hold_days,
+                'spread_width_pct': result.spread_width_pct,
+                'take_profit_pct': result.take_profit_pct,
                 'no_trade_reasons': result.no_trade_reasons,
                 'decision_trace': result.decision_trace,
                 'score_components': result.score_components,
