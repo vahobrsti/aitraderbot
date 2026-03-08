@@ -1,6 +1,6 @@
-# AI Trader Bot
+# On-Chain BTC Options Signal System
 
-A Bitcoin options trading signal system using on-chain metrics, whale behavior, sentiment analysis, and machine learning.
+A Bitcoin options trading signal system that fuses on-chain metrics (MDIA, MVRV, whale behavior) with sentiment analysis to classify market regimes and generate actionable trade signals with automated execution on Bybit and Deribit.
 
 ## Overview
 
@@ -57,9 +57,12 @@ Think of it as: **MDIA = ignition, Whales = fuel, MVRV-LS = terrain**
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                      EXECUTION LAYER                             │
-│  analyze_fusion command → Deep dive into fusion engine behavior  │
-│  generate_signal → Daily automated signal persistence            │
+│                    EXECUTION LAYER (NEW)                         │
+│  execution/                                                      │
+│  ├── exchanges/     → Bybit & Deribit adapters                  │
+│  ├── services/      → Orchestrator + Risk management            │
+│  └── models.py      → ExchangeAccount, Intent, Order, Position  │
+│  Signal → Intent → Risk Check → Exchange → Audit Log            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -466,6 +469,239 @@ python manage.py create_api_token --username telegram_bot
 
 ---
 
+## Execution Layer (Exchange Integration)
+
+The `execution` app provides automated trade execution on Bybit and Deribit exchanges. It implements a provider-agnostic interface with exchange-specific adapters, risk management, and full audit logging.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      EXECUTION LAYER                             │
+│  execution/                                                      │
+│  ├── exchanges/                                                  │
+│  │   ├── base.py       → Provider-agnostic interface            │
+│  │   ├── bybit.py      → Bybit V5 API adapter (pybit SDK)       │
+│  │   └── deribit.py    → Deribit API adapter (direct HTTP)      │
+│  ├── services/                                                   │
+│  │   ├── orchestrator.py → Signal → Intent → Risk → Exchange    │
+│  │   └── risk.py         → Position limits, daily loss, dupes   │
+│  ├── models.py         → ExchangeAccount, Intent, Order, etc.   │
+│  └── management/commands/                                        │
+│      ├── execute_signal.py  → Execute a signal                  │
+│      ├── sync_positions.py  → Sync positions from exchange      │
+│      └── reconcile.py       → Full reconciliation job           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Execution Flow
+
+```
+DailySignal
+    │
+    ▼
+┌─────────────────┐
+│ ExecutionIntent │  ← Created from signal (direction, option_type, notional)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│   Risk Checks   │  ← Account active? Position limit? Daily loss? Duplicates?
+└────────┬────────┘
+         │
+         ▼ (if passed)
+┌─────────────────┐
+│ Instrument      │  ← Select option by DTE/strike from signal guidance
+│ Selection       │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Order Placement │  ← Via exchange adapter (Bybit/Deribit)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Status Sync     │  ← Poll for fills, update Order/Position models
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ ExecutionEvent  │  ← Audit log for every state change
+└─────────────────┘
+```
+
+### Domain Models
+
+| Model | Purpose |
+|-------|---------|
+| `ExchangeAccount` | Exchange credentials (env var references), risk limits, testnet flag |
+| `ExecutionIntent` | Trade intent from signal: direction, option_type, target notional, status |
+| `Order` | Individual order: symbol, side, type, qty, price, exchange_order_id |
+| `Fill` | Partial/full fills with price, qty, fee |
+| `Position` | Current position state synced from exchange |
+| `ExecutionEvent` | Audit log: intent_created, risk_check_passed, order_filled, etc. |
+
+### Trade Decision Mapping
+
+| Signal Decision | Direction | Option Type |
+|-----------------|-----------|-------------|
+| `CALL` | long | call |
+| `OPTION_CALL` | long | call |
+| `PUT` | short | put |
+| `OPTION_PUT` | short | put |
+| `TACTICAL_PUT` | long | put |
+| `NO_TRADE` | ❌ Not executable | - |
+
+### Risk Checks
+
+The `RiskManager` validates every intent before execution:
+
+| Check | Description | Behavior |
+|-------|-------------|----------|
+| Account Active | Is the account enabled? | Block if inactive |
+| Duplicate Intent | Same date/direction already executing? | Block duplicates |
+| Position Limit | Target notional > max_position_usd? | Adjust down to limit |
+| Daily Loss Limit | Realized + unrealized losses > max_daily_loss_usd? | Block new trades |
+| Conflicting Position | Opposite direction position open? | Block (no hedging) |
+
+### Exchange Adapters
+
+Both adapters implement the same interface (`ExchangeAdapter`):
+
+```python
+# Core methods
+place_order(request: OrderRequest) -> OrderResponse
+cancel_order(symbol, order_id) -> OrderResponse
+get_order(symbol, order_id) -> OrderResponse
+get_open_orders(symbol?) -> list[OrderResponse]
+get_positions(symbol?) -> PositionSyncResult
+close_position(symbol, qty?) -> OrderResponse
+get_instruments(type, underlying?) -> list[InstrumentInfo]
+get_balance(currency?) -> list[AccountBalance]
+```
+
+**Bybit Adapter** (`execution/exchanges/bybit.py`):
+- Uses `pybit` SDK for V5 Unified Trading API
+- Supports: Linear (USDT perps), Options (USDC settled)
+- Auto-detects category from symbol format
+- Maps internal symbols: `BTC-USDT-PERP` → `BTCUSDT`
+
+**Deribit Adapter** (`execution/exchanges/deribit.py`):
+- Direct HTTP requests with OAuth2 authentication
+- Supports: Perpetuals, Futures, Options
+- Parses option details from instrument name: `BTC-30JUN25-100000-C`
+- Maps internal symbols: `BTC-USD-PERP` → `BTC-PERPETUAL`
+
+### Position Synchronization
+
+The `sync_positions` method handles exchange state reconciliation:
+
+1. Fetch positions from exchange via adapter
+2. Update/create `Position` records for returned positions
+3. **Only if API succeeded**: Zero out positions not returned (closed)
+4. **If API failed**: Skip zero-out to prevent data loss on transient errors
+
+```python
+# PositionSyncResult guards against false positives
+result = adapter.get_positions()
+if result.success:
+    # Safe to zero out missing positions
+    Position.objects.filter(...).exclude(symbol__in=active_symbols).update(qty=0)
+else:
+    # API error - don't touch existing positions
+    logger.warning(f"Skipping zero-out due to: {result.error}")
+```
+
+### Idempotency
+
+Every `ExecutionIntent` has a unique `idempotency_key`:
+
+- Format: `{date}_{account_id}_{direction}[_{counter}]`
+- Prevents duplicate executions for same signal
+- Retries get incremented counter: `2024-01-15_abc_long_1`
+- Cancelled/failed intents don't block new attempts
+
+### Configuration
+
+Add exchange credentials to `.env`:
+
+```bash
+# Bybit Testnet
+BYBIT_TESTNET_API_KEY=your_key
+BYBIT_TESTNET_API_SECRET=your_secret
+
+# Bybit Mainnet
+BYBIT_API_KEY=your_key
+BYBIT_API_SECRET=your_secret
+
+# Deribit Testnet
+DERIBIT_TESTNET_API_KEY=your_client_id
+DERIBIT_TESTNET_API_SECRET=your_client_secret
+
+# Deribit Mainnet
+DERIBIT_API_KEY=your_client_id
+DERIBIT_API_SECRET=your_client_secret
+```
+
+Create an `ExchangeAccount` via Django admin or shell:
+
+```python
+from execution.models import ExchangeAccount
+
+ExchangeAccount.objects.create(
+    name='bybit-testnet',
+    exchange='bybit',
+    api_key_env='BYBIT_TESTNET_API_KEY',
+    api_secret_env='BYBIT_TESTNET_API_SECRET',
+    is_testnet=True,
+    max_position_usd=5000,
+    max_daily_loss_usd=500,
+)
+```
+
+### Execution Commands
+
+```bash
+# Execute latest signal (dry run)
+python manage.py execute_signal --latest --account bybit-testnet --dry-run
+
+# Execute specific date
+python manage.py execute_signal --date 2024-01-15 --account bybit-testnet
+
+# Force retry (bypasses existing intent check)
+python manage.py execute_signal --latest --account bybit-testnet --force
+
+# Sync positions from exchange
+python manage.py sync_positions --account bybit-testnet
+python manage.py sync_positions --all
+
+# Full reconciliation (positions + open orders)
+python manage.py reconcile --account bybit-testnet
+python manage.py reconcile --all
+```
+
+### Background Workers
+
+For production, run sync/reconcile jobs via cron or Celery:
+
+```bash
+# Cron example: sync every 5 minutes, reconcile hourly
+*/5 * * * * cd /app && python manage.py sync_positions --all
+0 * * * * cd /app && python manage.py reconcile --all
+```
+
+### Safety Features
+
+1. **Testnet by default**: `is_testnet=True` on new accounts
+2. **Credentials via env vars**: Never stored in database
+3. **Risk limits enforced**: Position and daily loss limits
+4. **API failure protection**: Position sync won't zero out on errors
+5. **Full audit trail**: Every state change logged to `ExecutionEvent`
+6. **Idempotency**: Duplicate executions prevented by unique keys
+
+---
+
 ## Commands
 
 ### Daily Operations
@@ -583,6 +819,12 @@ DEBUG=False
 | `api/views.py` | REST API endpoints |
 | `api/serializers.py` | DRF serializers |
 | `api/urls.py` | API URL routing |
+| `execution/exchanges/base.py` | Provider-agnostic exchange interface |
+| `execution/exchanges/bybit.py` | Bybit V5 API adapter |
+| `execution/exchanges/deribit.py` | Deribit API adapter |
+| `execution/services/orchestrator.py` | Signal → Intent → Risk → Exchange flow |
+| `execution/services/risk.py` | Risk management (limits, duplicates) |
+| `execution/models.py` | ExchangeAccount, ExecutionIntent, Order, Position |
 
 ---
 
@@ -661,7 +903,7 @@ python manage.py runserver
 ## Project Structure
 
 ```
-aibot/
+aitrader/
 ├── aitrader/           # Django project settings
 ├── api/                # REST API app
 │   ├── views.py        # API endpoints
@@ -681,6 +923,19 @@ aibot/
 │   ├── options.py
 │   ├── services.py     # SignalService
 │   └── models.py       # DailySignal model
+├── execution/          # Exchange integration (NEW)
+│   ├── exchanges/      # Adapter modules
+│   │   ├── base.py     # Provider-agnostic interface
+│   │   ├── bybit.py    # Bybit V5 adapter
+│   │   └── deribit.py  # Deribit adapter
+│   ├── services/       # Business logic
+│   │   ├── orchestrator.py  # Execution flow
+│   │   └── risk.py     # Risk management
+│   ├── models.py       # ExchangeAccount, Intent, Order, etc.
+│   └── management/commands/
+│       ├── execute_signal.py
+│       ├── sync_positions.py
+│       └── reconcile.py
 ├── models/             # Trained model artifacts
 ├── credentials/        # Service account credentials
 └── manage.py
@@ -741,4 +996,4 @@ Tactical and option trades use their own cooldowns (`TACTICAL_PUT`: 7d, `OPTION_
 
 ---
 
-*Built for BTC options trading with on-chain metrics.*
+*On-chain regime classification for BTC options trading.*
