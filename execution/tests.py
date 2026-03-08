@@ -900,3 +900,481 @@ class ExecutionEventTests(TestCase):
         """Test that event payload defaults to empty dict."""
         event = ExecutionEvent(event_type='reconciliation')
         self.assertEqual(event.payload, {})
+
+
+# =============================================================================
+# INSTRUMENT SELECTOR TESTS
+# =============================================================================
+
+class InstrumentSelectorTests(TestCase):
+    """Tests for InstrumentSelector service."""
+    
+    def setUp(self):
+        self.mock_adapter = Mock()
+    
+    def test_parse_dte_range_standard(self):
+        """Test parsing standard DTE range."""
+        from execution.services.instrument_selector import InstrumentSelector
+        selector = InstrumentSelector(self.mock_adapter)
+        
+        min_dte, max_dte = selector._parse_dte_range('45-90d')
+        self.assertEqual(min_dte, 45)
+        self.assertEqual(max_dte, 90)
+    
+    def test_parse_dte_range_single(self):
+        """Test parsing single DTE value."""
+        from execution.services.instrument_selector import InstrumentSelector
+        selector = InstrumentSelector(self.mock_adapter)
+        
+        min_dte, max_dte = selector._parse_dte_range('30d')
+        self.assertEqual(min_dte, 30)
+        self.assertEqual(max_dte, 60)  # Default +30
+    
+    def test_parse_dte_range_empty(self):
+        """Test parsing empty DTE range returns defaults."""
+        from execution.services.instrument_selector import InstrumentSelector
+        selector = InstrumentSelector(self.mock_adapter)
+        
+        min_dte, max_dte = selector._parse_dte_range('')
+        self.assertEqual(min_dte, 45)
+        self.assertEqual(max_dte, 90)
+    
+    def test_calculate_target_strike_atm(self):
+        """Test ATM strike calculation."""
+        from execution.services.instrument_selector import InstrumentSelector
+        selector = InstrumentSelector(self.mock_adapter)
+        
+        strike = selector._calculate_target_strike(
+            Decimal('100000'), 'call', 'atm'
+        )
+        self.assertEqual(strike, Decimal('100000'))
+    
+    def test_calculate_target_strike_otm_call(self):
+        """Test OTM call strike calculation."""
+        from execution.services.instrument_selector import InstrumentSelector
+        selector = InstrumentSelector(self.mock_adapter)
+        
+        strike = selector._calculate_target_strike(
+            Decimal('100000'), 'call', 'otm'
+        )
+        self.assertEqual(strike, Decimal('105000'))  # 5% above
+    
+    def test_calculate_target_strike_otm_put(self):
+        """Test OTM put strike calculation."""
+        from execution.services.instrument_selector import InstrumentSelector
+        selector = InstrumentSelector(self.mock_adapter)
+        
+        strike = selector._calculate_target_strike(
+            Decimal('100000'), 'put', 'otm'
+        )
+        self.assertEqual(strike, Decimal('95000'))  # 5% below
+    
+    def test_calculate_target_strike_slight_otm(self):
+        """Test slight OTM strike calculation."""
+        from execution.services.instrument_selector import InstrumentSelector
+        selector = InstrumentSelector(self.mock_adapter)
+        
+        strike = selector._calculate_target_strike(
+            Decimal('100000'), 'call', 'slight_otm'
+        )
+        self.assertEqual(strike, Decimal('102000'))  # 2% above
+    
+    def test_classify_moneyness_atm(self):
+        """Test ATM classification."""
+        from execution.services.instrument_selector import InstrumentSelector
+        selector = InstrumentSelector(self.mock_adapter)
+        
+        result = selector._classify_moneyness(
+            Decimal('100500'), Decimal('100000'), 'call'
+        )
+        self.assertEqual(result, 'atm')  # Within 2%
+    
+    def test_classify_moneyness_otm_call(self):
+        """Test OTM call classification."""
+        from execution.services.instrument_selector import InstrumentSelector
+        selector = InstrumentSelector(self.mock_adapter)
+        
+        result = selector._classify_moneyness(
+            Decimal('110000'), Decimal('100000'), 'call'
+        )
+        self.assertEqual(result, 'otm')
+    
+    def test_classify_moneyness_itm_call(self):
+        """Test ITM call classification."""
+        from execution.services.instrument_selector import InstrumentSelector
+        selector = InstrumentSelector(self.mock_adapter)
+        
+        result = selector._classify_moneyness(
+            Decimal('90000'), Decimal('100000'), 'call'
+        )
+        self.assertEqual(result, 'itm')
+    
+    def test_select_single_option_no_instruments(self):
+        """Test selection when no instruments available."""
+        from execution.services.instrument_selector import InstrumentSelector
+        
+        self.mock_adapter.get_instruments.return_value = []
+        selector = InstrumentSelector(self.mock_adapter)
+        
+        result = selector.select_single_option(
+            'BTC', 'call', 'atm', '45-90d', Decimal('100000')
+        )
+        self.assertIsNone(result)
+
+
+# =============================================================================
+# ORDER BUILDER TESTS
+# =============================================================================
+
+class OrderBuilderTests(TestCase):
+    """Tests for OrderBuilder service."""
+    
+    def test_calculate_qty_with_price(self):
+        """Test quantity calculation with known price."""
+        from execution.services.order_builder import OrderBuilder
+        builder = OrderBuilder(Decimal('10000'))
+        
+        qty = builder._calculate_qty(
+            target_notional=Decimal('1000'),
+            price=Decimal('100'),
+            lot_size=Decimal('0.1'),
+            min_qty=Decimal('0.1'),
+        )
+        self.assertEqual(qty, Decimal('10.0'))
+    
+    def test_calculate_qty_rounds_to_lot_size(self):
+        """Test quantity rounds to lot size."""
+        from execution.services.order_builder import OrderBuilder
+        builder = OrderBuilder(Decimal('10000'))
+        
+        qty = builder._calculate_qty(
+            target_notional=Decimal('1000'),
+            price=Decimal('333'),  # Would give 3.003...
+            lot_size=Decimal('0.1'),
+            min_qty=Decimal('0.1'),
+        )
+        self.assertEqual(qty, Decimal('3.0'))
+    
+    def test_calculate_qty_respects_min(self):
+        """Test quantity respects minimum."""
+        from execution.services.order_builder import OrderBuilder
+        builder = OrderBuilder(Decimal('10000'))
+        
+        qty = builder._calculate_qty(
+            target_notional=Decimal('10'),
+            price=Decimal('1000'),  # Would give 0.01
+            lot_size=Decimal('0.01'),
+            min_qty=Decimal('0.1'),
+        )
+        self.assertEqual(qty, Decimal('0.1'))
+    
+    def test_build_single_option_order_long(self):
+        """Test building long option order."""
+        from execution.services.order_builder import OrderBuilder
+        from execution.services.instrument_selector import StrikeSelection
+        
+        builder = OrderBuilder(Decimal('10000'))
+        selection = StrikeSelection(
+            symbol='BTC-30JUN25-100000-C',
+            strike=Decimal('100000'),
+            expiry=date.today() + timedelta(days=45),
+            option_type='call',
+            moneyness='atm',
+            dte=45,
+            rationale='test',
+        )
+        
+        order = builder.build_single_option_order(
+            selection=selection,
+            direction='long',
+            target_notional=Decimal('1000'),
+            mark_price=Decimal('500'),
+        )
+        
+        self.assertEqual(order.symbol, 'BTC-30JUN25-100000-C')
+        self.assertEqual(order.side, 'buy')
+        self.assertEqual(order.order_type, 'market')
+    
+    def test_build_stop_loss_order_long(self):
+        """Test building stop loss for long position."""
+        from execution.services.order_builder import OrderBuilder
+        builder = OrderBuilder(Decimal('10000'))
+        
+        order = builder.build_stop_loss_order(
+            symbol='BTCUSDT',
+            position_qty=Decimal('1.0'),
+            position_side='long',
+            entry_price=Decimal('100000'),
+            stop_loss_pct=Decimal('0.04'),
+        )
+        
+        self.assertEqual(order.side, 'sell')
+        self.assertEqual(order.price, Decimal('96000'))  # 4% below
+        self.assertTrue(order.reduce_only)
+    
+    def test_build_stop_loss_order_short(self):
+        """Test building stop loss for short position."""
+        from execution.services.order_builder import OrderBuilder
+        builder = OrderBuilder(Decimal('10000'))
+        
+        order = builder.build_stop_loss_order(
+            symbol='BTCUSDT',
+            position_qty=Decimal('1.0'),
+            position_side='short',
+            entry_price=Decimal('100000'),
+            stop_loss_pct=Decimal('0.04'),
+        )
+        
+        self.assertEqual(order.side, 'buy')
+        self.assertEqual(order.price, Decimal('104000'))  # 4% above
+    
+    def test_build_take_profit_order(self):
+        """Test building take profit order."""
+        from execution.services.order_builder import OrderBuilder
+        builder = OrderBuilder(Decimal('10000'))
+        
+        order = builder.build_take_profit_order(
+            symbol='BTCUSDT',
+            position_qty=Decimal('1.0'),
+            position_side='long',
+            entry_price=Decimal('100000'),
+            take_profit_pct=Decimal('0.50'),
+        )
+        
+        self.assertEqual(order.side, 'sell')
+        self.assertEqual(order.price, Decimal('150000'))  # 50% above
+    
+    def test_build_scale_down_order(self):
+        """Test building scale down order."""
+        from execution.services.order_builder import OrderBuilder
+        builder = OrderBuilder(Decimal('10000'))
+        
+        order = builder.build_scale_down_order(
+            symbol='BTCUSDT',
+            position_qty=Decimal('4.0'),
+            position_side='long',
+            scale_pct=Decimal('0.75'),
+        )
+        
+        self.assertEqual(order.side, 'sell')
+        self.assertEqual(order.qty, Decimal('3.0'))  # 75% of 4
+        self.assertTrue(order.reduce_only)
+    
+    def test_build_full_close_order(self):
+        """Test building full close order."""
+        from execution.services.order_builder import OrderBuilder
+        builder = OrderBuilder(Decimal('10000'))
+        
+        order = builder.build_full_close_order(
+            symbol='BTCUSDT',
+            position_qty=Decimal('2.5'),
+            position_side='short',
+        )
+        
+        self.assertEqual(order.side, 'buy')
+        self.assertEqual(order.qty, Decimal('2.5'))
+        self.assertTrue(order.reduce_only)
+    
+    def test_to_order_request(self):
+        """Test converting OrderPlan to OrderRequest."""
+        from execution.services.order_builder import OrderBuilder, OrderPlan
+        builder = OrderBuilder(Decimal('10000'))
+        
+        plan = OrderPlan(
+            symbol='BTCUSDT',
+            side='buy',
+            qty=Decimal('1.0'),
+            order_type='market',
+        )
+        
+        request = builder.to_order_request(plan, 'ai_test123')
+        
+        self.assertEqual(request.symbol, 'BTCUSDT')
+        self.assertEqual(request.client_order_id, 'ai_test123')
+
+
+# =============================================================================
+# POSITION MANAGER TESTS
+# =============================================================================
+
+class PositionManagerTests(TestCase):
+    """Tests for PositionManager service."""
+    
+    def setUp(self):
+        self.account = ExchangeAccount.objects.create(
+            name='pm-test',
+            exchange='bybit',
+            api_key_env='KEY',
+            api_secret_env='SECRET',
+        )
+    
+    def test_calculate_pnl_pct_long_profit(self):
+        """Test P&L calculation for profitable long."""
+        from execution.services.position_manager import PositionManager
+        pm = PositionManager()
+        
+        pos = Position(
+            entry_price=Decimal('100'),
+            mark_price=Decimal('120'),
+            side='long',
+        )
+        
+        pnl = pm._calculate_pnl_pct(pos)
+        self.assertEqual(pnl, Decimal('0.2'))  # 20% profit
+    
+    def test_calculate_pnl_pct_long_loss(self):
+        """Test P&L calculation for losing long."""
+        from execution.services.position_manager import PositionManager
+        pm = PositionManager()
+        
+        pos = Position(
+            entry_price=Decimal('100'),
+            mark_price=Decimal('90'),
+            side='long',
+        )
+        
+        pnl = pm._calculate_pnl_pct(pos)
+        self.assertEqual(pnl, Decimal('-0.1'))  # 10% loss
+    
+    def test_calculate_pnl_pct_short_profit(self):
+        """Test P&L calculation for profitable short."""
+        from execution.services.position_manager import PositionManager
+        pm = PositionManager()
+        
+        pos = Position(
+            entry_price=Decimal('100'),
+            mark_price=Decimal('80'),
+            side='short',
+        )
+        
+        pnl = pm._calculate_pnl_pct(pos)
+        self.assertEqual(pnl, Decimal('0.2'))  # 20% profit
+    
+    def test_check_stop_loss_triggered(self):
+        """Test stop loss detection when triggered."""
+        from execution.services.position_manager import PositionManager, ExitReason
+        pm = PositionManager()
+        
+        pos = Position(
+            account=self.account,
+            symbol='BTCUSDT',
+            side='long',
+            qty=Decimal('1.0'),
+            entry_price=Decimal('100'),
+            mark_price=Decimal('94'),  # 6% loss
+        )
+        
+        mock_intent = Mock()
+        mock_intent.stop_loss_pct = Decimal('0.05')  # 5% stop
+        
+        signal = pm._check_stop_loss(pos, mock_intent)
+        
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.reason, ExitReason.STOP_LOSS)
+        self.assertEqual(signal.action, 'close')
+    
+    def test_check_stop_loss_not_triggered(self):
+        """Test stop loss not triggered when within threshold."""
+        from execution.services.position_manager import PositionManager
+        pm = PositionManager()
+        
+        pos = Position(
+            account=self.account,
+            symbol='BTCUSDT',
+            side='long',
+            qty=Decimal('1.0'),
+            entry_price=Decimal('100'),
+            mark_price=Decimal('97'),  # 3% loss
+        )
+        
+        mock_intent = Mock()
+        mock_intent.stop_loss_pct = Decimal('0.05')  # 5% stop
+        
+        signal = pm._check_stop_loss(pos, mock_intent)
+        self.assertIsNone(signal)
+    
+    def test_check_take_profit_triggered(self):
+        """Test take profit detection when triggered."""
+        from execution.services.position_manager import PositionManager, ExitReason
+        pm = PositionManager()
+        
+        pos = Position(
+            account=self.account,
+            symbol='BTCUSDT',
+            side='long',
+            qty=Decimal('1.0'),
+            entry_price=Decimal('100'),
+            mark_price=Decimal('180'),  # 80% profit
+        )
+        
+        mock_intent = Mock()
+        mock_intent.stop_loss_pct = None
+        mock_intent.take_profit_pct = Decimal('0.70')  # 70% target
+        
+        signal = pm._check_take_profit(pos, mock_intent)
+        
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.reason, ExitReason.TAKE_PROFIT)
+    
+    def test_check_time_stop_triggered(self):
+        """Test time stop detection when max days exceeded."""
+        from execution.services.position_manager import PositionManager, ExitReason
+        pm = PositionManager()
+        
+        pos = Position(
+            account=self.account,
+            symbol='BTCUSDT',
+            side='long',
+            qty=Decimal('1.0'),
+            entry_price=Decimal('100'),
+            mark_price=Decimal('105'),
+        )
+        
+        mock_intent = Mock()
+        mock_intent.stop_loss_pct = None
+        mock_intent.take_profit_pct = None
+        mock_intent.max_hold_days = 5
+        mock_intent.completed_at = timezone.now() - timedelta(days=6)
+        
+        signal = pm._check_time_stop(pos, mock_intent)
+        
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.reason, ExitReason.TIME_STOP)
+    
+    def test_check_expiry_approaching(self):
+        """Test expiry detection for options."""
+        from execution.services.position_manager import PositionManager, ExitReason
+        pm = PositionManager(min_dte_before_close=3)
+        
+        pos = Position(
+            account=self.account,
+            symbol='BTC-30JUN25-100000-C',
+            side='long',
+            qty=Decimal('1.0'),
+            entry_price=Decimal('100'),
+            mark_price=Decimal('105'),
+            expiry=date.today() + timedelta(days=2),  # 2 days to expiry
+        )
+        
+        signal = pm._check_expiry(pos, None)
+        
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.reason, ExitReason.EXPIRY_APPROACHING)
+    
+    def test_check_expiry_not_approaching(self):
+        """Test expiry not triggered when far from expiry."""
+        from execution.services.position_manager import PositionManager
+        pm = PositionManager(min_dte_before_close=3)
+        
+        pos = Position(
+            account=self.account,
+            symbol='BTC-30JUN25-100000-C',
+            side='long',
+            qty=Decimal('1.0'),
+            entry_price=Decimal('100'),
+            mark_price=Decimal('105'),
+            expiry=date.today() + timedelta(days=30),  # 30 days to expiry
+        )
+        
+        signal = pm._check_expiry(pos, None)
+        self.assertIsNone(signal)

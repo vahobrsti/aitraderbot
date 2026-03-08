@@ -471,91 +471,136 @@ python manage.py create_api_token --username telegram_bot
 
 ## Execution Layer (Exchange Integration)
 
-The `execution` app provides automated trade execution on Bybit and Deribit exchanges. It implements a provider-agnostic interface with exchange-specific adapters, risk management, and full audit logging.
+The `execution` app provides automated BTC options execution on Bybit and Deribit. Options only - no perpetuals.
+
+### V1 Scope
+
+- Single-leg options: CALL, PUT, OPTION_CALL, OPTION_PUT, TACTICAL_PUT
+- Polling-based exit management (options don't support native SL/TP)
+- No spreads until single-leg is stable in production
+
+### Strategy to Trade Type Mapping
+
+| Signal | Direction | Option | DTE | Stop | Scale Day | Hard Cut | Sizing |
+|--------|-----------|--------|-----|------|-----------|----------|--------|
+| **CALL** (STRONG_BULLISH) | Long | Call | 7-14d | 4.0% | Day 5 | Day 6 | 1.0x |
+| **CALL** (EARLY_RECOVERY) | Long | Call | 14-30d | 4.0% | Day 6 | Day 8 | 1.0x |
+| **CALL** (MOMENTUM) | Long | Call | 7-14d | 4.0% | Day 5 | Day 6 | 1.0x |
+| **CALL** (BULL_PROBE) | Long | Call | 7-12d | 3.5% | Day 4 | Day 5 | 0.35-0.60x |
+| **PUT** (DISTRIBUTION_RISK) | Short | Put | 7-14d | 4.0% | Day 5 | Day 6 | 1.0x |
+| **PUT** (BEAR_CONTINUATION) | Short | Put | 7-14d | 3.5% | Day 4 | Day 6 | 1.0x |
+| **PUT** (BEAR_PROBE) | Short | Put | 7-12d | 4.0% | Day 6 | Day 7 | 0.35-0.60x |
+| **OPTION_CALL** | Long | Call | 45-90d | 4.0% | Day 5 | Day 7 | 0.75x |
+| **OPTION_PUT** | Short | Put | 45-90d | 4.0% | Day 5 | Day 7 | 0.75x |
+| **TACTICAL_PUT** | Long | Put | 7-14d | 4.0% | Day 5 | Day 6 | 0.40-0.60x |
+
+### Stop Loss Design
+
+Options don't support native exchange SL/TP orders. All exits are polling-based via `manage_exits` command.
+
+**Three-Layer Exit System:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Layer 1: PRICE STOP (checked every 5 min)                       │
+│ If underlying moves stop_loss_pct against entry → CLOSE ALL     │
+│ Example: Entry at $100k, 4% stop → close if BTC hits $96k       │
+├─────────────────────────────────────────────────────────────────┤
+│ Layer 2: TIME SCALE-DOWN (at scale_down_day)                    │
+│ Reduce position to 25% (close 75%)                              │
+│ Rationale: ~20% of winners hit after day 7                      │
+├─────────────────────────────────────────────────────────────────┤
+│ Layer 3: HARD TIME STOP (at max_hold_days)                      │
+│ Close everything remaining                                       │
+│ Prevents theta decay from eating remaining value                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Why 3.5-4.0% Stop?**
+- Below 3%: 40%+ false stops (noise triggers exit)
+- Above 5%: Starts missing actual losers
+- Winner MAE: 2-4% (max adverse excursion)
+- Loser MAE: 9-22%
+- 4% sits cleanly between winner noise and loser trajectory
+
+**Polling Limitation:**
+- `manage_exits` runs every 5 minutes via cron
+- Price can gap through stop between polls
+- This is unavoidable for options - no native conditional orders
+
+### Execution Lifecycle
+
+```
+Signal
+   │
+   ▼
+create_intent_from_signal()
+   │
+   ▼
+process_intent()
+   ├── Risk checks (account, limits, duplicates)
+   ├── Select option (type + DTE from signal)
+   ├── Place entry order (market)
+   └── Wait for fill
+   │
+   ▼
+protect_position()
+   └── Register for polling (exit_method='polling')
+   │
+   ▼
+manage_exits (cron */5)
+   ├── Sync positions from exchange
+   ├── Check each position:
+   │   ├── Stop loss (mark vs entry)
+   │   ├── Take profit (P&L %)
+   │   ├── Time stop (days held)
+   │   └── Expiry (DTE <= 3)
+   └── Place market close if triggered
+   │
+   ▼
+reconcile (cron hourly)
+   └── Full state sync + alert on unprotected
+```
+
+### Intent States
+
+| State | Meaning |
+|-------|---------|
+| `pending` | Created, awaiting processing |
+| `risk_check` | Undergoing risk validation |
+| `approved` | Passed risk checks |
+| `rejected` | Failed risk checks |
+| `entry_submitted` | Entry order placed on exchange |
+| `entry_filled` | Entry filled, awaiting protection |
+| `protected` | Registered for polling exits |
+| `unprotected` | ⚠️ ALERT: No exit protection |
+| `exit_triggered` | Exit order placed |
+| `closed` | Position fully closed |
+| `failed` | Execution error |
 
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      EXECUTION LAYER                             │
-│  execution/                                                      │
-│  ├── exchanges/                                                  │
-│  │   ├── base.py       → Provider-agnostic interface            │
-│  │   ├── bybit.py      → Bybit V5 API adapter (pybit SDK)       │
-│  │   └── deribit.py    → Deribit API adapter (direct HTTP)      │
-│  ├── services/                                                   │
-│  │   ├── orchestrator.py → Signal → Intent → Risk → Exchange    │
-│  │   └── risk.py         → Position limits, daily loss, dupes   │
-│  ├── models.py         → ExchangeAccount, Intent, Order, etc.   │
-│  └── management/commands/                                        │
-│      ├── execute_signal.py  → Execute a signal                  │
-│      ├── sync_positions.py  → Sync positions from exchange      │
-│      └── reconcile.py       → Full reconciliation job           │
-└─────────────────────────────────────────────────────────────────┘
+execution/
+├── exchanges/
+│   ├── base.py       → Provider-agnostic interface
+│   ├── bybit.py      → Bybit V5 (options via USDC)
+│   └── deribit.py    → Deribit (options)
+├── services/
+│   ├── orchestrator.py      → Full lifecycle management
+│   ├── risk.py              → Position/loss limits
+│   ├── position_manager.py  → Exit rule checking
+│   └── order_builder.py     → Order construction
+├── models.py         → ExchangeAccount, Intent, Order, Position
+└── management/commands/
+    ├── execute_signal.py    → Execute a signal
+    ├── sync_positions.py    → Sync from exchange
+    ├── reconcile.py         → Full reconciliation
+    ├── manage_exits.py      → Polling exit management
+    └── check_protection.py  → Alert on unprotected
 ```
-
-### Execution Flow
-
-```
-DailySignal
-    │
-    ▼
-┌─────────────────┐
-│ ExecutionIntent │  ← Created from signal (direction, option_type, notional)
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   Risk Checks   │  ← Account active? Position limit? Daily loss? Duplicates?
-└────────┬────────┘
-         │
-         ▼ (if passed)
-┌─────────────────┐
-│ Instrument      │  ← Select option by DTE/strike from signal guidance
-│ Selection       │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Order Placement │  ← Via exchange adapter (Bybit/Deribit)
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Status Sync     │  ← Poll for fills, update Order/Position models
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ ExecutionEvent  │  ← Audit log for every state change
-└─────────────────┘
-```
-
-### Domain Models
-
-| Model | Purpose |
-|-------|---------|
-| `ExchangeAccount` | Exchange credentials (env var references), risk limits, testnet flag |
-| `ExecutionIntent` | Trade intent from signal: direction, option_type, target notional, status |
-| `Order` | Individual order: symbol, side, type, qty, price, exchange_order_id |
-| `Fill` | Partial/full fills with price, qty, fee |
-| `Position` | Current position state synced from exchange |
-| `ExecutionEvent` | Audit log: intent_created, risk_check_passed, order_filled, etc. |
-
-### Trade Decision Mapping
-
-| Signal Decision | Direction | Option Type |
-|-----------------|-----------|-------------|
-| `CALL` | long | call |
-| `OPTION_CALL` | long | call |
-| `PUT` | short | put |
-| `OPTION_PUT` | short | put |
-| `TACTICAL_PUT` | long | put |
-| `NO_TRADE` | ❌ Not executable | - |
 
 ### Risk Checks
-
-The `RiskManager` validates every intent before execution:
 
 | Check | Description | Behavior |
 |-------|-------------|----------|
@@ -565,96 +610,31 @@ The `RiskManager` validates every intent before execution:
 | Daily Loss Limit | Realized + unrealized losses > max_daily_loss_usd? | Block new trades |
 | Conflicting Position | Opposite direction position open? | Block (no hedging) |
 
-### Exchange Adapters
-
-Both adapters implement the same interface (`ExchangeAdapter`):
-
-```python
-# Core methods
-place_order(request: OrderRequest) -> OrderResponse
-cancel_order(symbol, order_id) -> OrderResponse
-get_order(symbol, order_id) -> OrderResponse
-get_open_orders(symbol?) -> list[OrderResponse]
-get_positions(symbol?) -> PositionSyncResult
-close_position(symbol, qty?) -> OrderResponse
-get_instruments(type, underlying?) -> list[InstrumentInfo]
-get_balance(currency?) -> list[AccountBalance]
-```
-
-**Bybit Adapter** (`execution/exchanges/bybit.py`):
-- Uses `pybit` SDK for V5 Unified Trading API
-- Supports: Linear (USDT perps), Options (USDC settled)
-- Auto-detects category from symbol format
-- Maps internal symbols: `BTC-USDT-PERP` → `BTCUSDT`
-
-**Deribit Adapter** (`execution/exchanges/deribit.py`):
-- Direct HTTP requests with OAuth2 authentication
-- Supports: Perpetuals, Futures, Options
-- Parses option details from instrument name: `BTC-30JUN25-100000-C`
-- Maps internal symbols: `BTC-USD-PERP` → `BTC-PERPETUAL`
-
-### Position Synchronization
-
-The `sync_positions` method handles exchange state reconciliation:
-
-1. Fetch positions from exchange via adapter
-2. Update/create `Position` records for returned positions
-3. **Only if API succeeded**: Zero out positions not returned (closed)
-4. **If API failed**: Skip zero-out to prevent data loss on transient errors
-
-```python
-# PositionSyncResult guards against false positives
-result = adapter.get_positions()
-if result.success:
-    # Safe to zero out missing positions
-    Position.objects.filter(...).exclude(symbol__in=active_symbols).update(qty=0)
-else:
-    # API error - don't touch existing positions
-    logger.warning(f"Skipping zero-out due to: {result.error}")
-```
-
-### Idempotency
-
-Every `ExecutionIntent` has a unique `idempotency_key`:
-
-- Format: `{date}_{account_id}_{direction}[_{counter}]`
-- Prevents duplicate executions for same signal
-- Retries get incremented counter: `2024-01-15_abc_long_1`
-- Cancelled/failed intents don't block new attempts
-
 ### Configuration
 
 Add exchange credentials to `.env`:
 
 ```bash
-# Bybit Testnet
-BYBIT_TESTNET_API_KEY=your_key
-BYBIT_TESTNET_API_SECRET=your_secret
-
-# Bybit Mainnet
+# Bybit (options are USDC-settled)
 BYBIT_API_KEY=your_key
 BYBIT_API_SECRET=your_secret
 
-# Deribit Testnet
-DERIBIT_TESTNET_API_KEY=your_client_id
-DERIBIT_TESTNET_API_SECRET=your_client_secret
-
-# Deribit Mainnet
+# Deribit
 DERIBIT_API_KEY=your_client_id
 DERIBIT_API_SECRET=your_client_secret
 ```
 
-Create an `ExchangeAccount` via Django admin or shell:
+Create an `ExchangeAccount`:
 
 ```python
 from execution.models import ExchangeAccount
 
 ExchangeAccount.objects.create(
-    name='bybit-testnet',
+    name='bybit-prod',
     exchange='bybit',
-    api_key_env='BYBIT_TESTNET_API_KEY',
-    api_secret_env='BYBIT_TESTNET_API_SECRET',
-    is_testnet=True,
+    api_key_env='BYBIT_API_KEY',
+    api_secret_env='BYBIT_API_SECRET',
+    is_testnet=False,
     max_position_usd=5000,
     max_daily_loss_usd=500,
 )
@@ -663,31 +643,39 @@ ExchangeAccount.objects.create(
 ### Execution Commands
 
 ```bash
-# Execute latest signal (dry run)
-python manage.py execute_signal --latest --account bybit-testnet --dry-run
+# Execute latest signal (dry run first!)
+python manage.py execute_signal --latest --account bybit-prod --dry-run
+python manage.py execute_signal --latest --account bybit-prod
 
 # Execute specific date
-python manage.py execute_signal --date 2024-01-15 --account bybit-testnet
-
-# Force retry (bypasses existing intent check)
-python manage.py execute_signal --latest --account bybit-testnet --force
+python manage.py execute_signal --date 2024-01-15 --account bybit-prod
 
 # Sync positions from exchange
-python manage.py sync_positions --account bybit-testnet
+python manage.py sync_positions --account bybit-prod
 python manage.py sync_positions --all
 
-# Full reconciliation (positions + open orders)
-python manage.py reconcile --account bybit-testnet
-python manage.py reconcile --all
+# Full reconciliation
+python manage.py reconcile --account bybit-prod
+
+# Check and execute exit rules
+python manage.py manage_exits --account bybit-prod
+python manage.py manage_exits --dry-run
+
+# Alert on unprotected positions
+python manage.py check_protection --max-age-minutes 5
 ```
 
-### Background Workers
-
-For production, run sync/reconcile jobs via cron or Celery:
+### Cron Setup (Production)
 
 ```bash
-# Cron example: sync every 5 minutes, reconcile hourly
+# Every minute: alert if unprotected position
+* * * * * cd /app && python manage.py check_protection
+
+# Every 5 minutes: check exits and sync positions
+*/5 * * * * cd /app && python manage.py manage_exits
 */5 * * * * cd /app && python manage.py sync_positions --all
+
+# Hourly: full reconciliation
 0 * * * * cd /app && python manage.py reconcile --all
 ```
 
@@ -699,6 +687,7 @@ For production, run sync/reconcile jobs via cron or Celery:
 4. **API failure protection**: Position sync won't zero out on errors
 5. **Full audit trail**: Every state change logged to `ExecutionEvent`
 6. **Idempotency**: Duplicate executions prevented by unique keys
+7. **Unprotected alerts**: `check_protection` exits with code 1 for monitoring
 
 ---
 
