@@ -36,12 +36,13 @@ class Command(BaseCommand):
         parser.add_argument("--direction", type=str, default=None)
         parser.add_argument("--state", type=str, default=None)
         parser.add_argument("--horizon", type=int, default=14, help="Forward path horizon in days")
-        parser.add_argument("--target", type=float, default=0.03, help="Touch threshold (e.g. 0.03)")
+        # Defaults match options.py calibration basis (5% target, 4% invalidation)
+        parser.add_argument("--target", type=float, default=0.05, help="Touch threshold (e.g. 0.05)")
         parser.add_argument(
             "--invalidation",
             type=float,
-            default=None,
-            help="Invalidation threshold against signal (defaults to --target)",
+            default=0.04,
+            help="Invalidation threshold against signal (default 0.04)",
         )
 
     def handle(self, *args, **options):
@@ -150,10 +151,17 @@ class Command(BaseCommand):
         else:
             years = all_years
 
-        core_cooldown_days = 7
-        probe_cooldown_days = 5
-        tactical_cooldown_days = 7
-        option_cooldown_days = 7
+        # Import cooldown constants from services for alignment
+        from signals.services import (
+            CORE_SIGNAL_COOLDOWN_DAYS,
+            PROBE_COOLDOWN_DAYS,
+            TACTICAL_PUT_COOLDOWN_DAYS,
+            OPTION_SIGNAL_COOLDOWN_DAYS,
+        )
+        core_cooldown_days = CORE_SIGNAL_COOLDOWN_DAYS
+        probe_cooldown_days = PROBE_COOLDOWN_DAYS
+        tactical_cooldown_days = TACTICAL_PUT_COOLDOWN_DAYS
+        option_cooldown_days = OPTION_SIGNAL_COOLDOWN_DAYS
         all_trades: list[dict] = []
 
         for year in years:
@@ -526,7 +534,8 @@ class Command(BaseCommand):
 
         winner_invalid_first = winners["invalid_before_hit"].mean() * 100
         winner_same_day_ambiguous = winners["same_day_ambiguous"].mean() * 100
-        clean_winners = 100.0 - winner_invalid_first
+        # Clean winners excludes both strict invalidations AND same-day ambiguous
+        clean_winners = 100.0 - winner_invalid_first - winner_same_day_ambiguous
         self.stdout.write(f"% winners invalidated before hit (strict): {winner_invalid_first:.1f}%")
         self.stdout.write(f"% winners ambiguous same-day (hit and invalidation): {winner_same_day_ambiguous:.1f}%")
         self.stdout.write(f"% clean winners (no invalidation before hit): {clean_winners:.1f}%")
