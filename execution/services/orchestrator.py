@@ -1,12 +1,17 @@
 """
 Execution orchestrator service.
-Handles the full lifecycle: DailySignal -> ExecutionIntent -> Risk checks -> Exchange -> Persist.
+Handles the full lifecycle: Signal -> Intent -> Entry -> Protection -> Exit.
+
+V1 Scope:
+- Single-leg options only (CALL/PUT/OPTION_CALL/OPTION_PUT)
+- Entry order -> SL/TP placement -> Polling fallback
+- No spreads
 """
 import logging
 import os
 from decimal import Decimal
 from typing import Optional
-from datetime import date
+from datetime import date, timedelta
 from django.db import transaction
 from django.utils import timezone
 
@@ -23,7 +28,12 @@ logger = logging.getLogger(__name__)
 class ExecutionOrchestrator:
     """
     Main orchestration service for trade execution.
-    Coordinates: signal interpretation, risk checks, order placement, status tracking.
+    
+    Lifecycle:
+    1. create_intent_from_signal() - Parse signal into intent
+    2. process_intent() - Risk check -> Entry order -> Wait for fill
+    3. protect_position() - Place SL/TP or register for polling
+    4. sync_positions() / reconcile() - Keep state in sync
     """
     
     def __init__(self, account: ExchangeAccount):
@@ -52,18 +62,17 @@ class ExecutionOrchestrator:
     def create_intent_from_signal(self, signal) -> ExecutionIntent:
         """
         Create an ExecutionIntent from a DailySignal.
-        Interprets signal fields into execution parameters.
+        V1: Single-leg options only.
         """
-        # Determine direction from trade_decision
         decision = signal.trade_decision.upper()
         
-        # Map all valid trade decisions
+        # V1: Only single-leg options
         decision_map = {
             'CALL': ('long', 'call'),
             'OPTION_CALL': ('long', 'call'),
             'PUT': ('short', 'put'),
             'OPTION_PUT': ('short', 'put'),
-            'TACTICAL_PUT': ('long', 'put'),  # Tactical put is a hedge, direction depends on context
+            'TACTICAL_PUT': ('long', 'put'),
         }
         
         if decision not in decision_map:
@@ -71,8 +80,8 @@ class ExecutionOrchestrator:
         
         direction, option_type = decision_map[decision]
         
-        # Calculate target notional from size multiplier
-        base_notional = self.account.max_position_usd * Decimal('0.5')  # 50% of max as base
+        # Calculate target notional
+        base_notional = self.account.max_position_usd * Decimal('0.5')
         size_mult = Decimal(str(signal.size_multiplier or 1.0))
         target_notional = base_notional * size_mult
         
@@ -94,6 +103,7 @@ class ExecutionOrchestrator:
             'signal_date': str(signal.date),
             'trade_decision': signal.trade_decision,
             'direction': direction,
+            'option_type': option_type,
             'target_notional': str(target_notional),
         })
         
@@ -102,8 +112,8 @@ class ExecutionOrchestrator:
     @transaction.atomic
     def process_intent(self, intent: ExecutionIntent) -> bool:
         """
-        Process an execution intent through the full lifecycle.
-        Returns True if execution was successful.
+        Process intent through: Risk Check -> Entry Order -> Fill.
+        After this, call protect_position() to place SL/TP.
         """
         try:
             # Step 1: Risk checks
@@ -119,7 +129,6 @@ class ExecutionOrchestrator:
                 self._log_event(intent, 'risk_check_failed', {'reason': risk_result.reason})
                 return False
             
-            # Apply any adjustments from risk check
             if risk_result.adjusted_notional:
                 intent.target_notional_usd = risk_result.adjusted_notional
             
@@ -128,7 +137,7 @@ class ExecutionOrchestrator:
             intent.save()
             self._log_event(intent, 'risk_check_passed', {})
             
-            # Step 2: Find instrument
+            # Step 2: Select instrument (V1: simple selection)
             symbol = self._select_instrument(intent)
             if not symbol:
                 intent.status = 'failed'
@@ -137,10 +146,9 @@ class ExecutionOrchestrator:
                 return False
             
             intent.target_symbol = symbol
-            intent.status = 'executing'
             intent.save()
             
-            # Step 3: Calculate quantity
+            # Step 3: Get instrument info and calculate qty
             instrument = self.adapter.get_instrument(symbol)
             if not instrument:
                 intent.status = 'failed'
@@ -148,53 +156,105 @@ class ExecutionOrchestrator:
                 intent.save()
                 return False
             
-            # Get current price for sizing
-            # For options, use mark price or theoretical value
             qty = self._calculate_qty(intent, instrument)
             intent.target_qty = qty
             intent.save()
             
-            # Step 4: Place order
-            order = self._place_order(intent, symbol, qty)
+            # Step 4: Place entry order
+            order = self._place_entry_order(intent, symbol, qty)
             if not order:
                 intent.status = 'failed'
-                intent.status_reason = 'Order placement failed'
+                intent.status_reason = 'Entry order placement failed'
                 intent.save()
                 return False
             
-            # Step 5: Update intent status based on order
-            if order.status == 'filled':
-                intent.status = 'filled'
-                intent.completed_at = timezone.now()
-            elif order.status in ('open', 'partial', 'submitted'):
-                # Order accepted but not yet filled - this is success, not failure
-                intent.status = 'executing' if order.status != 'partial' else 'partial'
-            elif order.status in ('rejected', 'cancelled', 'expired'):
-                intent.status = 'failed'
-                intent.status_reason = f'Order {order.status}: {order.error_message}'
-            # For 'pending' status, leave intent as 'executing' - will be updated by reconciliation
-            
+            intent.status = 'entry_submitted'
             intent.save()
-            return intent.status not in ('failed', 'rejected')
             
+            # Step 5: Sync order status (poll for fill)
+            self._sync_order_status(order)
+            
+            if order.status == 'filled':
+                intent.status = 'entry_filled'
+                intent.completed_at = timezone.now()
+                intent.save()
+                self._log_event(intent, 'entry_filled', {
+                    'symbol': symbol,
+                    'qty': str(qty),
+                    'avg_price': str(order.avg_fill_price),
+                })
+                return True
+            elif order.status in ('open', 'partial', 'submitted', 'pending'):
+                # Not filled yet - will be updated by reconciliation
+                self._log_event(intent, 'entry_pending', {'order_status': order.status})
+                return True
+            else:
+                intent.status = 'failed'
+                intent.status_reason = f'Entry order {order.status}'
+                intent.save()
+                return False
+                
         except Exception as e:
             logger.exception(f"Error processing intent {intent.id}: {e}")
             intent.status = 'failed'
             intent.status_reason = str(e)
             intent.save()
-            self._log_event(intent, 'order_error', {'error': str(e)})
+            self._log_event(intent, 'error', {'error': str(e)})
             return False
+    
+    def protect_position(self, intent: ExecutionIntent) -> bool:
+        """
+        Register position for polling-based exit management.
+        Options don't support native SL/TP - manage_exits handles all exits.
+        
+        Returns True if registered successfully.
+        """
+        if intent.status != 'entry_filled':
+            logger.warning(f"Cannot protect intent {intent.id} in status {intent.status}")
+            return False
+        
+        # Check if we have exit parameters
+        has_exit_params = (
+            intent.stop_loss_pct or 
+            intent.take_profit_pct or 
+            intent.max_hold_days
+        )
+        
+        if not has_exit_params:
+            logger.warning(f"Intent {intent.id} has no exit parameters")
+            intent.status = 'unprotected'
+            intent.exit_method = 'none'
+            intent.save()
+            self._log_event(intent, 'no_exit_params', {
+                'warning': 'Position has no SL/TP/time stop defined'
+            })
+            return False
+        
+        # Register for polling-based exits
+        intent.status = 'protected'
+        intent.exit_method = 'polling'
+        intent.protected_at = timezone.now()
+        intent.save()
+        
+        self._log_event(intent, 'polling_exit_registered', {
+            'stop_loss_pct': str(intent.stop_loss_pct) if intent.stop_loss_pct else None,
+            'take_profit_pct': str(intent.take_profit_pct) if intent.take_profit_pct else None,
+            'max_hold_days': intent.max_hold_days,
+            'note': 'Options use polling-based exits via manage_exits command',
+        })
+        
+        logger.info(
+            f"Intent {intent.id} registered for polling exits "
+            f"(SL={intent.stop_loss_pct}, TP={intent.take_profit_pct}, "
+            f"max_days={intent.max_hold_days})"
+        )
+        return True
     
     def _select_instrument(self, intent: ExecutionIntent) -> Optional[str]:
         """
-        Select the best instrument for the intent.
-        For options: find appropriate strike and expiry.
+        Select option instrument based on signal guidance.
+        Options only - no perpetuals.
         """
-        if intent.instrument_type != 'option':
-            # For perpetuals, use standard symbol
-            return self.adapter.normalize_symbol('BTC-USDT-PERP')
-        
-        # Get available options
         instruments = self.adapter.get_instruments(
             instrument_type='option',
             underlying='BTC'
@@ -212,89 +272,75 @@ class ExecutionOrchestrator:
             logger.warning(f"No {target_type} options available")
             return None
         
-        # Select based on DTE and strike guidance from signal
-        # Default: ATM option with 30-60 DTE
+        # Parse DTE from signal
         target_dte = 45
         if intent.signal and intent.signal.dte_range:
-            # Parse DTE range like "45-90d"
             try:
                 dte_str = intent.signal.dte_range.replace('d', '').split('-')
                 target_dte = int(dte_str[0])
             except (ValueError, IndexError):
                 pass
         
-        # Sort by expiry and find closest to target DTE
-        from datetime import timedelta
+        # Find closest to target DTE
         target_expiry = date.today() + timedelta(days=target_dte)
-        
         options_with_expiry = [o for o in options if o.expiry]
+        
         if not options_with_expiry:
             return options[0].symbol if options else None
         
-        # Find closest expiry
-        best_option = min(
+        best = min(
             options_with_expiry,
             key=lambda o: abs((o.expiry.date() if hasattr(o.expiry, 'date') else o.expiry) - target_expiry)
         )
         
-        return best_option.symbol
+        return best.symbol
     
     def _calculate_qty(self, intent: ExecutionIntent, instrument) -> Decimal:
-        """Calculate order quantity based on notional and instrument specs."""
+        """Calculate order quantity based on notional and instrument."""
         target_notional = intent.target_notional_usd or Decimal('1000')
-        
-        # Use lot size as minimum increment
         lot_size = instrument.lot_size or Decimal('0.1')
         min_qty = instrument.min_qty or Decimal('0.1')
         
-        # Try to get actual mark price for better sizing
+        # Try to get mark price
         mark_price = None
         try:
-            # For options, get ticker/mark price
-            if hasattr(self.adapter, 'session') and intent.target_symbol:
-                if self.account.exchange == 'bybit':
-                    ticker = self.adapter.session.get_tickers(
-                        category='option',
-                        symbol=intent.target_symbol
-                    )
-                    if ticker.get('retCode') == 0:
-                        tickers = ticker.get('result', {}).get('list', [])
-                        if tickers:
-                            mark_price = Decimal(tickers[0].get('markPrice', '0'))
+            if self.account.exchange == 'bybit' and intent.target_symbol:
+                ticker = self.adapter.session.get_tickers(
+                    category='option',
+                    symbol=intent.target_symbol
+                )
+                if ticker.get('retCode') == 0:
+                    tickers = ticker.get('result', {}).get('list', [])
+                    if tickers:
+                        mark_price = Decimal(tickers[0].get('markPrice', '0'))
         except Exception as e:
             logger.warning(f"Could not fetch mark price: {e}")
         
         if mark_price and mark_price > 0:
-            # Use actual mark price
             qty = target_notional / mark_price
         else:
-            # Fallback: estimate based on underlying price and typical premium
-            # Options typically trade at 1-10% of underlying for ATM
-            # Use conservative 3% estimate
-            estimated_premium = target_notional * Decimal('0.03')
+            # Fallback: estimate 5% premium
+            estimated_premium = target_notional * Decimal('0.05')
             qty = target_notional / max(estimated_premium, Decimal('100'))
         
-        # Round to lot size
         qty = (qty / lot_size).quantize(Decimal('1')) * lot_size
         qty = max(qty, min_qty)
         
         return qty
     
-    def _place_order(self, intent: ExecutionIntent, symbol: str, qty: Decimal) -> Optional[Order]:
-        """Place order on exchange and persist to database."""
+    def _place_entry_order(self, intent: ExecutionIntent, symbol: str, qty: Decimal) -> Optional[Order]:
+        """Place entry order on exchange."""
         side = 'buy' if intent.direction == 'long' else 'sell'
         
-        # Create order record first
         order = Order.objects.create(
             intent=intent,
             symbol=symbol,
             side=side,
-            order_type='market',  # Start with market orders for simplicity
+            order_type='market',
             qty=qty,
             status='pending',
         )
         
-        # Place on exchange
         request = OrderRequest(
             symbol=symbol,
             side=side,
@@ -311,16 +357,13 @@ class ExecutionOrchestrator:
             order.submitted_at = timezone.now()
             order.save()
             
-            self._log_event(intent, 'order_submitted', {
+            self._log_event(intent, 'entry_order_submitted', {
                 'order_id': str(order.id),
                 'exchange_order_id': response.exchange_order_id,
                 'symbol': symbol,
                 'side': side,
                 'qty': str(qty),
             }, order=order)
-            
-            # Poll for fill status
-            self._sync_order_status(order)
             
             return order
         else:
@@ -329,7 +372,7 @@ class ExecutionOrchestrator:
             order.error_message = response.error_message
             order.save()
             
-            self._log_event(intent, 'order_rejected', {
+            self._log_event(intent, 'entry_order_rejected', {
                 'error_code': response.error_code,
                 'error_message': response.error_message,
             }, order=order)
@@ -345,20 +388,11 @@ class ExecutionOrchestrator:
             order.filled_qty = response.filled_qty
             order.avg_fill_price = response.avg_price
             order.save()
-            
-            if response.status == 'filled':
-                self._log_event(order.intent, 'order_filled', {
-                    'order_id': str(order.id),
-                    'filled_qty': str(response.filled_qty),
-                    'avg_price': str(response.avg_price),
-                }, order=order)
     
     def sync_positions(self) -> list[Position]:
         """Sync all positions from exchange to database."""
         sync_result = self.adapter.get_positions()
         synced = []
-        
-        # Track which symbols we received from exchange
         active_symbols = set()
         
         for pos_info in sync_result.positions:
@@ -383,8 +417,7 @@ class ExecutionOrchestrator:
             )
             synced.append(position)
         
-        # Only zero out positions if API call succeeded
-        # This prevents wiping positions on transient API failures
+        # Only zero out if API succeeded
         if sync_result.success:
             Position.objects.filter(
                 account=self.account,
@@ -399,7 +432,7 @@ class ExecutionOrchestrator:
             )
         else:
             logger.warning(
-                f"Skipping position zero-out for {self.account.name} due to API error: {sync_result.error}"
+                f"Skipping position zero-out for {self.account.name}: {sync_result.error}"
             )
         
         return synced
@@ -421,13 +454,13 @@ class ExecutionOrchestrator:
     
     def reconcile(self) -> dict:
         """
-        Reconciliation job: sync exchange state with database.
-        Returns summary of changes.
+        Reconciliation job: sync exchange state, update intent statuses.
         """
         summary = {
             'positions_synced': 0,
             'orders_updated': 0,
-            'discrepancies': [],
+            'intents_updated': 0,
+            'unprotected_alerts': 0,
         }
         
         # Sync positions
@@ -437,14 +470,34 @@ class ExecutionOrchestrator:
         # Check open orders
         open_orders = Order.objects.filter(
             intent__account=self.account,
-            status__in=['submitted', 'open', 'partial'],
+            status__in=['submitted', 'open', 'partial', 'pending'],
         )
         
         for order in open_orders:
             self._sync_order_status(order)
             summary['orders_updated'] += 1
+            
+            # Update intent if order filled
+            if order.status == 'filled' and order.intent.status == 'entry_submitted':
+                order.intent.status = 'entry_filled'
+                order.intent.completed_at = timezone.now()
+                order.intent.save()
+                summary['intents_updated'] += 1
         
-        # Log reconciliation event
+        # Check for unprotected positions (alert condition)
+        unprotected = ExecutionIntent.objects.filter(
+            account=self.account,
+            status__in=['entry_filled', 'unprotected'],
+            protected_at__isnull=True,
+        )
+        summary['unprotected_alerts'] = unprotected.count()
+        
+        if summary['unprotected_alerts'] > 0:
+            logger.warning(
+                f"ALERT: {summary['unprotected_alerts']} unprotected position(s) "
+                f"for account {self.account.name}"
+            )
+        
         ExecutionEvent.objects.create(
             event_type='reconciliation',
             payload=summary,

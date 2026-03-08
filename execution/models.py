@@ -66,17 +66,31 @@ class ExecutionIntent(models.Model):
     """
     Represents the intent to execute a trade based on a DailySignal.
     Tracks the lifecycle from signal -> risk check -> execution -> completion.
+    
+    Lifecycle states:
+    pending -> risk_check -> approved -> entry_submitted -> entry_filled 
+            -> exits_placed -> protected -> exit_triggered -> closed
+    
+    Or: rejected/failed/cancelled at any point
     """
     STATUS_CHOICES = [
-        ('pending', 'Pending'),           # Created, awaiting processing
-        ('risk_check', 'Risk Check'),     # Undergoing risk validation
-        ('approved', 'Approved'),         # Passed risk checks
-        ('rejected', 'Rejected'),         # Failed risk checks
-        ('executing', 'Executing'),       # Orders being placed
-        ('partial', 'Partially Filled'),  # Some orders filled
-        ('filled', 'Filled'),             # All orders filled
-        ('cancelled', 'Cancelled'),       # Manually cancelled
-        ('failed', 'Failed'),             # Execution failed
+        ('pending', 'Pending'),              # Created, awaiting processing
+        ('risk_check', 'Risk Check'),        # Undergoing risk validation
+        ('approved', 'Approved'),            # Passed risk checks
+        ('rejected', 'Rejected'),            # Failed risk checks
+        ('entry_submitted', 'Entry Submitted'),  # Entry order placed
+        ('entry_filled', 'Entry Filled'),    # Entry order filled, exits pending
+        ('exits_placed', 'Exits Placed'),    # SL/TP orders submitted
+        ('protected', 'Protected'),          # SL/TP confirmed on exchange
+        ('unprotected', 'Unprotected'),      # Position open but no SL/TP (alert!)
+        ('exit_triggered', 'Exit Triggered'),# SL/TP/time stop fired
+        ('closed', 'Closed'),                # Position fully closed
+        ('partial', 'Partially Filled'),     # Some orders filled
+        ('cancelled', 'Cancelled'),          # Manually cancelled
+        ('failed', 'Failed'),                # Execution failed
+        # Legacy states for backward compatibility
+        ('executing', 'Executing'),          # Deprecated: use entry_submitted
+        ('filled', 'Filled'),                # Deprecated: use entry_filled
     ]
     DIRECTION_CHOICES = [
         ('long', 'Long'),
@@ -114,10 +128,29 @@ class ExecutionIntent(models.Model):
     strike_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     expiry_date = models.DateField(null=True, blank=True)
     
+    # Spread-specific (for vertical spreads) - V2
+    spread_long_symbol = models.CharField(
+        max_length=50, blank=True,
+        help_text="Long leg symbol for spreads"
+    )
+    spread_short_symbol = models.CharField(
+        max_length=50, blank=True,
+        help_text="Short leg symbol for spreads"
+    )
+    
     # Risk parameters
     stop_loss_pct = models.DecimalField(max_digits=5, decimal_places=4, null=True, blank=True)
     take_profit_pct = models.DecimalField(max_digits=5, decimal_places=4, null=True, blank=True)
     max_hold_days = models.IntegerField(null=True, blank=True)
+    
+    # Protection tracking
+    exit_method = models.CharField(
+        max_length=20, blank=True,
+        help_text="native (exchange SL/TP) or polling (manage_exits)"
+    )
+    stop_loss_order_id = models.CharField(max_length=50, blank=True)
+    take_profit_order_id = models.CharField(max_length=50, blank=True)
+    protected_at = models.DateTimeField(null=True, blank=True)
     
     # Status tracking
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')

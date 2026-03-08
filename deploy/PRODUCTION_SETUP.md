@@ -56,7 +56,7 @@ curl https://options.somimobile.com/api/v1/health/
 
 ---
 
-## ⏰ Step 3: Set Up Daily Cron Jobs
+## ⏰ Step 3: Set Up Cron Jobs
 
 ```bash
 # Install cron if not present
@@ -72,7 +72,7 @@ crontab -e
 Add these lines:
 ```cron
 # ============================================
-# AI Trader Bot - Daily Pipeline (UTC times)
+# AI Trader Bot - Daily Signal Pipeline (UTC)
 # ============================================
 
 # 00:05 - Refresh Google Sheet
@@ -81,11 +81,27 @@ Add these lines:
 # 00:10 - Sync sheet data to database (last 14 days)
 10 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py sync_sheets >> /var/www/app/logs/cron.log 2>&1
 
-# 00:15 - Rebuild features
-15 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py build_features >> /var/www/app/logs/cron.log 2>&1
+# 00:13 - Rebuild features
+13 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py build_features >> /var/www/app/logs/cron.log 2>&1
 
-# 00:20 - Generate daily trading signal
-20 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py generate_signal >> /var/www/app/logs/cron.log 2>&1
+# 00:16 - Generate daily trading signal
+16 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py generate_signal --notify >> /var/www/app/logs/cron.log 2>&1
+
+# ============================================
+# Execution Layer - Position Management (UTC)
+# ============================================
+
+# Every minute: Alert if any position is unprotected
+* * * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py check_protection >> /var/www/app/logs/execution.log 2>&1
+
+# Every 5 minutes: Check exit rules (stop loss, take profit, time stops)
+*/5 * * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py manage_exits >> /var/www/app/logs/execution.log 2>&1
+
+# Every 5 minutes: Sync positions from exchange
+*/5 * * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py sync_positions --all >> /var/www/app/logs/execution.log 2>&1
+
+# Hourly: Full reconciliation
+0 * * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py reconcile --all >> /var/www/app/logs/execution.log 2>&1
 
 # ============================================
 # Daily Backups (UTC times)
@@ -117,14 +133,27 @@ Add these lines:
 
 ## 📋 Command Reference
 
+### Signal Pipeline
+
 | Command | Purpose | When |
 |---------|---------|------|
+| `refresh_sheet` | Trigger Google Sheet refresh | Daily cron 00:05 |
+| `sync_sheets` | Sync last 14 days | Daily cron 00:10 |
 | `sync_sheets --full-sync` | Sync ALL historical data | First install only |
-| `sync_sheets` | Sync last 14 days | Daily cron |
-| `build_features` | Generate feature CSV | Daily cron |
+| `build_features` | Generate feature CSV | Daily cron 00:13 |
+| `generate_signal --notify` | Create daily signal + notify | Daily cron 00:16 |
 | `train_models --production` | Train ML models | Weekly / first install |
-| `generate_signal` | Create daily trading signal | Daily cron |
-| `refresh_sheet` | Trigger Google Sheet refresh | Daily cron |
+
+### Execution Layer
+
+| Command | Purpose | When |
+|---------|---------|------|
+| `check_protection` | Alert if unprotected positions | Every minute |
+| `manage_exits` | Check & execute exit rules | Every 5 minutes |
+| `sync_positions --all` | Sync positions from exchange | Every 5 minutes |
+| `reconcile --all` | Full state reconciliation | Hourly |
+| `execute_signal --latest` | Execute today's signal | Manual (after signal) |
+| `execute_signal --dry-run` | Preview execution | Manual (test first!) |
 
 ---
 
@@ -138,6 +167,7 @@ sudo systemctl status caddy
 # View logs
 sudo journalctl -u gunicorn -f
 tail -f /var/www/app/logs/cron.log
+tail -f /var/www/app/logs/execution.log
 
 # Check database row count
 python manage.py shell -c "from datafeed.models import RawDailyData; print(f'Rows: {RawDailyData.objects.count()}')"
@@ -150,6 +180,27 @@ sudo systemctl restart gunicorn
 
 # Redeploy (pull + migrate + restart)
 ./deploy.sh
+
+# ============================================
+# Execution Commands
+# ============================================
+
+# Execute today's signal (ALWAYS dry-run first!)
+python manage.py execute_signal --latest --account bybit-prod --dry-run
+python manage.py execute_signal --latest --account bybit-prod
+
+# Check position status
+python manage.py sync_positions --all
+
+# Check for unprotected positions
+python manage.py check_protection
+
+# Manually trigger exit check
+python manage.py manage_exits --dry-run
+python manage.py manage_exits
+
+# Full reconciliation
+python manage.py reconcile --all
 ```
 
 ---
@@ -181,4 +232,44 @@ sudo systemctl restart gunicorn
 | `/var/www/app/venv` | Python virtual environment |
 | `/var/www/app/models/` | Trained ML models |
 | `/var/www/app/logs/` | Application logs |
+| `/var/www/app/logs/cron.log` | Signal pipeline logs |
+| `/var/www/app/logs/execution.log` | Execution layer logs |
+| `/var/www/app/logs/backup.log` | Backup job logs |
+| `/var/www/app/logs/training.log` | Model training logs |
 | `/var/www/app/credentials/` | Google Sheets credentials |
+
+---
+
+## 🔐 Exchange Configuration
+
+Add to `.env.production`:
+
+```bash
+# Bybit (options are USDC-settled)
+BYBIT_API_KEY=your_api_key
+BYBIT_API_SECRET=your_api_secret
+
+# Deribit (optional)
+DERIBIT_API_KEY=your_client_id
+DERIBIT_API_SECRET=your_client_secret
+```
+
+Create exchange account in Django:
+
+```bash
+python manage.py shell
+```
+
+```python
+from execution.models import ExchangeAccount
+
+ExchangeAccount.objects.create(
+    name='bybit-prod',
+    exchange='bybit',
+    api_key_env='BYBIT_API_KEY',
+    api_secret_env='BYBIT_API_SECRET',
+    is_testnet=False,
+    max_position_usd=5000,
+    max_daily_loss_usd=500,
+)
+```

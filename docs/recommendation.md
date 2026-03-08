@@ -4,6 +4,42 @@ Based on backtest hit rates 2017–2025 and current production logic (`services.
 
 ---
 
+## Execution Status
+
+### What's Working (V1)
+
+- ✅ Single-leg options: CALL, PUT, OPTION_CALL, OPTION_PUT, TACTICAL_PUT
+- ✅ Entry order placement on Bybit/Deribit
+- ✅ Polling-based exit management (stop loss, take profit, time stop)
+- ✅ Position sync from exchange
+- ✅ Risk checks (limits, duplicates, conflicts)
+- ✅ Full audit trail (ExecutionEvent)
+- ✅ Unprotected position alerts
+
+### TODO: Remaining Execution Work
+
+| Priority | Task | Status | Notes |
+|----------|------|--------|-------|
+| **P0** | Paper trading full cycle | ❌ | Run testnet for 2 weeks before real capital |
+| **P0** | Verify Bybit option order flow | ❌ | Test actual order placement on testnet |
+| **P0** | Verify Deribit option order flow | ❌ | Test actual order placement on testnet |
+| **P1** | Strike selection from signal | ⚠️ Partial | Uses DTE only, ignores `strike_guidance` |
+| **P1** | Scale-down logic | ⚠️ Partial | `PositionManager` detects but not wired to track "already scaled" |
+| **P1** | Take profit implementation | ⚠️ Partial | Checks P&L % but signal provides `take_profit_pct` as spread target |
+| **P2** | Spread execution (V2) | ❌ | Deferred until single-leg stable |
+| **P2** | Multi-account support | ⚠️ Partial | Models support it, commands need `--all-accounts` |
+| **P3** | Telegram alerts | ❌ | On entry, exit, unprotected |
+| **P3** | Dashboard/monitoring | ❌ | Position status, P&L tracking |
+
+### Known Limitations
+
+1. **5-minute polling gap**: Price can gap through stop between polls. Unavoidable for options.
+2. **No partial fill handling**: Assumes market orders fill completely.
+3. **No OCO orders**: Can't place SL+TP simultaneously (exchange limitation for options).
+4. **Strike selection basic**: Picks closest to target DTE, doesn't optimize for delta/premium.
+
+---
+
 ## Trade Types & Priority
 
 The system evaluates trades in this order — first match wins:
@@ -218,8 +254,44 @@ python manage.py analyze_hit_rate --year 2025
 # Score a CSV dataset
 python manage.py score_dataset
 
-
-
 # Diagnose NO_TRADE days
 python manage.py diagnose_notrade --year 2025
 ```
+
+---
+
+## Execution Commands
+
+```bash
+# Execute signal (always dry-run first!)
+python manage.py execute_signal --latest --account bybit-prod --dry-run
+python manage.py execute_signal --latest --account bybit-prod
+
+# Monitor positions
+python manage.py sync_positions --all
+python manage.py check_protection
+
+# Exit management (runs via cron every 5 min)
+python manage.py manage_exits --dry-run
+python manage.py manage_exits
+
+# Full reconciliation
+python manage.py reconcile --all
+```
+
+---
+
+## Pre-Production Checklist
+
+Before going live with real capital:
+
+- [ ] Run paper trading on testnet for minimum 2 weeks
+- [ ] Verify entry orders fill correctly on both exchanges
+- [ ] Verify exit orders (stop loss) execute correctly
+- [ ] Test position sync accuracy
+- [ ] Test reconciliation catches discrepancies
+- [ ] Set up cron jobs on production server
+- [ ] Set up monitoring/alerts for `check_protection` failures
+- [ ] Configure appropriate `max_position_usd` and `max_daily_loss_usd`
+- [ ] Review and test idempotency (duplicate signal handling)
+- [ ] Document manual intervention procedures
