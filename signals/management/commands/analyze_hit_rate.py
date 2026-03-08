@@ -127,11 +127,17 @@ class Command(BaseCommand):
             MarketState.LATE_DISTRIBUTION_SHORT,
         }
 
-        # Cooldown days
-        core_cooldown_days = 7
-        probe_cooldown_days = 5
-        tactical_cooldown_days = 7
-        option_cooldown_days = 7
+        # Import cooldown constants from services for alignment
+        from signals.services import (
+            CORE_SIGNAL_COOLDOWN_DAYS,
+            PROBE_COOLDOWN_DAYS,
+            TACTICAL_PUT_COOLDOWN_DAYS,
+            OPTION_SIGNAL_COOLDOWN_DAYS,
+        )
+        core_cooldown_days = CORE_SIGNAL_COOLDOWN_DAYS
+        probe_cooldown_days = PROBE_COOLDOWN_DAYS
+        tactical_cooldown_days = TACTICAL_PUT_COOLDOWN_DAYS
+        option_cooldown_days = OPTION_SIGNAL_COOLDOWN_DAYS
 
         # Collect all trades with hit status
         all_trades = []
