@@ -44,6 +44,12 @@ class DailySignalSerializer(serializers.ModelSerializer):
             'dte_range',
             'strategy_rationale',
             'stop_loss',
+            # Numeric execution fields for exchange integration
+            'stop_loss_pct',
+            'scale_down_day',
+            'max_hold_days',
+            'spread_width_pct',
+            'take_profit_pct',
             'created_at',
             'updated_at',
         ]

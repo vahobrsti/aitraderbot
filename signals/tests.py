@@ -850,3 +850,292 @@ class TestOptionSignalTradeDecision(SimpleTestCase):
         decision, _, reasons, _ = self._call_decision()
         self.assertEqual(decision, "NO_TRADE")
         self.assertIn("FUSION_STATE_NO_TRADE", reasons)
+
+
+# =============================================================================
+# OPTIONS STRATEGY & STOP-LOSS TESTS
+# =============================================================================
+
+class TestSpreadGuidance(SimpleTestCase):
+    """Test SpreadGuidance dataclass and format_stop_loss_string."""
+    
+    def test_format_stop_loss_string_basic(self):
+        """format_stop_loss_string produces expected format."""
+        from signals.options import SpreadGuidance, format_stop_loss_string
+        spread = SpreadGuidance(
+            width_pct=0.10,
+            take_profit_pct=0.70,
+            max_hold_days=7,
+            stop_loss_pct=0.04,
+            scale_down_day=5,
+        )
+        result = format_stop_loss_string(spread)
+        self.assertIn("4.0% stop", result)
+        self.assertIn("scale to 25% on day 5", result)
+        self.assertIn("hard cut day 7", result)
+    
+    def test_format_stop_loss_string_zero_stop(self):
+        """format_stop_loss_string returns empty when stop_loss_pct <= 0."""
+        from signals.options import SpreadGuidance, format_stop_loss_string
+        spread = SpreadGuidance(
+            width_pct=0.10,
+            take_profit_pct=0.70,
+            max_hold_days=7,
+            stop_loss_pct=0.0,
+            scale_down_day=5,
+        )
+        result = format_stop_loss_string(spread)
+        self.assertEqual(result, "")
+    
+    def test_format_stop_loss_string_none_spread(self):
+        """format_stop_loss_string returns empty when spread is None."""
+        from signals.options import format_stop_loss_string
+        result = format_stop_loss_string(None)
+        self.assertEqual(result, "")
+
+
+class TestDecisionStrategyMap(SimpleTestCase):
+    """Test DECISION_STRATEGY_MAP has numeric execution fields."""
+    
+    def test_option_call_has_numeric_fields(self):
+        """OPTION_CALL strategy has all numeric execution fields."""
+        from signals.options import DECISION_STRATEGY_MAP
+        strategy = DECISION_STRATEGY_MAP["OPTION_CALL"]
+        self.assertIn("stop_loss_pct", strategy)
+        self.assertIn("scale_down_day", strategy)
+        self.assertIn("max_hold_days", strategy)
+        self.assertIn("spread_width_pct", strategy)
+        self.assertIn("take_profit_pct", strategy)
+        self.assertEqual(strategy["stop_loss_pct"], 0.05)
+        self.assertEqual(strategy["max_hold_days"], 7)
+    
+    def test_option_put_has_numeric_fields(self):
+        """OPTION_PUT strategy has all numeric execution fields."""
+        from signals.options import DECISION_STRATEGY_MAP
+        strategy = DECISION_STRATEGY_MAP["OPTION_PUT"]
+        self.assertEqual(strategy["stop_loss_pct"], 0.05)
+        self.assertEqual(strategy["max_hold_days"], 6)
+    
+    def test_tactical_put_has_numeric_fields(self):
+        """TACTICAL_PUT strategy has all numeric execution fields."""
+        from signals.options import DECISION_STRATEGY_MAP
+        strategy = DECISION_STRATEGY_MAP["TACTICAL_PUT"]
+        self.assertEqual(strategy["stop_loss_pct"], 0.035)
+        self.assertEqual(strategy["max_hold_days"], 6)
+    
+    def test_empty_strategy_has_none_numeric_fields(self):
+        """_EMPTY_STRATEGY has None for all numeric fields."""
+        from signals.options import _EMPTY_STRATEGY
+        self.assertIsNone(_EMPTY_STRATEGY["stop_loss_pct"])
+        self.assertIsNone(_EMPTY_STRATEGY["scale_down_day"])
+        self.assertIsNone(_EMPTY_STRATEGY["max_hold_days"])
+
+
+class TestGetStrategyWithPathRisk(SimpleTestCase):
+    """Test get_strategy_with_path_risk adjustments."""
+    
+    def test_high_invalidation_shifts_strike_to_itm(self):
+        """High invalidation rate (>=30%) shifts strike from SLIGHT_ITM to ITM."""
+        from signals.options import get_strategy_with_path_risk, StrikeSelection
+        from signals.fusion import MarketState
+        
+        # BEAR_PROBE has 55% invalidation rate in PATH_RISK_BY_STATE
+        strategy = get_strategy_with_path_risk(
+            state=MarketState.BEAR_PROBE,
+            invalid_before_hit_rate=0.55,
+            same_day_ambiguous_rate=0.0,
+        )
+        self.assertEqual(strategy.strike_guidance, StrikeSelection.ITM)
+    
+    def test_moderate_invalidation_no_shift(self):
+        """Moderate invalidation rate (<30%) doesn't shift strike."""
+        from signals.options import get_strategy_with_path_risk, StrikeSelection
+        from signals.fusion import MarketState
+        
+        strategy = get_strategy_with_path_risk(
+            state=MarketState.MOMENTUM_CONTINUATION,
+            invalid_before_hit_rate=0.26,
+            same_day_ambiguous_rate=0.0,
+        )
+        self.assertEqual(strategy.strike_guidance, StrikeSelection.SLIGHT_ITM)
+    
+    def test_combined_rate_triggers_shift(self):
+        """Combined inv+amb rate >= 35% triggers shift even if inv alone < 30%."""
+        from signals.options import get_strategy_with_path_risk, StrikeSelection
+        from signals.fusion import MarketState
+        
+        strategy = get_strategy_with_path_risk(
+            state=MarketState.BULL_PROBE,
+            invalid_before_hit_rate=0.20,
+            same_day_ambiguous_rate=0.16,  # combined = 36%
+        )
+        self.assertEqual(strategy.strike_guidance, StrikeSelection.ITM)
+    
+    def test_dte_floor_applied_on_high_risk(self):
+        """High path risk enforces min DTE of 10 and optimal of 14."""
+        from signals.options import get_strategy_with_path_risk
+        from signals.fusion import MarketState
+        
+        strategy = get_strategy_with_path_risk(
+            state=MarketState.BEAR_PROBE,
+            invalid_before_hit_rate=0.55,
+            same_day_ambiguous_rate=0.0,
+        )
+        self.assertGreaterEqual(strategy.dte.min_dte, 10)
+        self.assertGreaterEqual(strategy.dte.optimal_dte, 14)
+
+
+class TestStrategyMapSpreadGuidance(SimpleTestCase):
+    """Test STRATEGY_MAP entries have valid SpreadGuidance."""
+    
+    def test_all_tradeable_states_have_spread(self):
+        """All tradeable states (non-NO_TRADE) have SpreadGuidance."""
+        from signals.options import STRATEGY_MAP
+        from signals.fusion import MarketState
+        
+        for state, strategy in STRATEGY_MAP.items():
+            if state in (MarketState.NO_TRADE, MarketState.TRANSITION_CHOP):
+                self.assertIsNone(strategy.spread)
+            else:
+                self.assertIsNotNone(strategy.spread, f"{state} missing spread")
+                self.assertGreater(strategy.spread.stop_loss_pct, 0, f"{state} has zero stop_loss_pct")
+                self.assertGreater(strategy.spread.max_hold_days, 0, f"{state} has zero max_hold_days")
+    
+    def test_min_dte_exceeds_max_hold_days(self):
+        """min_dte should be >= max_hold_days + 2 buffer for all states."""
+        from signals.options import STRATEGY_MAP
+        from signals.fusion import MarketState
+        
+        for state, strategy in STRATEGY_MAP.items():
+            if state in (MarketState.NO_TRADE, MarketState.TRANSITION_CHOP):
+                continue
+            if strategy.spread is None:
+                continue
+            buffer = strategy.dte.min_dte - strategy.spread.max_hold_days
+            self.assertGreaterEqual(
+                buffer, 2,
+                f"{state}: min_dte={strategy.dte.min_dte} should be >= max_hold_days={strategy.spread.max_hold_days} + 2"
+            )
+
+
+# =============================================================================
+# COOLDOWN CONSTANT ALIGNMENT TESTS
+# =============================================================================
+
+class TestCooldownConstantAlignment(SimpleTestCase):
+    """Test that cooldown constants are consistent across modules."""
+    
+    def test_services_exports_all_cooldown_constants(self):
+        """services.py exports all cooldown constants for import by analysis commands."""
+        from signals.services import (
+            CORE_SIGNAL_COOLDOWN_DAYS,
+            PROBE_COOLDOWN_DAYS,
+            TACTICAL_PUT_COOLDOWN_DAYS,
+            OPTION_SIGNAL_COOLDOWN_DAYS,
+        )
+        self.assertEqual(CORE_SIGNAL_COOLDOWN_DAYS, 7)
+        self.assertEqual(PROBE_COOLDOWN_DAYS, 5)
+        self.assertEqual(TACTICAL_PUT_COOLDOWN_DAYS, 7)
+        self.assertEqual(OPTION_SIGNAL_COOLDOWN_DAYS, 5)
+
+
+# =============================================================================
+# SIGNAL RESULT NUMERIC FIELDS TESTS
+# =============================================================================
+
+class TestSignalResultNumericFields(SimpleTestCase):
+    """Test SignalResult dataclass has numeric execution fields."""
+    
+    def test_signal_result_has_numeric_fields(self):
+        """SignalResult dataclass includes all numeric execution fields."""
+        from signals.services import SignalResult
+        import inspect
+        
+        sig = inspect.signature(SignalResult)
+        params = list(sig.parameters.keys())
+        
+        self.assertIn("stop_loss_pct", params)
+        self.assertIn("scale_down_day", params)
+        self.assertIn("max_hold_days", params)
+        self.assertIn("spread_width_pct", params)
+        self.assertIn("take_profit_pct", params)
+
+
+class TestOptionSignalSoftScaling(SimpleTestCase):
+    """Test that option signals apply soft overlay scaling."""
+    
+    def _make_fusion_no_trade(self):
+        return FusionResult(
+            state=MarketState.NO_TRADE,
+            confidence=Confidence.LOW,
+            score=0,
+            components={},
+        )
+    
+    def _make_tactical_inactive(self):
+        from signals.tactical_puts import TacticalPutResult, TacticalPutStrategy
+        return TacticalPutResult(
+            active=False, strength=0, strategy=TacticalPutStrategy.NONE,
+            size_mult=0.0, dte_mult=1.0, reason="",
+        )
+    
+    def _make_overlay_soft_veto(self):
+        """Overlay with soft veto (size_mult=0.5)."""
+        return OverlayResult(
+            edge_strength=0, long_veto_strength=1, short_veto_strength=0,
+            short_edge_strength=0, extended_dte=False,
+            reduced_size=True, reason="MODERATE VETO",
+        )
+    
+    def test_option_call_applies_soft_scaling(self):
+        """OPTION_CALL applies soft overlay scaling (0.75 * 0.5 = 0.375)."""
+        from signals.services import SignalService, OPTION_SIGNAL_SIZE_MULT
+        
+        svc = SignalService.__new__(SignalService)
+        row = make_row(distribution_pressure_score=0.90)
+        
+        decision, notes, reasons, trace = svc._determine_trade_decision(
+            fusion_result=self._make_fusion_no_trade(),
+            size_mult=0.5,  # soft veto
+            dte_mult=1.0,
+            tactical_result=self._make_tactical_inactive(),
+            p_long=0.5,
+            p_short=0.5,
+            signal_option_call=1,
+            signal_option_put=0,
+            overlay=self._make_overlay_soft_veto(),
+            row=row,
+            option_call_ok=True,
+            option_put_ok=False,
+        )
+        
+        self.assertEqual(decision, "OPTION_CALL")
+        # Check trace shows scaled size
+        self.assertTrue(any("overlay=0.50" in t for t in trace))
+        self.assertTrue(any("effective=0.38" in t or "effective=0.37" in t for t in trace))
+    
+    def test_option_put_applies_soft_scaling(self):
+        """OPTION_PUT applies soft overlay scaling."""
+        from signals.services import SignalService
+        
+        svc = SignalService.__new__(SignalService)
+        row = make_row(distribution_pressure_score=0.90)
+        
+        decision, notes, reasons, trace = svc._determine_trade_decision(
+            fusion_result=self._make_fusion_no_trade(),
+            size_mult=0.5,  # soft veto
+            dte_mult=1.0,
+            tactical_result=self._make_tactical_inactive(),
+            p_long=0.5,
+            p_short=0.5,
+            signal_option_call=0,
+            signal_option_put=1,
+            overlay=self._make_overlay_soft_veto(),
+            row=row,
+            option_call_ok=False,
+            option_put_ok=True,
+        )
+        
+        self.assertEqual(decision, "OPTION_PUT")
+        # Check trace shows scaled size
+        self.assertTrue(any("overlay=0.50" in t for t in trace))
