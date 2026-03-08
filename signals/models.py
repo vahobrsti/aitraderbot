@@ -138,6 +138,33 @@ class DailySignal(models.Model):
         default="",
         help_text="Stop loss guidance (e.g., 4.0% stop | scale to 25% on day 5 | hard cut day 6)"
     )
+    
+    # Numeric execution fields for exchange integration (Bybit/Deribit)
+    stop_loss_pct = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Stop loss as decimal (e.g., 0.04 = 4% adverse move triggers exit)"
+    )
+    scale_down_day = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Day to reduce position to 25% (time-based scale-down)"
+    )
+    max_hold_days = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Hard time stop: close all remaining on this day"
+    )
+    spread_width_pct = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Spread width as decimal (e.g., 0.10 = 10% width)"
+    )
+    take_profit_pct = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Take profit target as decimal (e.g., 0.70 = 70% of max spread value)"
+    )
 
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
