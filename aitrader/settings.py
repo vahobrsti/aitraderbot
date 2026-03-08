@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     'ml',
     'api',
     'notifications',
+    'execution',
 ]
 
 MIDDLEWARE = [
