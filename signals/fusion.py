@@ -13,7 +13,7 @@ import pandas as pd
 from enum import Enum
 from dataclasses import dataclass
 from typing import Optional
-from signals.research.bucket_mapping import map_mvrv_60d_bucket
+from signals.research.bucket_mapping import map_mvrv_60d_bucket, map_whale_bucket
 
 
 class MarketState(Enum):
@@ -232,12 +232,16 @@ def fuse_signals(row: pd.Series) -> FusionResult:
         _m60 = row.get('mvrv_60d', None)
         components['mvrv_60d_raw'] = float(_m60) if _m60 is not None and not pd.isna(_m60) else None
         components['mvrv_60d_bucket'] = map_mvrv_60d_bucket(row)
-    else:
-        components['mdia_strong'] = int(row.get('mdia_regime_strong_inflow', 0) == 1)
-        components['whale_sponsored'] = int(row.get('whale_regime_broad_accum', 0) == 1 or row.get('whale_regime_strategic_accum', 0) == 1)
-        components['whale_mixed'] = int(row.get('whale_regime_mixed', 0) == 1)
-        components['whale_distrib'] = int(row.get('whale_regime_distribution', 0) == 1 or row.get('whale_regime_distribution_strong', 0) == 1)
-        components['whale_distrib_strong'] = int(row.get('whale_regime_distribution_strong', 0) == 1)
+    
+    # mdia_strong is always useful for display
+    components['mdia_strong'] = int(row.get('mdia_regime_strong_inflow', 0) == 1)
+        
+    # Whale activity (informational in bear mode, decision-relevant in normal mode)
+    components['whale_bucket'] = map_whale_bucket(row)
+    components['whale_sponsored'] = int(row.get('whale_regime_broad_accum', 0) == 1 or row.get('whale_regime_strategic_accum', 0) == 1)
+    components['whale_mixed'] = int(row.get('whale_regime_mixed', 0) == 1)
+    components['whale_distrib'] = int(row.get('whale_regime_distribution', 0) == 1 or row.get('whale_regime_distribution_strong', 0) == 1)
+    components['whale_distrib_strong'] = int(row.get('whale_regime_distribution_strong', 0) == 1)
         
     components['mvrv_macro_bullish'] = int(row.get('mvrv_ls_regime_call_confirm', 0) == 1 or row.get('mvrv_ls_regime_call_confirm_recovery', 0) == 1 or row.get('mvrv_ls_regime_call_confirm_trend', 0) == 1)
     components['mvrv_macro_bearish'] = int(row.get('mvrv_ls_regime_put_confirm', 0) == 1 or row.get('mvrv_ls_regime_bear_continuation', 0) == 1 or row.get('mvrv_ls_early_rollover', 0) == 1 or row.get('mvrv_ls_weak_downtrend', 0) == 1 or row.get('mvrv_ls_regime_distribution_warning', 0) == 1)
