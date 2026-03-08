@@ -351,6 +351,11 @@ DECISION_STRATEGY_MAP = {
         "dte_range": "7-14d",
         "rationale": "Rule: MVRV cheap + Sentiment fear. Exploratory long probe.",
         "stop_loss": format_stop_loss_string(_OPTION_CALL_SPREAD),
+        "stop_loss_pct": _OPTION_CALL_SPREAD.stop_loss_pct,
+        "scale_down_day": _OPTION_CALL_SPREAD.scale_down_day,
+        "max_hold_days": _OPTION_CALL_SPREAD.max_hold_days,
+        "spread_width_pct": _OPTION_CALL_SPREAD.width_pct,
+        "take_profit_pct": _OPTION_CALL_SPREAD.take_profit_pct,
     },
     "OPTION_PUT": {
         "primary_structures": "long_put, put_spread",
@@ -358,6 +363,11 @@ DECISION_STRATEGY_MAP = {
         "dte_range": "7-14d",
         "rationale": "Rule: MVRV overheated + Sentiment greed. Defined-risk short.",
         "stop_loss": format_stop_loss_string(_OPTION_PUT_SPREAD),
+        "stop_loss_pct": _OPTION_PUT_SPREAD.stop_loss_pct,
+        "scale_down_day": _OPTION_PUT_SPREAD.scale_down_day,
+        "max_hold_days": _OPTION_PUT_SPREAD.max_hold_days,
+        "spread_width_pct": _OPTION_PUT_SPREAD.width_pct,
+        "take_profit_pct": _OPTION_PUT_SPREAD.take_profit_pct,
     },
     "TACTICAL_PUT": {
         "primary_structures": "put_spread",
@@ -365,6 +375,11 @@ DECISION_STRATEGY_MAP = {
         "dte_range": "7-12d",
         "rationale": "Hedge inside bull: MVRV-60d near-peak & rolling over.",
         "stop_loss": format_stop_loss_string(_TACTICAL_PUT_SPREAD),
+        "stop_loss_pct": _TACTICAL_PUT_SPREAD.stop_loss_pct,
+        "scale_down_day": _TACTICAL_PUT_SPREAD.scale_down_day,
+        "max_hold_days": _TACTICAL_PUT_SPREAD.max_hold_days,
+        "spread_width_pct": _TACTICAL_PUT_SPREAD.width_pct,
+        "take_profit_pct": _TACTICAL_PUT_SPREAD.take_profit_pct,
     },
 }
 
@@ -373,6 +388,12 @@ _EMPTY_STRATEGY = {
     "strike_guidance": "",
     "dte_range": "",
     "rationale": "",
+    "stop_loss": "",
+    "stop_loss_pct": None,
+    "scale_down_day": None,
+    "max_hold_days": None,
+    "spread_width_pct": None,
+    "take_profit_pct": None,
 }
 
 
