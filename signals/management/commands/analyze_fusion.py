@@ -851,6 +851,7 @@ class Command(BaseCommand):
     def _show_explain(self, df: pd.DataFrame, target_date: str = None):
         """Show detailed per-horizon breakdown explaining fusion score for a specific date."""
         from datetime import datetime
+        from datafeed.models import RawDailyData
         
         # Get target row
         if target_date:
@@ -875,6 +876,17 @@ class Command(BaseCommand):
         else:
             row = df.iloc[-1]
             date_str = str(df.index[-1])[:10]
+        
+        # Fetch price data from RawDailyData
+        try:
+            raw_data = RawDailyData.objects.get(date=date_str)
+            btc_close = raw_data.btc_close
+            mvrv_usd_7d = raw_data.mvrv_usd_7d
+            mvrv_usd_30d = raw_data.mvrv_usd_30d
+        except RawDailyData.DoesNotExist:
+            btc_close = None
+            mvrv_usd_7d = None
+            mvrv_usd_30d = None
         
         # Compute fusion result
         result = fuse_signals(row)
@@ -905,6 +917,21 @@ class Command(BaseCommand):
         self.stdout.write(f"FUSION EXPLANATION: {date_str} | {result.state.value.upper()}")
         self.stdout.write("═" * 70)
         
+        # === PRICE & MVRV CONTEXT ===
+        self.stdout.write("\nPRICE & VALUATION CONTEXT:")
+        if btc_close is not None:
+            self.stdout.write(f"├── BTC Close:    ${btc_close:,.2f}")
+        else:
+            self.stdout.write(f"├── BTC Close:    N/A")
+        if mvrv_usd_7d is not None:
+            self.stdout.write(f"├── MVRV-7d:      {mvrv_usd_7d:.4f}")
+        else:
+            self.stdout.write(f"├── MVRV-7d:      N/A")
+        if mvrv_usd_30d is not None:
+            self.stdout.write(f"└── MVRV-30d:     {mvrv_usd_30d:.4f}")
+        else:
+            self.stdout.write(f"└── MVRV-30d:     N/A")
+        
         # === OVERALL SCORE ===
         self.stdout.write(f"\nCONFIDENCE SCORE: {score:+d} → {result.confidence.value.upper()}")
         
@@ -916,6 +943,8 @@ class Command(BaseCommand):
         if is_bear_mode:
             m60_bucket = c.get('mvrv_60d_bucket', 'unknown')
             self.stdout.write(f"├── MVRV-60d: ({m60_bucket})")
+            whale_label = c.get('whale_bucket', 'unknown')
+            self.stdout.write(f"├── Whale:    ({whale_label}) [info only]")
         else:
             whale_label = 'strong_distrib' if c.get('whale_distrib_strong') else 'distrib' if c.get('whale_distrib') else 'sponsored' if c.get('whale_sponsored') else 'mixed' if c.get('whale_mixed') else 'neutral'
             self.stdout.write(f"├── Whale:    ({whale_label})")
@@ -1012,6 +1041,35 @@ class Command(BaseCommand):
             self.stdout.write(f"Ratio:  {mvrv_val:.3f}")
             self.stdout.write(f"Bucket: {mvrv_bucket.upper()}")
             self.stdout.write(f"Cycle Day: {c.get('cycle_day', 'N/A')}")
+            
+            # === WHALE BREAKDOWN (Informational in Bear Mode) ===
+            self.stdout.write("\n" + "─" * 70)
+            self.stdout.write("WHALE ACTIVITY (Informational - not in decision tree)")
+            self.stdout.write("─" * 70)
+            whale_bucket = c.get('whale_bucket', 'unknown')
+            self.stdout.write(f"Whale Bucket: {whale_bucket.upper()}")
+            
+            whale_horizons = [1, 2, 4, 7]
+            
+            for group, group_label in [('mega', 'MEGA WHALES (100-10k BTC)'), ('small', 'SMALL WHALES (1-100 BTC)')]:
+                self.stdout.write(f"\n{group_label}")
+                
+                buckets = []
+                for h in whale_horizons:
+                    bucket_col = f'whale_{group}_bucket_{h}d'
+                    z_col = f'whale_{group}_delta_z_{h}d'
+                    if bucket_col in row:
+                        bucket = int(row.get(bucket_col, 0))
+                        z = row.get(z_col, 0)
+                        z_str = f"z={z:6.2f}" if not pd.isna(z) else "z=  N/A"
+                        prefix = "├──" if h != whale_horizons[-1] else "└──"
+                        self.stdout.write(f"{prefix} {h}d: {fmt_bucket(bucket):>3} ({bucket_label(bucket):12}) {z_str}")
+                        buckets.append(bucket)
+                
+                if buckets:
+                    accum_count = sum(1 for b in buckets if b > 0)
+                    distrib_count = sum(1 for b in buckets if b < 0)
+                    self.stdout.write(f"    accum_count={accum_count}, distrib_count={distrib_count}")
         
         # === MVRV-LS BREAKDOWN ===
         self.stdout.write("\n" + "─" * 70)
