@@ -578,6 +578,8 @@ reconcile (cron hourly)
 | `closed` | Position fully closed |
 | `failed` | Execution error |
 
+See [execution/docs/SIGNAL_TO_ORDER_FLOW.md](execution/docs/SIGNAL_TO_ORDER_FLOW.md) for detailed code path documentation.
+
 ### Architecture
 
 ```
