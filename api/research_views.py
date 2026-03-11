@@ -138,8 +138,13 @@ class FusionExplainView(BaseResearchAPIView):
     """GET /api/v1/fusion/explain/"""
     
     def get(self, request):
-        rt, error_response = self.get_research_table(request)
-        if error_response: return error_response
+        # Load the raw features CSV (needed for fuse_signals which requires cycle_days_since_halving)
+        csv_path = Path(settings.BASE_DIR) / 'features_14d_5pct.csv'
+        if not csv_path.exists():
+            return Response(
+                {"error": f"Feature CSV not found at {csv_path}"},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
         date_str = request.query_params.get('date')
         if not date_str:
@@ -152,16 +157,38 @@ class FusionExplainView(BaseResearchAPIView):
         from signals.fusion import fuse_signals
         
         try:
+            df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
             target_date = pd.to_datetime(date_str)
-            # Find the row closest to or matching the date
-            if target_date not in rt.index:
+            
+            # Normalize index for comparison
+            df.index = pd.to_datetime(df.index).normalize()
+            target_date = target_date.normalize()
+            
+            if target_date not in df.index:
                 return Response(
                     {"error": f"Date {date_str} not found in feature dataset"},
                     status=status.HTTP_404_NOT_FOUND
                 )
                 
-            row = rt.loc[target_date]
+            # Use the raw features row (has cycle_days_since_halving for bear mode detection)
+            row = df.loc[target_date]
             fusion_result = fuse_signals(row)
+            
+            # Fetch price data from RawDailyData
+            from datafeed.models import RawDailyData
+            try:
+                raw_data = RawDailyData.objects.get(date=target_date.date())
+                price_context = {
+                    "btc_close": raw_data.btc_close,
+                    "mvrv_usd_7d": raw_data.mvrv_usd_7d,
+                    "mvrv_usd_30d": raw_data.mvrv_usd_30d,
+                }
+            except RawDailyData.DoesNotExist:
+                price_context = {
+                    "btc_close": None,
+                    "mvrv_usd_7d": None,
+                    "mvrv_usd_30d": None,
+                }
             
             from signals.fusion import build_explain_trace
             trace = build_explain_trace(row, fusion_result)
@@ -171,6 +198,7 @@ class FusionExplainView(BaseResearchAPIView):
                     "date": date_str,
                     "model_version": "v1-static"
                 },
+                "price_context": price_context,
                 "result": {
                     "state": fusion_result.state.value,
                     "confidence": fusion_result.confidence.value,
