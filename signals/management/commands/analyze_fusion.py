@@ -851,6 +851,7 @@ class Command(BaseCommand):
     def _show_explain(self, df: pd.DataFrame, target_date: str = None):
         """Show detailed per-horizon breakdown explaining fusion score for a specific date."""
         from datetime import datetime
+        from datafeed.models import RawDailyData
         
         # Get target row
         if target_date:
@@ -875,6 +876,17 @@ class Command(BaseCommand):
         else:
             row = df.iloc[-1]
             date_str = str(df.index[-1])[:10]
+        
+        # Fetch price data from RawDailyData
+        try:
+            raw_data = RawDailyData.objects.get(date=date_str)
+            btc_close = raw_data.btc_close
+            mvrv_usd_7d = raw_data.mvrv_usd_7d
+            mvrv_usd_30d = raw_data.mvrv_usd_30d
+        except RawDailyData.DoesNotExist:
+            btc_close = None
+            mvrv_usd_7d = None
+            mvrv_usd_30d = None
         
         # Compute fusion result
         result = fuse_signals(row)
@@ -904,6 +916,21 @@ class Command(BaseCommand):
         self.stdout.write("\n" + "═" * 70)
         self.stdout.write(f"FUSION EXPLANATION: {date_str} | {result.state.value.upper()}")
         self.stdout.write("═" * 70)
+        
+        # === PRICE & MVRV CONTEXT ===
+        self.stdout.write("\nPRICE & VALUATION CONTEXT:")
+        if btc_close is not None:
+            self.stdout.write(f"├── BTC Close:    ${btc_close:,.2f}")
+        else:
+            self.stdout.write(f"├── BTC Close:    N/A")
+        if mvrv_usd_7d is not None:
+            self.stdout.write(f"├── MVRV-7d:      {mvrv_usd_7d:.4f}")
+        else:
+            self.stdout.write(f"├── MVRV-7d:      N/A")
+        if mvrv_usd_30d is not None:
+            self.stdout.write(f"└── MVRV-30d:     {mvrv_usd_30d:.4f}")
+        else:
+            self.stdout.write(f"└── MVRV-30d:     N/A")
         
         # === OVERALL SCORE ===
         self.stdout.write(f"\nCONFIDENCE SCORE: {score:+d} → {result.confidence.value.upper()}")
