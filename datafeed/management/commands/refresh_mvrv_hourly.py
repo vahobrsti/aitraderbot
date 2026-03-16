@@ -67,9 +67,9 @@ class Command(BaseCommand):
         except Exception as e:
             raise RuntimeError(f"Failed to read mvrv_usd_60d sheet: {e}")
 
-        # Step 3: Get current hour and latest value
+        # Step 3: Get current hour (UTC) and latest value
         now = datetime.datetime.utcnow()
-        hour_str = now.strftime("%Y-%m-%d %H:00")
+        hour_str = now.strftime("%Y-%m-%d %H:00 UTC")
 
         # Get the latest value (last row with a value)
         latest_value = None
