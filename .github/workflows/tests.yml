@@ -28,5 +28,6 @@ jobs:
         env:
           SECRET_KEY: 'test-secret-key-for-ci'
           DEBUG: 'True'
+          USE_SQLITE: '1'
         run: |
           python manage.py test signals --verbosity=2

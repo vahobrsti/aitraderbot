@@ -14,7 +14,7 @@ from io import StringIO
 
 import pandas as pd
 from django.core.management import call_command
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from signals.fusion import MarketState, fuse_signals
 from signals.tests import make_row
@@ -333,7 +333,7 @@ class TestAnalyzeFusionHitRate(SimpleTestCase):
                          "no_trade should not appear in hit-rate table")
 
 
-class TestAnalyzeFusionExplainTrace(SimpleTestCase):
+class TestAnalyzeFusionExplainTrace(TestCase):
     """Explain trace must match current fusion.py classification rules."""
 
     def test_explain_runs(self):
