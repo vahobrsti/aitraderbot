@@ -383,6 +383,30 @@ DECISION_STRATEGY_MAP = {
     },
 }
 
+# MVRV Short: Bear market tactical short with DCA
+# 33% initial entry, 67% DCA if price rises 4% against
+# Target: 4% drop within 5 days
+_MVRV_SHORT_SPREAD = SpreadGuidance(
+    width_pct=0.0,  # Not a spread, direct short
+    take_profit_pct=0.04,  # 4% target
+    max_hold_days=5,
+    stop_loss_pct=0.04,  # DCA trigger (not a stop, but price rise threshold)
+    scale_down_day=0,  # N/A - DCA strategy instead
+)
+
+DECISION_STRATEGY_MAP["MVRV_SHORT"] = {
+    "primary_structures": "short_perp, short_future",
+    "strike_guidance": "n/a",
+    "dte_range": "5d max hold",
+    "rationale": "Bear mode + MVRV 7d >= 1.02 + MVRV 60d >= 1.0. Short-term greed without capitulation cushion.",
+    "stop_loss": "DCA at +4%, target -4%, 5d window",
+    "stop_loss_pct": _MVRV_SHORT_SPREAD.stop_loss_pct,
+    "scale_down_day": None,  # DCA strategy instead
+    "max_hold_days": _MVRV_SHORT_SPREAD.max_hold_days,
+    "spread_width_pct": None,
+    "take_profit_pct": _MVRV_SHORT_SPREAD.take_profit_pct,
+}
+
 _EMPTY_STRATEGY = {
     "primary_structures": "",
     "strike_guidance": "",

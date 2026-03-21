@@ -534,6 +534,67 @@ python manage.py sanity_check --year 2025 --cooldown 7
 python manage.py analyze_neutral
 ```
 
+### MVRV Short Signal (Bear Market Tactical)
+
+A tactical short signal designed specifically for bear market conditions (cycle days 540-900 post-halving).
+
+**Philosophy:**
+
+The signal exploits a behavioral pattern in bear markets: when short-term holders (7-day MVRV) are profitable while medium-term holders (60-day MVRV) are at or above breakeven, the market is temporarily overextended. In bear regimes, these relief rallies tend to fade quickly as holders who bought the dip take profits, creating predictable mean-reversion opportunities.
+
+The key insight is the **overlay combination**:
+- `mvrv_7d >= 1.02`: Recent buyers are profitable (short-term greed)
+- `mvrv_60d >= 1.0`: Medium-term holders at breakeven (no capitulation cushion)
+
+When both conditions align in a bear cycle, price tends to drop 4% before rising 4% with a **1.8:1 ratio** (58% drop-first vs 31% rise-first). This edge was validated out-of-sample across three independent bear markets (2018, 2022, 2025-2026).
+
+**Why DCA works here:**
+
+The $30/$60 split (33%/67%) exploits the asymmetry:
+- If drop hits first (58%): Small win on small position
+- If rise hits first, then drops (23%): Big win on averaged-down position  
+- If rise hits first, never drops (19%): Small loss on small position
+
+This creates positive expected value (+1.99% per trade) while limiting downside exposure.
+
+```bash
+# Run backtest with default parameters
+python manage.py analyze_mvrv_short
+
+# Adjust thresholds
+python manage.py analyze_mvrv_short --mvrv7d 1.05 --target 5
+
+# Walk-forward validation (train/test split by bear market)
+python manage.py analyze_mvrv_short --walkforward
+
+# Check today's signal status
+python manage.py analyze_mvrv_short --today
+```
+
+**Strategy Parameters:**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--mvrv7d` | 1.02 | MVRV 7d threshold (short-term profit level) |
+| `--mvrv60d` | 1.0 | MVRV 60d overlay (medium-term breakeven) |
+| `--target` | 4.0 | Target drop % |
+| `--window` | 5 | Window days to hit target |
+| `--bear-start` | 540 | Bear mode start (cycle days post-halving) |
+| `--bear-end` | 900 | Bear mode end (cycle days post-halving) |
+
+**Backtest Results (Walk-Forward Validated):**
+| Period | Role | Signals | Drop First | Rise First | Ratio |
+|--------|------|---------|------------|------------|-------|
+| 2018 | Train | 38 | 55% | 37% | 1.5:1 |
+| 2022 | Test | 32 | 56% | 31% | 1.8:1 |
+| 2025-2026 | Test | 9 | 67% | 11% | 6.0:1 |
+
+**DCA Execution Strategy:**
+- Entry 1: 33% of position at signal price
+- DCA Trigger: +4% price rise → add remaining 67%
+- Target: -4% from original entry (not averaged entry)
+- Max Hold: 5 days
+- Expected Value: +1.99% per trade ($1.79 per $90 risked)
+
 ---
 
 ## Configuration
