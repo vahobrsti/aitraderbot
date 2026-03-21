@@ -154,7 +154,8 @@ class FusionExplainView(BaseResearchAPIView):
             )
             
         import pandas as pd
-        from signals.fusion import fuse_signals
+        from signals.fusion import fuse_signals, build_explain_trace
+        from signals.mvrv_short import check_mvrv_short_signal, get_signal_summary
         
         try:
             df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
@@ -192,6 +193,9 @@ class FusionExplainView(BaseResearchAPIView):
             
             from signals.fusion import build_explain_trace
             trace = build_explain_trace(row, fusion_result)
+            
+            # Check MVRV short signal
+            mvrv_short_signal = check_mvrv_short_signal(row)
 
             return Response({
                 "meta": {
@@ -205,7 +209,8 @@ class FusionExplainView(BaseResearchAPIView):
                     "score": fusion_result.score,
                     "components": fusion_result.components,
                     "trace": trace
-                }
+                },
+                "mvrv_short_signal": get_signal_summary(mvrv_short_signal)
             })
         except Exception as e:
             return Response(
