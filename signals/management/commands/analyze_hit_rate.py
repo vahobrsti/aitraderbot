@@ -133,11 +133,13 @@ class Command(BaseCommand):
             PROBE_COOLDOWN_DAYS,
             TACTICAL_PUT_COOLDOWN_DAYS,
             OPTION_SIGNAL_COOLDOWN_DAYS,
+            MVRV_SHORT_COOLDOWN_DAYS,
         )
         core_cooldown_days = CORE_SIGNAL_COOLDOWN_DAYS
         probe_cooldown_days = PROBE_COOLDOWN_DAYS
         tactical_cooldown_days = TACTICAL_PUT_COOLDOWN_DAYS
         option_cooldown_days = OPTION_SIGNAL_COOLDOWN_DAYS
+        mvrv_short_cooldown_days = MVRV_SHORT_COOLDOWN_DAYS
 
         # Collect all trades with hit status
         all_trades = []
@@ -177,6 +179,7 @@ class Command(BaseCommand):
             last_tactical_date = None
             last_option_call_date = None
             last_option_put_date = None
+            last_mvrv_short_date = None
 
             for date, row in df_year.iterrows():
                 result = fuse_signals(row)
@@ -288,11 +291,15 @@ class Command(BaseCommand):
                         })
                         last_tactical_date = date
 
-                # === OPTION SIGNAL CALL (tracked independently, like tactical puts) ===
+                # === OPTION SIGNAL CALL (only when fusion = NO_TRADE, as fallback) ===
                 signal_call = int(row.get("signal_option_call", 0))
                 signal_put = int(row.get("signal_option_put", 0))
 
-                if signal_call == 1:
+                # Only fire option signals when fusion didn't produce a trade
+                fusion_traded = (result.state in long_states and size_mult > 0 and not long_veto and can_long_fire) or \
+                               (result.state in short_states and size_mult > 0 and not short_veto and can_short_fire)
+
+                if signal_call == 1 and not fusion_traded:
                     cooldown_ok = no_cooldown or last_option_call_date is None or (date - last_option_call_date).days >= option_cooldown_days
                     overlay_ok = no_overlay or size_mult > 0
                     if cooldown_ok and overlay_ok:
@@ -311,11 +318,13 @@ class Command(BaseCommand):
                         })
                         last_option_call_date = date
 
-                # === OPTION SIGNAL PUT ===
-                if signal_put == 1:
-                    cooldown_ok = no_cooldown or last_option_put_date is None or (date - last_option_put_date).days >= option_cooldown_days
-                    overlay_ok = no_overlay or size_mult > 0
-                    if cooldown_ok and overlay_ok:
+                # === OPTION SIGNAL PUT (only when fusion didn't trade and no OPTION_CALL) ===
+                option_call_fired = signal_call == 1 and not fusion_traded and cooldown_ok and overlay_ok
+                option_put_fired = False
+                if signal_put == 1 and not fusion_traded and not option_call_fired:
+                    cooldown_ok_put = no_cooldown or last_option_put_date is None or (date - last_option_put_date).days >= option_cooldown_days
+                    overlay_ok_put = no_overlay or size_mult > 0
+                    if cooldown_ok_put and overlay_ok_put:
                         # EFB veto for OPTION_PUT
                         efb_veto, _ = compute_efb_veto(row)
                         if efb_veto < 1:
@@ -333,6 +342,31 @@ class Command(BaseCommand):
                                 "p_short": row["p_short"],
                             })
                             last_option_put_date = date
+                            option_put_fired = True
+
+                # === MVRV SHORT (only when fusion didn't trade and no option signals fired) ===
+                # In bear market, "no signal" is TRANSITION_CHOP, not NO_TRADE
+                fusion_no_signal = result.state in (MarketState.NO_TRADE, MarketState.TRANSITION_CHOP)
+                if fusion_no_signal and not option_call_fired and not option_put_fired:
+                    from signals.mvrv_short import check_mvrv_short_signal
+                    mvrv_signal = check_mvrv_short_signal(row)
+                    if mvrv_signal.active:
+                        mvrv_cooldown_ok = no_cooldown or last_mvrv_short_date is None or (date - last_mvrv_short_date).days >= mvrv_short_cooldown_days
+                        if mvrv_cooldown_ok:
+                            hit = int(row.get("label_good_move_short", 0))
+                            all_trades.append({
+                                "date": date_str,
+                                "year": year,
+                                "type": "MVRV_SHORT",
+                                "direction": "SHORT",
+                                "state": result.state.value,
+                                "score": result.score,
+                                "source": "mvrv_rule",
+                                "hit": hit,
+                                "p_long": row["p_long"],
+                                "p_short": row["p_short"],
+                            })
+                            last_mvrv_short_date = date
 
         # === PRINT RESULTS ===
         if not all_trades:
@@ -383,7 +417,7 @@ class Command(BaseCommand):
         self.stdout.write("HIT RATE BY TRADE TYPE")
         self.stdout.write(f"{'=' * 100}")
 
-        for trade_type in ["LONG", "BULL_PROBE", "PRIMARY_SHORT", "BEAR_PROBE", "TACTICAL_PUT", "OPTION_CALL", "OPTION_PUT"]:
+        for trade_type in ["LONG", "BULL_PROBE", "PRIMARY_SHORT", "BEAR_PROBE", "TACTICAL_PUT", "OPTION_CALL", "OPTION_PUT", "MVRV_SHORT"]:
             type_df = trades_df[trades_df["type"] == trade_type]
             if len(type_df) > 0:
                 t_total = len(type_df)
