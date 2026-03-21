@@ -17,11 +17,14 @@ from signals.fusion import fuse_signals, MarketState
 from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier, compute_efb_veto
 from signals.tactical_puts import tactical_put_inside_bull
 from signals.options import get_strategy_with_path_risk, get_decision_strategy_summary, DECISION_STRATEGY_MAP, format_stop_loss_string
+from signals.mvrv_short import check_mvrv_short_signal
 
 # Cooldown constants — single source of truth for live + backtest alignment
 # These values must match analyze_path_stats.py for calibration consistency
 OPTION_SIGNAL_COOLDOWN_DAYS = 5   # was 7 — OPTION_CALL hits 81%, let more through
 OPTION_SIGNAL_SIZE_MULT = 0.75   # base size for option signals (before overlay scaling)
+MVRV_SHORT_COOLDOWN_DAYS = 5     # cooldown for MVRV short signal
+MVRV_SHORT_SIZE_MULT = 0.33      # initial entry size (33% of position, DCA adds 67%)
 CORE_SIGNAL_COOLDOWN_DAYS = 7
 PROBE_COOLDOWN_DAYS = 5
 TACTICAL_PUT_COOLDOWN_DAYS = 7
@@ -191,14 +194,31 @@ class SignalService:
         option_call_ok = signal_option_call == 1 and self._check_option_cooldown(latest_date, "OPTION_CALL")
         option_put_ok = signal_option_put == 1 and self._check_option_cooldown(latest_date, "OPTION_PUT")
         
+        # 9) MVRV Short signal check (bear market tactical short)
+        # Add raw MVRV data to row for signal check
+        try:
+            raw_data = RawDailyData.objects.get(date=latest_date)
+            row_with_mvrv = row.copy()
+            row_with_mvrv['mvrv_usd_7d'] = raw_data.mvrv_usd_7d
+            row_with_mvrv['mvrv_usd_60d'] = raw_data.mvrv_usd_60d
+            row_with_mvrv['btc_close'] = raw_data.btc_close
+        except RawDailyData.DoesNotExist:
+            row_with_mvrv = row
+        
+        mvrv_short_signal = check_mvrv_short_signal(row_with_mvrv)
+        mvrv_short_ok = mvrv_short_signal.active and self._check_trade_cooldown(
+            latest_date, "MVRV_SHORT", MVRV_SHORT_COOLDOWN_DAYS
+        )
+        
         trade_decision, trade_notes, no_trade_reasons, decision_trace = self._determine_trade_decision(
             fusion_result, size_mult, dte_mult, tactical_result, p_long, p_short,
             signal_option_call, signal_option_put, overlay, row,
             core_call_ok=core_call_ok, core_put_ok=core_put_ok,
             option_call_ok=option_call_ok, option_put_ok=option_put_ok,
+            mvrv_short_ok=mvrv_short_ok, mvrv_short_signal=mvrv_short_signal,
         )
         
-        # 9) Get strategy recommendation based on final trade decision
+        # 10) Get strategy recommendation based on final trade decision
         if trade_decision in DECISION_STRATEGY_MAP:
             strategy_summary = get_decision_strategy_summary(trade_decision)
         else:
@@ -212,6 +232,10 @@ class SignalService:
         elif trade_decision in ("OPTION_CALL", "OPTION_PUT"):
             # Option signals use base size scaled by overlay (soft scaling)
             effective_size = min(OPTION_SIGNAL_SIZE_MULT, OPTION_SIGNAL_SIZE_MULT * size_mult)
+            size_mult = effective_size
+        elif trade_decision == "MVRV_SHORT":
+            # MVRV short uses fixed initial size (DCA handled separately)
+            effective_size = MVRV_SHORT_SIZE_MULT
             size_mult = effective_size
         else:
             effective_size = size_mult
@@ -348,6 +372,7 @@ class SignalService:
         p_long, p_short, signal_option_call, signal_option_put, overlay, row,
         core_call_ok=True, core_put_ok=True,
         option_call_ok=False, option_put_ok=False,
+        mvrv_short_ok=False, mvrv_short_signal=None,
     ) -> tuple[str, str, list, list]:
         """
         Determine final trade decision, notes, and diagnostics.
@@ -369,7 +394,9 @@ class SignalService:
         decision_trace.append(fusion_step)
         
         # Check fusion state first — if fusion has a directional view, use it
-        if fusion_result.state != MarketState.NO_TRADE:
+        # TRANSITION_CHOP is treated like NO_TRADE for fallback purposes
+        fusion_has_direction = fusion_result.state not in (MarketState.NO_TRADE, MarketState.TRANSITION_CHOP)
+        if fusion_has_direction:
             # Log tactical put status for tracing
             if tactical_result.active:
                 decision_trace.append(f"tactical_put=active(strategy={tactical_result.strategy.value})")
@@ -450,8 +477,8 @@ class SignalService:
             decision_trace.append("stop_reason=STATE_NOT_TRADEABLE")
             return "NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, decision_trace
         
-        # --- Fusion is NO_TRADE — check tactical put fallback ---
-        decision_trace.append("fusion=NO_TRADE")
+        # --- Fusion is NO_TRADE or TRANSITION_CHOP — check fallbacks ---
+        decision_trace.append(f"fusion={fusion_result.state.value} (no direction)")
         
         if tactical_result.active:
             decision_trace.append(f"tactical_put=active(strategy={tactical_result.strategy.value}) -> TRADE")
@@ -493,6 +520,26 @@ class SignalService:
             return "OPTION_PUT", "Rule: MVRV overheated + Sentiment greed + Whale distrib", [], decision_trace
         elif signal_option_put == 1:
             decision_trace.append("option_put=fired but cooldown_active -> skip")
+        
+        # MVRV Short fallback (bear market tactical short)
+        if mvrv_short_ok and mvrv_short_signal is not None and mvrv_short_signal.active:
+            decision_trace.append(
+                f"mvrv_short=active(7d={mvrv_short_signal.mvrv_7d:.3f}, 60d={mvrv_short_signal.mvrv_60d:.3f}) "
+                f"-> MVRV_SHORT (size={MVRV_SHORT_SIZE_MULT}, target={mvrv_short_signal.target_pct}%)"
+            )
+            return (
+                "MVRV_SHORT",
+                f"Rule: Bear mode + MVRV 7d >= 1.02 + MVRV 60d >= 1.0 | "
+                f"Entry: {MVRV_SHORT_SIZE_MULT*100:.0f}% at ${mvrv_short_signal.btc_price:,.0f}, "
+                f"DCA at ${mvrv_short_signal.dca_trigger_price:,.0f}, "
+                f"Target: ${mvrv_short_signal.target_price:,.0f}",
+                [],
+                decision_trace
+            )
+        elif mvrv_short_signal is not None and mvrv_short_signal.active:
+            decision_trace.append(f"mvrv_short=active but cooldown_active -> skip")
+        elif mvrv_short_signal is not None and not mvrv_short_signal.active:
+            decision_trace.append(f"mvrv_short=inactive({mvrv_short_signal.reason})")
         
         # Default NO_TRADE
         no_trade_reasons.append("FUSION_STATE_NO_TRADE")

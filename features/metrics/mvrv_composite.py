@@ -100,6 +100,9 @@ def calculate(df: pd.DataFrame) -> pd.DataFrame:
     mvrv_60d = df["mvrv_usd_60d"]
     feats["mvrv_60d"] = mvrv_60d
     
+    # (d.2) MVRV-7d for short signal (raw passthrough)
+    feats["mvrv_7d"] = df["mvrv_usd_7d"]
+    
     # Feature 1: mvrv_usd_60d percentile over last 60 days
     feats["mvrv_60d_pct_rank"] = mvrv_60d.rolling(60, min_periods=20).apply(
         lambda x: (x.iloc[-1] >= x).sum() / len(x) if len(x) > 0 else 0.5,
