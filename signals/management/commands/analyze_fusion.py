@@ -32,8 +32,13 @@ class Command(BaseCommand):
         parser.add_argument(
             "--latest",
             type=int,
-            default=10,
+            default=1,
             help="Number of latest rows to show signals for",
+        )
+        parser.add_argument(
+            "--full",
+            action="store_true",
+            help="Show full analysis (market state distribution, overlays, hit rates, etc.)",
         )
         parser.add_argument(
             "--direction",
@@ -131,6 +136,11 @@ class Command(BaseCommand):
         # If direction specified, show filtered setups and exit
         if direction:
             self._show_direction_setups(df, direction, latest_n)
+            return
+
+        # Default: show only latest day(s) unless --full is passed
+        if not options.get("full"):
+            self._show_latest_signals(df, latest_n)
             return
 
         # === MARKET STATE DISTRIBUTION ===
@@ -1163,4 +1173,38 @@ class Command(BaseCommand):
         
         self.stdout.write("\n" + "═" * 70)
         self.stdout.write("Done.\n")
+
+    def _show_latest_signals(self, df: pd.DataFrame, n: int):
+        """Show only the latest N rows with their trade signals."""
+        self.stdout.write("\n" + "=" * 60)
+        self.stdout.write(f"LATEST {n} ROWS (Any State)")
+        self.stdout.write("=" * 60)
+
+        latest_rows = df.tail(n)
+
+        for idx, row in latest_rows.iterrows():
+            date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
+            signal = generate_trade_signal(row.to_dict(), date_str)
+
+            dir_emoji = "🟢" if signal.direction == 'long' else \
+                       "🔴" if signal.direction == 'short' else "⚪"
+
+            conf_stars = "★★★" if signal.confidence == Confidence.HIGH else \
+                        "★★☆" if signal.confidence == Confidence.MEDIUM else "★☆☆"
+
+            self.stdout.write(f"\n{date_str} {dir_emoji} {signal.market_state.value}")
+            self.stdout.write(f"  Confidence: {conf_stars} ({signal.confidence.value}) | Score: {signal.fusion_score}")
+            self.stdout.write(f"  Structures: {', '.join([s.value for s in signal.structures])}")
+            self.stdout.write(f"  DTE: {signal.min_dte}-{signal.max_dte}d | Size: {signal.position_size_pct*100:.1f}%")
+
+            result = fuse_signals(row)
+            tactical_result = tactical_put_inside_bull(result, row)
+            if tactical_result.active:
+                str_label = "FULL" if tactical_result.strength == 2 else "PARTIAL"
+                self.stdout.write(f"  🔻 TACTICAL PUT ({str_label}): size={tactical_result.size_mult:.2f}")
+
+            if signal.whale_campaign:
+                self.stdout.write(f"  🐋 Whale Campaign Active!")
+
+        self.stdout.write("\nDone.\n")
 
