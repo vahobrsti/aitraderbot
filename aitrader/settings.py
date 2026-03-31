@@ -84,8 +84,10 @@ WSGI_APPLICATION = 'aitrader.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
-# Use SQLite for testing (CI) when USE_SQLITE=1 or no DB_PASSWORD is set
-if os.environ.get('USE_SQLITE', '').lower() in ('1', 'true', 'yes'):
+import sys
+
+# Use SQLite for testing (CI/local) automatically, or when USE_SQLITE=1
+if 'test' in sys.argv or os.environ.get('USE_SQLITE', '').lower() in ('1', 'true', 'yes'):
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
