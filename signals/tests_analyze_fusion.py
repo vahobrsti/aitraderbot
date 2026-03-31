@@ -239,17 +239,17 @@ class TestAnalyzeFusionProbeStates(SimpleTestCase):
 
     def test_bull_probe_in_state_distribution(self):
         """BULL_PROBE appears in the Market States section."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         self.assertIn('bull_probe', out)
 
     def test_bear_probe_in_state_distribution(self):
         """BEAR_PROBE appears in the Market States section."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         self.assertIn('bear_probe', out)
 
     def test_probe_counted_in_long_signals(self):
         """BULL_PROBE is counted in LONG signals (overlay stats)."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         # The fixture has 1 bull_probe row → LONG signals count
         # should include it (4 long states total: strong_bullish,
         # early_recovery, momentum, bull_probe + the extra strong_bullish)
@@ -257,21 +257,40 @@ class TestAnalyzeFusionProbeStates(SimpleTestCase):
 
     def test_probe_counted_in_short_signals(self):
         """BEAR_PROBE is counted in SHORT signals (overlay stats)."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         self.assertIn('SHORT signals:', out)
 
     def test_bull_probe_green_emoji(self):
         """BULL_PROBE gets 🟢 in trade signals list."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         # Find lines with bull_probe — they should have green emoji
         lines = [l for l in out.split('\n') if 'bull_probe' in l and '🟢' in l]
         self.assertTrue(len(lines) > 0, "BULL_PROBE should get 🟢 emoji")
 
     def test_bear_probe_red_emoji(self):
         """BEAR_PROBE gets 🔴 in trade signals list."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         lines = [l for l in out.split('\n') if 'bear_probe' in l and '🔴' in l]
         self.assertTrue(len(lines) > 0, "BEAR_PROBE should get 🔴 emoji")
+
+
+class TestAnalyzeFusionDefaultLatest(SimpleTestCase):
+    """Default (no args) should show only the latest day."""
+
+    def test_default_shows_latest_only(self):
+        """No arguments → only LATEST 1 ROWS section, no full analysis."""
+        out, _ = _call()
+        self.assertIn('LATEST 1 ROWS', out)
+        self.assertNotIn('MARKET STATE DISTRIBUTION', out)
+        self.assertNotIn('OVERLAY STATS', out)
+        self.assertNotIn('HIT RATE BY STATE', out)
+
+    def test_default_no_crash(self):
+        """Default invocation does not crash."""
+        try:
+            _call()
+        except Exception as e:
+            self.fail(f"Default invocation crashed: {e}")
 
 
 class TestAnalyzeFusionZeroGuard(SimpleTestCase):
@@ -295,32 +314,32 @@ class TestAnalyzeFusionHitRate(SimpleTestCase):
 
     def test_hit_rate_section_present(self):
         """HIT RATE BY STATE section appears in output."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         self.assertIn('HIT RATE BY STATE', out)
 
     def test_hit_rate_shows_bull_probe(self):
         """bull_probe appears in hit-rate table."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         # Find the hit rate section
         hit_section = out[out.find('HIT RATE BY STATE'):]
         self.assertIn('bull_probe', hit_section)
 
     def test_hit_rate_shows_bear_probe(self):
         """bear_probe appears in hit-rate table."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         hit_section = out[out.find('HIT RATE BY STATE'):]
         self.assertIn('bear_probe', hit_section)
 
     def test_hit_rate_uses_correct_labels(self):
         """Hit rate correctly uses label_good_move_long for long states."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         hit_section = out[out.find('HIT RATE BY STATE'):]
         # strong_bullish: 2 rows, both label_long=1 → 100%
         self.assertIn('strong_bullish', hit_section)
 
     def test_no_trade_excluded(self):
         """NO_TRADE state is excluded from hit-rate table."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         hit_section = out[out.find('HIT RATE BY STATE'):]
         # Lines after "HIT RATE" but before next section
         end = hit_section.find('LATEST')
@@ -428,7 +447,7 @@ class TestAnalyzeFusionTradeSignals(SimpleTestCase):
 
     def test_all_tradeable_states_appear(self):
         """All 7 tradeable states appear in the trade signals list."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         trade_section = out[out.find('ALL TRADE SIGNALS'):]
         for state in MarketState:
             if state == MarketState.NO_TRADE:
@@ -438,7 +457,7 @@ class TestAnalyzeFusionTradeSignals(SimpleTestCase):
 
     def test_option_signals_tracked(self):
         """OPTION_CALL and OPTION_PUT appear in trade signals."""
-        out, _ = _call()
+        out, _ = _call(['--full'])
         trade_section = out[out.find('ALL TRADE SIGNALS'):]
         self.assertIn('OPTION_CALL', trade_section)
         self.assertIn('OPTION_PUT', trade_section)

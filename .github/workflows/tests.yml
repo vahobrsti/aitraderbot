@@ -2,7 +2,7 @@ name: Tests
 
 on:
   push:
-    branches: [develop]
+    branches: [develop, main]
   pull_request:
     branches: [main]
 
@@ -24,10 +24,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Run signal tests
+      - name: Run tests
         env:
           SECRET_KEY: 'test-secret-key-for-ci'
           DEBUG: 'True'
           USE_SQLITE: '1'
         run: |
-          python manage.py test signals --verbosity=2
+          python manage.py test --verbosity=2

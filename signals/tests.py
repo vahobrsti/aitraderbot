@@ -1139,3 +1139,254 @@ class TestOptionSignalSoftScaling(SimpleTestCase):
         self.assertEqual(decision, "OPTION_PUT")
         # Check trace shows scaled size
         self.assertTrue(any("overlay=0.50" in t for t in trace))
+
+
+# =============================================================================
+# MVRV SHORT SIGNAL TESTS
+# =============================================================================
+
+class TestMvrvShortTradeDecision(SimpleTestCase):
+    """Test _determine_trade_decision for MVRV short signal fallback logic."""
+    
+    def _make_fusion_result(self, state=MarketState.NO_TRADE, score=0, confidence=Confidence.LOW, short_source=None):
+        return FusionResult(
+            state=state,
+            confidence=confidence,
+            score=score,
+            components={},
+            short_source=short_source,
+        )
+    
+    def _make_tactical_inactive(self):
+        from signals.tactical_puts import TacticalPutResult, TacticalPutStrategy
+        return TacticalPutResult(
+            active=False, strength=0, strategy=TacticalPutStrategy.NONE,
+            size_mult=0.0, dte_mult=1.0, reason="",
+        )
+    
+    def _make_overlay_clean(self):
+        return OverlayResult(
+            edge_strength=0, long_veto_strength=0, short_veto_strength=0,
+            short_edge_strength=0, extended_dte=False,
+            reduced_size=False, reason="",
+        )
+    
+    def _make_mvrv_short_active(self, mvrv_7d=1.05, mvrv_60d=1.02, btc_price=100000):
+        from signals.mvrv_short import MvrvShortSignal
+        return MvrvShortSignal(
+            active=True,
+            is_bear_mode=True,
+            cycle_day=600,
+            mvrv_7d=mvrv_7d,
+            mvrv_60d=mvrv_60d,
+            btc_price=btc_price,
+            target_price=btc_price * 0.96,
+            dca_trigger_price=btc_price * 1.04,
+            reason=f"MVRV 7d={mvrv_7d:.4f} >= 1.02, MVRV 60d={mvrv_60d:.4f} >= 1.0",
+        )
+    
+    def _make_mvrv_short_inactive(self, reason="Not in bear mode"):
+        from signals.mvrv_short import MvrvShortSignal
+        return MvrvShortSignal(
+            active=False,
+            is_bear_mode=False,
+            cycle_day=300,
+            mvrv_7d=1.05,
+            mvrv_60d=1.02,
+            btc_price=100000,
+            target_price=96000,
+            dca_trigger_price=104000,
+            reason=reason,
+        )
+    
+    def _call_decision(self, fusion_result=None, size_mult=1.0, dte_mult=1.0,
+                        tactical_result=None, p_long=0.5, p_short=0.5,
+                        signal_option_call=0, signal_option_put=0,
+                        overlay=None, option_call_ok=False, option_put_ok=False,
+                        mvrv_short_ok=False, mvrv_short_signal=None,
+                        row=None):
+        from signals.services import SignalService
+        svc = SignalService.__new__(SignalService)  # bypass __init__
+        if row is None:
+            row = make_row(distribution_pressure_score=0.90)
+        return svc._determine_trade_decision(
+            fusion_result=fusion_result or self._make_fusion_result(),
+            size_mult=size_mult,
+            dte_mult=dte_mult,
+            tactical_result=tactical_result or self._make_tactical_inactive(),
+            p_long=p_long,
+            p_short=p_short,
+            signal_option_call=signal_option_call,
+            signal_option_put=signal_option_put,
+            overlay=overlay or self._make_overlay_clean(),
+            row=row,
+            option_call_ok=option_call_ok,
+            option_put_ok=option_put_ok,
+            mvrv_short_ok=mvrv_short_ok,
+            mvrv_short_signal=mvrv_short_signal,
+        )
+    
+    # --- MVRV_SHORT fires when conditions met ---
+    
+    def test_mvrv_short_fires_on_no_trade(self):
+        """MVRV_SHORT fires when fusion=NO_TRADE, signal active, cooldown OK."""
+        decision, notes, reasons, trace = self._call_decision(
+            mvrv_short_ok=True,
+            mvrv_short_signal=self._make_mvrv_short_active(),
+        )
+        self.assertEqual(decision, "MVRV_SHORT")
+        self.assertIn("Bear mode", notes)
+        self.assertIn("MVRV 7d >= 1.02", notes)
+    
+    def test_mvrv_short_includes_execution_params(self):
+        """MVRV_SHORT notes include entry, DCA, and target prices."""
+        decision, notes, reasons, trace = self._call_decision(
+            mvrv_short_ok=True,
+            mvrv_short_signal=self._make_mvrv_short_active(btc_price=100000),
+        )
+        self.assertEqual(decision, "MVRV_SHORT")
+        self.assertIn("Entry: 33%", notes)
+        self.assertIn("$100,000", notes)
+        self.assertIn("DCA at $104,000", notes)
+        self.assertIn("Target: $96,000", notes)
+    
+    # --- Fusion priority over MVRV_SHORT ---
+    
+    def test_fusion_call_takes_priority_over_mvrv_short(self):
+        """When fusion has a directional view, it takes priority over MVRV short."""
+        fusion = self._make_fusion_result(
+            state=MarketState.EARLY_RECOVERY, score=4, confidence=Confidence.HIGH,
+        )
+        decision, notes, reasons, trace = self._call_decision(
+            fusion_result=fusion,
+            mvrv_short_ok=True,
+            mvrv_short_signal=self._make_mvrv_short_active(),
+        )
+        self.assertEqual(decision, "CALL")
+        self.assertIn("early_recovery", notes)
+    
+    def test_fusion_put_takes_priority_over_mvrv_short(self):
+        """When fusion says short, it takes priority over MVRV short signal."""
+        fusion = self._make_fusion_result(
+            state=MarketState.BEAR_CONTINUATION, score=-4, confidence=Confidence.LOW,
+            short_source="rule",
+        )
+        decision, notes, reasons, trace = self._call_decision(
+            fusion_result=fusion,
+            mvrv_short_ok=True,
+            mvrv_short_signal=self._make_mvrv_short_active(),
+        )
+        self.assertEqual(decision, "PUT")
+    
+    # --- Option signals priority over MVRV_SHORT ---
+    
+    def test_option_call_takes_priority_over_mvrv_short(self):
+        """OPTION_CALL fires before MVRV_SHORT (call > put > mvrv_short)."""
+        decision, notes, reasons, trace = self._call_decision(
+            signal_option_call=1,
+            option_call_ok=True,
+            mvrv_short_ok=True,
+            mvrv_short_signal=self._make_mvrv_short_active(),
+        )
+        self.assertEqual(decision, "OPTION_CALL")
+    
+    def test_option_put_takes_priority_over_mvrv_short(self):
+        """OPTION_PUT fires before MVRV_SHORT."""
+        decision, notes, reasons, trace = self._call_decision(
+            signal_option_put=1,
+            option_put_ok=True,
+            mvrv_short_ok=True,
+            mvrv_short_signal=self._make_mvrv_short_active(),
+        )
+        self.assertEqual(decision, "OPTION_PUT")
+    
+    # --- MVRV_SHORT blocked by cooldown ---
+    
+    def test_mvrv_short_blocked_by_cooldown(self):
+        """MVRV short signal active but cooldown not passed → NO_TRADE."""
+        decision, _, reasons, trace = self._call_decision(
+            mvrv_short_ok=False,  # cooldown active
+            mvrv_short_signal=self._make_mvrv_short_active(),
+        )
+        self.assertEqual(decision, "NO_TRADE")
+        self.assertTrue(any("cooldown_active" in t for t in trace))
+    
+    # --- MVRV_SHORT inactive conditions ---
+    
+    def test_mvrv_short_inactive_not_bear_mode(self):
+        """MVRV short inactive when not in bear mode → NO_TRADE."""
+        decision, _, reasons, trace = self._call_decision(
+            mvrv_short_ok=True,
+            mvrv_short_signal=self._make_mvrv_short_inactive("Not in bear mode (cycle day 300)"),
+        )
+        self.assertEqual(decision, "NO_TRADE")
+        self.assertTrue(any("mvrv_short=inactive" in t for t in trace))
+    
+    def test_mvrv_short_inactive_mvrv_below_threshold(self):
+        """MVRV short inactive when MVRV 7d below threshold → NO_TRADE."""
+        from signals.mvrv_short import MvrvShortSignal
+        inactive_signal = MvrvShortSignal(
+            active=False,
+            is_bear_mode=True,
+            cycle_day=600,
+            mvrv_7d=0.98,
+            mvrv_60d=1.02,
+            btc_price=100000,
+            target_price=96000,
+            dca_trigger_price=104000,
+            reason="MVRV 7d below threshold (0.9800 < 1.02)",
+        )
+        decision, _, reasons, trace = self._call_decision(
+            mvrv_short_ok=True,
+            mvrv_short_signal=inactive_signal,
+        )
+        self.assertEqual(decision, "NO_TRADE")
+    
+    # --- Constants ---
+    
+    def test_mvrv_short_size_mult(self):
+        """MVRV short uses 0.33x sizing (33% initial, 67% DCA)."""
+        from signals.services import MVRV_SHORT_SIZE_MULT
+        self.assertEqual(MVRV_SHORT_SIZE_MULT, 0.33)
+    
+    def test_mvrv_short_cooldown_days(self):
+        """MVRV short cooldown is 5 days."""
+        from signals.services import MVRV_SHORT_COOLDOWN_DAYS
+        self.assertEqual(MVRV_SHORT_COOLDOWN_DAYS, 5)
+
+
+class TestMvrvShortStrategyMap(SimpleTestCase):
+    """Test MVRV_SHORT entry in DECISION_STRATEGY_MAP."""
+    
+    def test_mvrv_short_in_decision_strategy_map(self):
+        """MVRV_SHORT has entry in DECISION_STRATEGY_MAP."""
+        from signals.options import DECISION_STRATEGY_MAP
+        self.assertIn("MVRV_SHORT", DECISION_STRATEGY_MAP)
+    
+    def test_mvrv_short_has_required_fields(self):
+        """MVRV_SHORT strategy has all required fields."""
+        from signals.options import DECISION_STRATEGY_MAP
+        strategy = DECISION_STRATEGY_MAP["MVRV_SHORT"]
+        self.assertIn("primary_structures", strategy)
+        self.assertIn("strike_guidance", strategy)
+        self.assertIn("dte_range", strategy)
+        self.assertIn("rationale", strategy)
+        self.assertIn("stop_loss", strategy)
+        self.assertIn("stop_loss_pct", strategy)
+        self.assertIn("max_hold_days", strategy)
+        self.assertIn("take_profit_pct", strategy)
+    
+    def test_mvrv_short_execution_params(self):
+        """MVRV_SHORT has correct execution parameters."""
+        from signals.options import DECISION_STRATEGY_MAP
+        strategy = DECISION_STRATEGY_MAP["MVRV_SHORT"]
+        self.assertEqual(strategy["stop_loss_pct"], 0.04)  # DCA trigger
+        self.assertEqual(strategy["max_hold_days"], 5)
+        self.assertEqual(strategy["take_profit_pct"], 0.04)  # 4% target
+    
+    def test_mvrv_short_rationale_mentions_bear_mode(self):
+        """MVRV_SHORT rationale mentions bear mode and MVRV thresholds."""
+        from signals.options import DECISION_STRATEGY_MAP
+        strategy = DECISION_STRATEGY_MAP["MVRV_SHORT"]
+        self.assertIn("Bear mode", strategy["rationale"])
+        self.assertIn("MVRV 7d", strategy["rationale"])
