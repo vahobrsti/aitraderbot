@@ -157,11 +157,13 @@ class Command(BaseCommand):
             PROBE_COOLDOWN_DAYS,
             TACTICAL_PUT_COOLDOWN_DAYS,
             OPTION_SIGNAL_COOLDOWN_DAYS,
+            MVRV_SHORT_COOLDOWN_DAYS,
         )
         core_cooldown_days = CORE_SIGNAL_COOLDOWN_DAYS
         probe_cooldown_days = PROBE_COOLDOWN_DAYS
         tactical_cooldown_days = TACTICAL_PUT_COOLDOWN_DAYS
         option_cooldown_days = OPTION_SIGNAL_COOLDOWN_DAYS
+        mvrv_short_cooldown_days = MVRV_SHORT_COOLDOWN_DAYS
         all_trades: list[dict] = []
 
         for year in years:
@@ -174,6 +176,7 @@ class Command(BaseCommand):
             last_tactical_date = None
             last_option_call_date = None
             last_option_put_date = None
+            last_mvrv_short_date = None
 
             for date, row in year_df.iterrows():
                 result = fuse_signals(row)
@@ -261,7 +264,12 @@ class Command(BaseCommand):
                 signal_call = int(row.get("signal_option_call", 0))
                 signal_put = int(row.get("signal_option_put", 0))
 
-                if signal_call == 1:
+                # Only fire option signals when fusion didn't produce a trade
+                fusion_traded = (result.state in long_states and size_mult > 0 and not long_veto and can_long_fire) or \
+                               (result.state in short_states and size_mult > 0 and not short_veto and can_short_fire)
+
+                option_call_fired = False
+                if signal_call == 1 and not fusion_traded:
                     cooldown_ok = no_cooldown or last_option_call_date is None or (date - last_option_call_date).days >= option_cooldown_days
                     overlay_ok = no_overlay or size_mult > 0
                     if cooldown_ok and overlay_ok:
@@ -276,8 +284,10 @@ class Command(BaseCommand):
                             }
                         )
                         last_option_call_date = date
+                        option_call_fired = True
 
-                if signal_put == 1:
+                option_put_fired = False
+                if signal_put == 1 and not fusion_traded and not option_call_fired:
                     cooldown_ok = no_cooldown or last_option_put_date is None or (date - last_option_put_date).days >= option_cooldown_days
                     overlay_ok = no_overlay or size_mult > 0
                     if cooldown_ok and overlay_ok:
@@ -294,6 +304,27 @@ class Command(BaseCommand):
                                 }
                             )
                             last_option_put_date = date
+                            option_put_fired = True
+
+                # === MVRV SHORT (only when fusion didn't trade and no option signals fired) ===
+                fusion_no_signal = result.state in (MarketState.NO_TRADE, MarketState.TRANSITION_CHOP)
+                if fusion_no_signal and not option_call_fired and not option_put_fired:
+                    from signals.mvrv_short import check_mvrv_short_signal
+                    mvrv_signal = check_mvrv_short_signal(row)
+                    if mvrv_signal.active:
+                        mvrv_cooldown_ok = no_cooldown or last_mvrv_short_date is None or (date - last_mvrv_short_date).days >= mvrv_short_cooldown_days
+                        if mvrv_cooldown_ok:
+                            all_trades.append(
+                                {
+                                    "date": pd.Timestamp(date).normalize(),
+                                    "year": year,
+                                    "type": "MVRV_SHORT",
+                                    "direction": "SHORT",
+                                    "source": "mvrv_rule",
+                                    "state": result.state.value,
+                                }
+                            )
+                            last_mvrv_short_date = date
 
         return pd.DataFrame(all_trades)
 
