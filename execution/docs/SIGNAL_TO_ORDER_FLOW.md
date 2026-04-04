@@ -49,8 +49,8 @@ DailySignal → ExecutionIntent → Risk Check → Instrument Selection → Orde
 │             - May reject or adjust notional                                 │
 │                                                                             │
 │     Step 2: Select Instrument → _select_instrument()                        │
-│             File: execution/services/instrument_selector.py                 │
-│             - Finds suitable option contract (symbol)                       │
+│             File: execution/services/orchestrator.py                        │
+│             - Finds suitable option contract (symbol) by option type + DTE  │
 │                                                                             │
 │     Step 3: Calculate Qty → _calculate_qty()                                │
 │             - Converts notional USD → contract qty                          │
@@ -84,13 +84,13 @@ DailySignal → ExecutionIntent → Risk Check → Instrument Selection → Orde
 
 | File | Purpose |
 |------|---------|
-| `management/commands/execute_signal.py` | CLI entry point |
-| `services/orchestrator.py` | Main execution flow |
-| `services/risk.py` | Risk checks (limits, duplicates) |
-| `services/instrument_selector.py` | Option contract selection |
-| `exchanges/bybit.py` | Bybit V5 API adapter |
-| `exchanges/deribit.py` | Deribit API adapter |
-| `models.py` | ExecutionIntent, Order, Position |
+| `execution/management/commands/execute_signal.py` | CLI entry point |
+| `execution/services/orchestrator.py` | Main execution flow (including current instrument selection) |
+| `execution/services/risk.py` | Risk checks (limits, duplicates) |
+| `execution/services/instrument_selector.py` | Reusable selector utilities (currently not wired into orchestrator path) |
+| `execution/exchanges/bybit.py` | Bybit V5 API adapter |
+| `execution/exchanges/deribit.py` | Deribit API adapter |
+| `execution/models.py` | ExecutionIntent, Order, Position |
 
 ## Decision Mapping
 
