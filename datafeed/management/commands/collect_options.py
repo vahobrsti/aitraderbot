@@ -29,13 +29,47 @@ from datafeed.models import OptionSnapshot
 
 
 def get_fetcher(exchange: str, testnet: bool = False):
-    """Factory to get the appropriate fetcher."""
+    """Factory to get the appropriate fetcher with optional API keys from env."""
+    import os
+    
     if exchange == 'bybit':
         from datafeed.ingestion.bybit_options import BybitOptionsFetcher
-        return BybitOptionsFetcher(testnet=testnet)
+        if testnet:
+            api_key = os.environ.get('BYBIT_TESTNET_API_KEY')
+            api_secret = os.environ.get('BYBIT_TESTNET_API_SECRET')
+        else:
+            api_key = os.environ.get('BYBIT_API_KEY')
+            api_secret = os.environ.get('BYBIT_API_SECRET')
+        
+        # Skip placeholder values
+        if api_key and api_key.startswith('your_'):
+            api_key = None
+            api_secret = None
+        
+        return BybitOptionsFetcher(
+            api_key=api_key,
+            api_secret=api_secret,
+            testnet=testnet,
+        )
     elif exchange == 'deribit':
         from datafeed.ingestion.deribit_options import DeribitOptionsFetcher
-        return DeribitOptionsFetcher(testnet=testnet)
+        if testnet:
+            client_id = os.environ.get('DERIBIT_TESTNET_API_KEY')
+            client_secret = os.environ.get('DERIBIT_TESTNET_API_SECRET')
+        else:
+            client_id = os.environ.get('DERIBIT_API_KEY')
+            client_secret = os.environ.get('DERIBIT_API_SECRET')
+        
+        # Skip placeholder values
+        if client_id and client_id.startswith('your_'):
+            client_id = None
+            client_secret = None
+        
+        return DeribitOptionsFetcher(
+            client_id=client_id,
+            client_secret=client_secret,
+            testnet=testnet,
+        )
     else:
         raise ValueError(f"Unknown exchange: {exchange}")
 
