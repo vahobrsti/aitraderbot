@@ -30,17 +30,27 @@ class BybitOptionsFetcher:
     - Underlying: spot price, index price
     """
     
-    def __init__(self, testnet: bool = False):
+    def __init__(self, api_key: str = None, api_secret: str = None, testnet: bool = False):
+        self.api_key = api_key
+        self.api_secret = api_secret
         self.testnet = testnet
         self._session = None
     
     @property
     def session(self):
-        """Lazy-load pybit session (no auth needed for market data)."""
+        """Lazy-load pybit session."""
         if self._session is None:
             try:
                 from pybit.unified_trading import HTTP
-                self._session = HTTP(testnet=self.testnet)
+                # Use auth if provided (higher rate limits), else public
+                if self.api_key and self.api_secret:
+                    self._session = HTTP(
+                        testnet=self.testnet,
+                        api_key=self.api_key,
+                        api_secret=self.api_secret,
+                    )
+                else:
+                    self._session = HTTP(testnet=self.testnet)
             except ImportError:
                 raise ImportError("pybit required: pip install pybit")
         return self._session
