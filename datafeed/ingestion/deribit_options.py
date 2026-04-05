@@ -26,25 +26,68 @@ class DeribitOptionsFetcher(OptionsFetcherBase):
     Fetches option market data from Deribit API.
     
     Deribit API is public for market data (no auth needed).
+    Auth provides higher rate limits and access to historical data.
     Base URL: https://www.deribit.com/api/v2/public/
     """
     
-    BASE_URL = "https://www.deribit.com/api/v2/public"
-    TEST_URL = "https://test.deribit.com/api/v2/public"
+    BASE_URL = "https://www.deribit.com/api/v2"
+    TEST_URL = "https://test.deribit.com/api/v2"
     
-    def __init__(self, testnet: bool = False):
+    def __init__(self, client_id: str = None, client_secret: str = None, testnet: bool = False):
+        self.client_id = client_id
+        self.client_secret = client_secret
         self.testnet = testnet
         self.base_url = self.TEST_URL if testnet else self.BASE_URL
+        self._access_token = None
+        self._token_expiry = None
     
     @property
     def exchange_name(self) -> str:
         return 'deribit'
     
-    def _request(self, method: str, params: dict = None) -> Optional[dict]:
+    def _authenticate(self) -> Optional[str]:
+        """Get access token for authenticated requests."""
+        if not self.client_id or not self.client_secret:
+            return None
+        
+        # Check if token still valid
+        if self._access_token and self._token_expiry:
+            if datetime.now(timezone.utc).timestamp() < self._token_expiry - 60:
+                return self._access_token
+        
+        try:
+            url = f"{self.base_url}/public/auth"
+            params = {
+                'grant_type': 'client_credentials',
+                'client_id': self.client_id,
+                'client_secret': self.client_secret,
+            }
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            if 'result' in data:
+                self._access_token = data['result']['access_token']
+                self._token_expiry = datetime.now(timezone.utc).timestamp() + data['result']['expires_in']
+                return self._access_token
+        except Exception as e:
+            logger.error(f"Deribit auth error: {e}")
+        
+        return None
+    
+    def _request(self, method: str, params: dict = None, private: bool = False) -> Optional[dict]:
         """Make API request."""
         try:
-            url = f"{self.base_url}/{method}"
-            response = requests.get(url, params=params, timeout=10)
+            prefix = 'private' if private else 'public'
+            url = f"{self.base_url}/{prefix}/{method}"
+            
+            headers = {}
+            if private or self.client_id:
+                token = self._authenticate()
+                if token:
+                    headers['Authorization'] = f'Bearer {token}'
+            
+            response = requests.get(url, params=params, headers=headers, timeout=10)
             response.raise_for_status()
             data = response.json()
             
