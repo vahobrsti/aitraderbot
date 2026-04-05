@@ -40,3 +40,4 @@ threadpoolctl==3.6.0
 typing_extensions==4.15.0
 tzdata==2025.2
 urllib3==2.5.0
+pybit>=5.8.0
