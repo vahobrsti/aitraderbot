@@ -311,5 +311,6 @@ Applied to model real-world execution:
 | `execution/management/commands/simulate.py` | V7 execution policy simulator |
 | `signals/management/commands/analyze_path_stats.py` | Path diagnostics |
 | `signals/management/commands/analyze_hit_rate.py` | Hit rate analysis |
+| `docs/options_data_leverage_plan.md` | Current options data collection and leverage modeling plan |
 | `features_14d_5pct.csv` | Historical feature dataset |
 | `docs/recommendation.md` | Signal performance recommendations |
