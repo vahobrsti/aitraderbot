@@ -6,37 +6,36 @@ Based on backtest hit rates 2017–2025 and current production logic (`services.
 
 ## Execution Status
 
-### What's Working (V1)
+### Current Phase: Data Collection
 
-- ✅ Single-leg options: CALL, PUT, OPTION_CALL, OPTION_PUT, TACTICAL_PUT
-- ✅ Entry order placement on Bybit/Deribit
-- ✅ Polling-based exit management (stop loss, take profit, time stop)
-- ✅ Position sync from exchange
-- ✅ Risk checks (limits, duplicates, conflicts)
-- ✅ Full audit trail (ExecutionEvent)
-- ✅ Unprotected position alerts
+Live execution is **paused** while we collect real options data to build empirical leverage profiles. The signal generation system is fully operational, but automated trading requires understanding real-world option behavior.
 
-### TODO: Remaining Execution Work
+**Why paused:**
+- Options leverage is state-dependent (spikes to 15-20x near ATM)
+- Without empirical data, position sizing and stops are unreliable
+- Collecting snapshots via `datafeed/ingestion/` to build leverage surfaces
 
-| Priority | Task | Status | Notes |
-|----------|------|--------|-------|
-| **P0** | Paper trading full cycle | ❌ | Run testnet for 2 weeks before real capital |
-| **P0** | Verify Bybit option order flow | ❌ | Test actual order placement on testnet |
-| **P0** | Verify Deribit option order flow | ❌ | Test actual order placement on testnet |
-| **P1** | Strike selection from signal | ⚠️ Partial | Uses DTE only, ignores `strike_guidance` |
-| **P1** | Scale-down logic | ⚠️ Partial | `PositionManager` detects but not wired to track "already scaled" |
-| **P1** | Take profit implementation | ⚠️ Partial | Checks P&L % but signal provides `take_profit_pct` as spread target |
-| **P2** | Spread execution (V2) | ❌ | Deferred until single-leg stable |
-| **P2** | Multi-account support | ⚠️ Partial | Models support it, commands need `--all-accounts` |
-| **P3** | Telegram alerts | ❌ | On entry, exit, unprotected |
-| **P3** | Dashboard/monitoring | ❌ | Position status, P&L tracking |
+See [docs/options_data_leverage_plan.md](options_data_leverage_plan.md) for the data collection roadmap.
 
-### Known Limitations
+### Infrastructure Status
 
-1. **5-minute polling gap**: Price can gap through stop between polls. Unavoidable for options.
-2. **No partial fill handling**: Assumes market orders fill completely.
-3. **No OCO orders**: Can't place SL+TP simultaneously (exchange limitation for options).
-4. **Strike selection basic**: Picks closest to target DTE, doesn't optimize for delta/premium.
+The execution infrastructure exists but is untested with real capital:
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Exchange adapters (Bybit/Deribit) | ✅ Built | Untested with real orders |
+| Risk checks | ✅ Built | Limits, duplicates, conflicts |
+| Position sync | ✅ Built | Needs testnet validation |
+| Exit management | ✅ Built | Polling-based (no native SL/TP) |
+| Options data collection | 🔄 Active | Building leverage profiles |
+
+### Next Steps
+
+1. Collect 2-4 weeks of options snapshots
+2. Build empirical leverage profiles by DTE/moneyness/IV
+3. Validate V7 design assumptions
+4. Paper trade on testnet (2 weeks minimum)
+5. Go live with small position sizes
 
 ---
 
@@ -52,7 +51,8 @@ The system evaluates trades in this order — first match wins:
 | 2 | TACTICAL_PUT | 🔴 Put | 0.40–0.60x | Tactical | Hedge inside bull regime (fallback when core CALL is blocked by cooldown, or fusion = NO_TRADE) |
 | 3 | OPTION_CALL | 🟢 Long | 0.75x | Rule | MVRV cheap (2+ flags) + Sentiment fear |
 | 3 | OPTION_PUT | 🔴 Short | 0.75x | Rule | MVRV hot + Sentiment greed + Whale distribution |
-| 4 | NO_TRADE | — | 0 | — | Stay flat |
+| 4 | MVRV_SHORT | 🔴 Short | 0.75x | Rule | Bear market tactical (MVRV-7d/60d overlay in cycle days 540-900) |
+| 5 | NO_TRADE | — | 0 | — | Stay flat |
 
 > **Key rule**: Fusion state always beats tactical and option signals. OPTION_CALL takes priority over OPTION_PUT when both fire.
 
@@ -60,29 +60,32 @@ The system evaluates trades in this order — first match wins:
 
 ## Signal Tiers (Hit Rate)
 
+> **Note:** Hit rate measures whether the underlying moves 5% in the expected direction within 14 days — it does not account for option premium decay, IV crush, or actual P&L.
+
 ### Tier 1: High Confidence (75%+)
 
 | Signal | Hit Rate | Action |
 |--------|----------|--------|
-| OPTION_CALL | **81%** | Size up (0.75x) — best standalone signal |
-| EARLY_RECOVERY | 83% | Full size |
-| BEAR_CONTINUATION | 79% | Full size |
+| OPTION_CALL | **92.3%** | Size up (0.75x) — best standalone signal |
+| OPTION_PUT | **80.0%** | 0.75x — requires EFB confirmation |
+| BEAR_CONTINUATION | 80% | Full size |
+| BULL_PROBE | **75.7%** | 0.35–0.60x (defined risk) |
+| EARLY_RECOVERY | 75% | Full size |
 
-### Tier 2: Good Edge (60–72%)
-
-| Signal | Hit Rate | Action |
-|--------|----------|--------|
-| Core LONG (STRONG_BULLISH, MOMENTUM) | **72.6%** | Full size |
-| PRIMARY_SHORT (DISTRIBUTION_RISK) | 62.5% | Full size |
-| BULL_PROBE | 60.8% | 0.35–0.60x (defined risk) |
-
-### Tier 3: Marginal
+### Tier 2: Good Edge (70–75%)
 
 | Signal | Hit Rate | Action |
 |--------|----------|--------|
-| BEAR_PROBE | 54.8% | 0.35–0.60x, requires stricter overlay |
-| OPTION_PUT | 44% | EFB veto filters worst setups |
-| TACTICAL_PUT | ~40% | Hedge only, never override fusion |
+| PRIMARY_SHORT (DISTRIBUTION_RISK) | **74.4%** | Full size |
+| Core LONG (STRONG_BULLISH, MOMENTUM) | **72.2%** | Full size |
+| MVRV_SHORT | **70.0%** | 0.75x — bear market tactical |
+
+### Tier 3: Marginal (<60%)
+
+| Signal | Hit Rate | Action |
+|--------|----------|--------|
+| BEAR_PROBE | **55.6%** | 0.35–0.60x, requires stricter overlay |
+| TACTICAL_PUT | **43.5%** | Hedge only, never override fusion |
 
 ---
 
@@ -145,13 +148,13 @@ Key rules:
 
 | State | DTE Range | Optimal |
 |-------|-----------|---------|
-| STRONG_BULLISH | 7–14d | 11d |
+| STRONG_BULLISH | 9–14d | 11d |
 | EARLY_RECOVERY | 14–30d | 21d |
-| MOMENTUM | 7–14d | 11d |
-| DISTRIBUTION_RISK | 7–14d | 12d |
-| BEAR_CONTINUATION | 7–14d | 12d |
-| BULL_PROBE | 7–12d | 9d |
-| BEAR_PROBE | 7–12d | 9d |
+| MOMENTUM | 12–21d | 14d |
+| DISTRIBUTION_RISK | 8–14d | 12d |
+| BEAR_CONTINUATION | 8–14d | 12d |
+| BULL_PROBE | 10–14d | 12d |
+| BEAR_PROBE | 12–16d | 14d |
 
 > Overlays adjust DTE via multiplier (0.75–1.50).
 
@@ -159,19 +162,19 @@ Key rules:
 
 ## Stop Loss Strategy
 
-Data-driven exit system calibrated from `analyze_path_stats` (7 states × 6 invalidation levels, 14d horizon, 5% target). Three-layer exit:
+Data-driven exit system calibrated from `analyze_path_stats` (14d horizon, 5% target). Three-layer exit:
 
 ### Per-State Parameters
 
 | State | Stop | Scale-Down Day | Hard Cut | Spread Width | Stop/Width |
 |-------|------|----------------|----------|-------------|------------|
-| STRONG_BULLISH | 4.0% | Day 5 | Day 6 | 9% | 44% |
-| EARLY_RECOVERY | 4.0% | Day 6 | Day 8 | 11% | 36% |
-| MOMENTUM | 4.0% | Day 5 | Day 6 | 9% | 44% |
-| DISTRIBUTION_RISK | 4.0% | Day 5 | Day 6 | 9% | 44% |
+| STRONG_BULLISH | 4.0% | Day 5 | Day 7 | 9% | 44% |
+| EARLY_RECOVERY | 4.0% | Day 4 | Day 7 | 11% | 36% |
+| MOMENTUM | 4.5% | Day 6 | Day 10 | 10% | 45% |
+| DISTRIBUTION_RISK | 3.5% | Day 4 | Day 6 | 8% | 44% |
 | BEAR_CONTINUATION | 3.5% | Day 4 | Day 6 | 10% | 35% |
-| BULL_PROBE | 3.5% | Day 4 | Day 5 | 7% | 50% |
-| BEAR_PROBE | 4.0% | Day 6 | Day 7 | 7% | 57% |
+| BULL_PROBE | 3.5% | Day 4 | Day 8 | 7% | 50% |
+| BEAR_PROBE | 4.0% | Day 7 | Day 10 | 7% | 57% |
 
 ### Exit Timeline
 
@@ -195,6 +198,7 @@ Data-driven exit system calibrated from `analyze_path_stats` (7 states × 6 inva
 | TACTICAL_PUT | 7 days |
 | BULL_PROBE / BEAR_PROBE | 5 days |
 | OPTION_CALL / OPTION_PUT | 5 days |
+| MVRV_SHORT | 5 days |
 
 ---
 
@@ -222,19 +226,21 @@ Based on 114 successful trades (hits) from 2017–2025:
 
 ## Actionable Recommendations
 
-1. **Trust EARLY_RECOVERY** — 83% hit rate. Your best fusion signal. Size up.
+1. **OPTION_CALL is your best signal** — 92.3% hit rate at 0.75x sizing. When fusion is NO_TRADE and MVRV is cheap + fear, this fires.
 
-2. **OPTION_CALL is your best fallback** — 81% hit rate at 0.75x sizing. When fusion is NO_TRADE and MVRV is cheap + fear, this fires.
+2. **OPTION_PUT now performs well** — 80.0% hit rate with EFB veto filtering. Size at 0.75x.
 
 3. **Fusion beats everything** — Never override a fusion directional view with tactical or option signals. The system enforces this.
 
-4. **Short signals are solid** — BEAR_CONTINUATION (79%) and DISTRIBUTION_RISK (62.5%) both work organically via the strict empirical ruleset.
+4. **BULL_PROBE outperforms core LONG** — 75.7% vs 72.2%. Defined risk structure works.
 
-5. **Watch BEAR_PROBE overlays** — Stricter thresholds (0.50/0.40 vs standard 0.35/0.25) filter best here.
+5. **Short signals are solid** — BEAR_CONTINUATION (80%) and PRIMARY_SHORT (74.4%) both work organically via the strict empirical ruleset.
 
-6. **OPTION_PUT needs EFB confirmation** — 44% raw HR, but EFB veto filters the worst setups (69% veto accuracy).
+6. **Watch BEAR_PROBE overlays** — 55.6% hit rate. Stricter thresholds (0.50/0.40 vs standard 0.35/0.25) filter best here.
 
-7. **TACTICAL_PUT is insurance** — ~40% hit rate. Only fires when fusion = NO_TRADE. Don't size up.
+7. **TACTICAL_PUT is weak** — 43.5% hit rate. Only fires when fusion = NO_TRADE. Don't size up.
+
+8. **MVRV_SHORT is viable** — 70.0% hit rate in bear market windows. Bear market tactical signal.
 
 ---
 

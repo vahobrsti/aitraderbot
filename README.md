@@ -283,32 +283,33 @@ The `distribution_pressure_score` is a composite of `flow_sum_7` (60%), `flow_sl
 
 ## Trade Types
 
-Hit rates from 5% target, 14-day horizon, 213 trades (with overlays and cooldowns active):
+Hit rates from 5% target, 14-day horizon, 266 trades (with overlays and cooldowns active):
 
-| Type | Direction | Sizing | Source | Hit Rate (3.5%) | Hit Rate (5%) |
-|------|-----------|--------|--------|-----------------|---------------|
-| OPTION_CALL | 🟢 Long | 0.75x | Rule | **94.1%** | **94.1%** |
-| PRIMARY_SHORT | 🔴 Short | 1.0x | Fusion | **87.5%** | **87.5%** |
-| LONG | 🟢 Long | 1.0x | Fusion | 79.0% | **72.6%** |
-| OPTION_PUT | 🔴 Short | 0.75x | Rule | 75.0% | **68.8%** |
-| TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Tactical | 70.6% | **64.7%** |
-| BULL_PROBE | 🟢 Long | 0.35-0.60x | Fusion | 74.5% | **64.7%** |
-| BEAR_PROBE | 🔴 Short | 0.35-0.60x | Fusion | 66.7% | **57.1%** |
+> **Note:** Hit rate measures whether the underlying moves 5% in the expected direction within 14 days — it does not account for option premium decay, IV crush, or actual P&L. A "hit" doesn't guarantee profit on the option trade.
+
+| Type | Direction | Sizing | Source | Hit Rate (5%) |
+|------|-----------|--------|--------|---------------|
+| OPTION_CALL | 🟢 Long | 0.75x | Rule | **92.3%** |
+| OPTION_PUT | 🔴 Short | 0.75x | Rule | **80.0%** |
+| BULL_PROBE | 🟢 Long | 0.35-0.60x | Fusion | **75.7%** |
+| PRIMARY_SHORT | 🔴 Short | 1.0x | Fusion | **74.4%** |
+| LONG | 🟢 Long | 1.0x | Fusion | **72.2%** |
+| MVRV_SHORT | 🔴 Short | 0.75x | Rule | **70.0%** |
+| BEAR_PROBE | 🔴 Short | 0.35-0.60x | Fusion | **55.6%** |
+| TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Tactical | **43.5%** |
 
 ### Option Strategy Selection — Fusion States (`STRATEGY_MAP` in `options.py`)
 
-Strategies tuned from `analyze_path_stats` (14d horizon, 5% target, 213 trades).
-
-**Key data**: median TTH 3 days, 69% hit rate, 49% overshoot→mean-revert path, 91.8% of winners exceed 6%.
+Strategies tuned from `analyze_path_stats` (14d horizon, 5% target).
 
 | State | Primary Structure | Strike | DTE | Spread Width | Take-Profit | Max Hold |
 |-------|------------------|--------|-----|-------------|-------------|----------|
-| STRONG_BULLISH | Call spread, long call | SLIGHT_ITM | 7–14d (opt 11) | 9% | 70% | 6d |
-| EARLY_RECOVERY | Call spread, long call | SLIGHT_ITM | 14–30d (opt 21) | 11% | 70% | 8d |
-| MOMENTUM | Call spread, long call | SLIGHT_ITM | 7–14d (opt 11) | 9% | 70% | 6d |
-| DISTRIBUTION_RISK | Put spread | SLIGHT_ITM | 7–14d (opt 12) | 9% | 70% | 6d |
-| BEAR_CONTINUATION | Put spread | SLIGHT_ITM | 7–14d (opt 12) | 10% | 70% | 6d |
-| BULL_PROBE | Call spread | SLIGHT_ITM | 7–12d (opt 9) | 7% | 70% | 5d |
+| STRONG_BULLISH | Call spread, long call | SLIGHT_ITM | 9–14d (opt 11) | 9% | 70% | 7d |
+| EARLY_RECOVERY | Call spread, long call | SLIGHT_ITM | 14–30d (opt 21) | 11% | 70% | 7d |
+| MOMENTUM | Call spread, long call | SLIGHT_ITM | 12–21d (opt 14) | 10% | 70% | 10d |
+| DISTRIBUTION_RISK | Put spread | SLIGHT_ITM | 8–14d (opt 12) | 8% | 70% | 6d |
+| BEAR_CONTINUATION | Put spread | SLIGHT_ITM | 8–14d (opt 12) | 10% | 70% | 6d |
+| BULL_PROBE | Call spread | SLIGHT_ITM | 10–14d (opt 12) | 7% | 70% | 8d |
 | BEAR_PROBE | Put spread | SLIGHT_ITM | 12–16d (opt 14) | 7% | 70% | 10d |
 | BEAR_EXHAUSTION_LONG | Call spread, long call | SLIGHT_ITM | 8–14d (opt 11) | 9% | 70% | 6d |
 | BEAR_RALLY_LONG | Call spread | SLIGHT_ITM | 10–14d (opt 12) | 8% | 70% | 8d |
@@ -355,12 +356,12 @@ Data-driven three-layer exit system calibrated from `analyze_path_stats` (7 stat
 
 | State | Fixed Stop | Scale-Down Day | Hard Cut | Stop/Width |
 |-------|-----------|----------------|----------|------------|
-| STRONG_BULLISH | 4.0% | Day 5 (→25%) | Day 6 | 44% |
-| EARLY_RECOVERY | 4.0% | Day 6 (→25%) | Day 8 | 36% |
-| MOMENTUM | 4.0% | Day 5 (→25%) | Day 6 | 44% |
-| DISTRIBUTION_RISK | 4.0% | Day 5 (→25%) | Day 6 | 44% |
+| STRONG_BULLISH | 4.0% | Day 5 (→25%) | Day 7 | 44% |
+| EARLY_RECOVERY | 4.0% | Day 4 (→25%) | Day 7 | 36% |
+| MOMENTUM | 4.5% | Day 6 (→25%) | Day 10 | 45% |
+| DISTRIBUTION_RISK | 3.5% | Day 4 (→25%) | Day 6 | 44% |
 | BEAR_CONTINUATION | 3.5% | Day 4 (→25%) | Day 6 | 35% |
-| BULL_PROBE | 3.5% | Day 4 (→25%) | Day 5 | 50% |
+| BULL_PROBE | 3.5% | Day 4 (→25%) | Day 8 | 50% |
 | BEAR_PROBE | 4.0% | Day 7 (→25%) | Day 10 | 57% |
 | BEAR_EXHAUSTION_LONG | 4.0% | Day 5 (→25%) | Day 6 | 44% |
 | BEAR_RALLY_LONG | 3.5% | Day 4 (→25%) | Day 8 | 44% |
@@ -432,6 +433,7 @@ curl -H "Authorization: Token YOUR_API_TOKEN" \
 | `fusion_state` | string | Core regime identifier (e.g. `strong_bullish`) |
 | `fusion_confidence` | string | Sizing conviction (`high`, `medium`, `low`) |
 | `fusion_score` | int | Static integer score assigned to the state |
+| `short_source` | string | Source of short signal (`rule`, `tactical`, etc.) |
 | `score_components` | dict | Dictionary showing which boolean traits contributed |
 | `overlay_reason` | string | Explanation from overlay logic |
 | `size_multiplier` | float | Position size multiplier |
@@ -439,13 +441,25 @@ curl -H "Authorization: Token YOUR_API_TOKEN" \
 | `tactical_put_active` | bool | Whether tactical put is triggered |
 | `tactical_put_strategy` | string | Strategy type if tactical put active |
 | `tactical_put_size` | float | Tactical put sizing |
-| `trade_decision` | string | Final decision (CALL/PUT/TACTICAL_PUT/OPTION_CALL/OPTION_PUT/NO_TRADE) |
+| `trade_decision` | string | Final decision (CALL/PUT/TACTICAL_PUT/OPTION_CALL/OPTION_PUT/MVRV_SHORT/NO_TRADE) |
 | `trade_notes` | string | Additional notes |
+| `no_trade_reasons` | list | Reasons why trade was blocked (if NO_TRADE) |
+| `decision_trace` | list | Step-by-step decision trace for debugging |
+| `effective_size` | float | Final position size after all adjustments |
+| `decision_version` | string | Version of decision logic |
+| `model_versions` | dict | ML model filenames used |
 | `option_structures` | string | Recommended structures (e.g., `call_spread`) |
 | `strike_guidance` | string | Strike selection (e.g., `slight_itm`, `itm`) |
 | `dte_range` | string | DTE range (e.g., `7-14d`) |
 | `strategy_rationale` | string | Strategy explanation with spread guidance (width, take-profit, max-hold) |
-| `stop_loss` | string | Stop loss guidance (e.g., `4.0% stop \| scale to 25% on day 5 \| hard cut day 6`) |
+| `stop_loss` | string | Stop loss guidance (e.g., `4.0% stop \| scale to 25% on day 5 \| hard cut day 7`) |
+| `stop_loss_pct` | float | Numeric stop loss percentage for execution |
+| `scale_down_day` | int | Day to scale down position |
+| `max_hold_days` | int | Maximum days to hold position |
+| `spread_width_pct` | float | Spread width percentage |
+| `take_profit_pct` | float | Take profit percentage |
+| `created_at` | datetime | Record creation timestamp |
+| `updated_at` | datetime | Record update timestamp |
 
 **Summary response** (`/signals/` list):
 
@@ -456,6 +470,7 @@ curl -H "Authorization: Token YOUR_API_TOKEN" \
 | `p_short` | float | ML probability for short |
 | `fusion_state` | string | Market state |
 | `fusion_score` | int | Fusion score |
+| `short_source` | string | Source of short signal |
 | `trade_decision` | string | Final trade decision |
 
 ### Creating API Tokens
@@ -469,227 +484,60 @@ python manage.py create_api_token --username telegram_bot
 
 ---
 
-## Execution Layer (Exchange Integration)
+## Execution Layer (Status: Data Collection Phase)
 
-The `execution` app provides automated BTC options execution on Bybit and Deribit. Options only - no perpetuals.
+The `execution` app contains infrastructure for automated BTC options execution on Bybit and Deribit. However, **live execution is currently paused** while we collect real options data to build empirical leverage profiles.
 
-### V1 Scope
+### Current Status
 
-- Single-leg options: CALL, PUT, OPTION_CALL, OPTION_PUT, TACTICAL_PUT
-- Polling-based exit management (options don't support native SL/TP)
-- No spreads until single-leg is stable in production
+The system has theoretical edge (65-72% hit rate on underlying moves), but options execution requires understanding real-world leverage behavior:
 
-### Strategy to Trade Type Mapping
+- Options leverage is state-dependent and spikes to 15-20x near ATM strikes
+- Without empirical leverage data, position sizing and stop losses are unreliable
+- We're collecting options snapshots via `datafeed/ingestion/` to build leverage surfaces
 
-| Signal | Direction | Option | DTE | Stop | Scale Day | Hard Cut | Sizing |
-|--------|-----------|--------|-----|------|-----------|----------|--------|
-| **CALL** (STRONG_BULLISH) | Long | Call | 7-14d | 4.0% | Day 5 | Day 6 | 1.0x |
-| **CALL** (EARLY_RECOVERY) | Long | Call | 14-30d | 4.0% | Day 6 | Day 8 | 1.0x |
-| **CALL** (MOMENTUM) | Long | Call | 7-14d | 4.0% | Day 5 | Day 6 | 1.0x |
-| **CALL** (BULL_PROBE) | Long | Call | 7-12d | 3.5% | Day 4 | Day 5 | 0.35-0.60x |
-| **PUT** (DISTRIBUTION_RISK) | Short | Put | 7-14d | 4.0% | Day 5 | Day 6 | 1.0x |
-| **PUT** (BEAR_CONTINUATION) | Short | Put | 7-14d | 3.5% | Day 4 | Day 6 | 1.0x |
-| **PUT** (BEAR_PROBE) | Short | Put | 7-12d | 4.0% | Day 6 | Day 7 | 0.35-0.60x |
-| **OPTION_CALL** | Long | Call | 45-90d | 4.0% | Day 5 | Day 7 | 0.75x |
-| **OPTION_PUT** | Short | Put | 45-90d | 4.0% | Day 5 | Day 7 | 0.75x |
-| **TACTICAL_PUT** | Long | Put | 7-14d | 4.0% | Day 5 | Day 6 | 0.40-0.60x |
+See [docs/options_data_leverage_plan.md](docs/options_data_leverage_plan.md) for the data collection roadmap.
 
-### Stop Loss Design
+### What Exists (Not Yet Production-Ready)
 
-Options don't support native exchange SL/TP orders. All exits are polling-based via `manage_exits` command.
-
-**Three-Layer Exit System:**
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ Layer 1: PRICE STOP (checked every 5 min)                       │
-│ If underlying moves stop_loss_pct against entry → CLOSE ALL     │
-│ Example: Entry at $100k, 4% stop → close if BTC hits $96k       │
-├─────────────────────────────────────────────────────────────────┤
-│ Layer 2: TIME SCALE-DOWN (at scale_down_day)                    │
-│ Reduce position to 25% (close 75%)                              │
-│ Rationale: ~20% of winners hit after day 7                      │
-├─────────────────────────────────────────────────────────────────┤
-│ Layer 3: HARD TIME STOP (at max_hold_days)                      │
-│ Close everything remaining                                       │
-│ Prevents theta decay from eating remaining value                │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Why 3.5-4.0% Stop?**
-- Below 3%: 40%+ false stops (noise triggers exit)
-- Above 5%: Starts missing actual losers
-- Winner MAE: 2-4% (max adverse excursion)
-- Loser MAE: 9-22%
-- 4% sits cleanly between winner noise and loser trajectory
-
-**Polling Limitation:**
-- `manage_exits` runs every 5 minutes via cron
-- Price can gap through stop between polls
-- This is unavoidable for options - no native conditional orders
-
-### Execution Lifecycle
-
-```
-Signal
-   │
-   ▼
-create_intent_from_signal()
-   │
-   ▼
-process_intent()
-   ├── Risk checks (account, limits, duplicates)
-   ├── Select option (type + DTE from signal)
-   ├── Place entry order (market)
-   └── Wait for fill
-   │
-   ▼
-protect_position()
-   └── Register for polling (exit_method='polling')
-   │
-   ▼
-manage_exits (cron */5)
-   ├── Sync positions from exchange
-   ├── Check each position:
-   │   ├── Stop loss (mark vs entry)
-   │   ├── Take profit (P&L %)
-   │   ├── Time stop (days held)
-   │   └── Expiry (DTE <= 3)
-   └── Place market close if triggered
-   │
-   ▼
-reconcile (cron hourly)
-   └── Full state sync + alert on unprotected
-```
-
-### Intent States
-
-| State | Meaning |
-|-------|---------|
-| `pending` | Created, awaiting processing |
-| `risk_check` | Undergoing risk validation |
-| `approved` | Passed risk checks |
-| `rejected` | Failed risk checks |
-| `entry_submitted` | Entry order placed on exchange |
-| `entry_filled` | Entry filled, awaiting protection |
-| `protected` | Registered for polling exits |
-| `unprotected` | ⚠️ ALERT: No exit protection |
-| `exit_triggered` | Exit order placed |
-| `closed` | Position fully closed |
-| `failed` | Execution error |
-
-See [execution/docs/SIGNAL_TO_ORDER_FLOW.md](execution/docs/SIGNAL_TO_ORDER_FLOW.md) for detailed code path documentation.
-
-### Architecture
+The execution infrastructure is built but untested with real capital:
 
 ```
 execution/
-├── exchanges/
-│   ├── base.py       → Provider-agnostic interface
-│   ├── bybit.py      → Bybit V5 (options via USDC)
-│   └── deribit.py    → Deribit (options)
-├── services/
-│   ├── orchestrator.py      → Full lifecycle management
-│   ├── risk.py              → Position/loss limits
-│   ├── position_manager.py  → Exit rule checking
-│   └── order_builder.py     → Order construction
-├── models.py         → ExchangeAccount, Intent, Order, Position
-└── management/commands/
-    ├── execute_signal.py    → Execute a signal
-    ├── sync_positions.py    → Sync from exchange
-    ├── reconcile.py         → Full reconciliation
-    ├── manage_exits.py      → Polling exit management
-    └── check_protection.py  → Alert on unprotected
+├── exchanges/           → Bybit V5 & Deribit adapters
+├── services/            → Orchestrator, risk checks, position management
+├── models.py            → ExchangeAccount, Intent, Order, Position
+└── management/commands/ → execute_signal, sync_positions, manage_exits
 ```
 
-### Risk Checks
+### V7 Execution Design
 
-| Check | Description | Behavior |
-|-------|-------------|----------|
-| Account Active | Is the account enabled? | Block if inactive |
-| Duplicate Intent | Same date/direction already executing? | Block duplicates |
-| Position Limit | Target notional > max_position_usd? | Adjust down to limit |
-| Daily Loss Limit | Realized + unrealized losses > max_daily_loss_usd? | Block new trades |
-| Conflicting Position | Opposite direction position open? | Block (no hedging) |
+When we resume execution, the V7 design prioritizes path stability over returns:
 
-### Configuration
+- **Wider spreads** (8-12% width) to reduce effective leverage
+- **Deeper ITM strikes** to avoid gamma spikes
+- **Longer DTE** (14-21d primary) for more time value
+- **Realistic leverage model** (6-10x base, 12-18x stress)
 
-Add exchange credentials to `.env`:
+See [execution/docs/execution_design.md](execution/docs/execution_design.md) for full V7 specification.
+
+### Data Collection Commands
 
 ```bash
-# Bybit (options are USDC-settled)
-BYBIT_API_KEY=your_key
-BYBIT_API_SECRET=your_secret
+# Collect options snapshots from exchanges
+python manage.py collect_options --exchange bybit --dte-min 7 --dte-max 21 --moneyness 0.15
+python manage.py collect_options --exchange deribit --dte-min 7 --dte-max 21 --moneyness 0.15
 
-# Deribit
-DERIBIT_API_KEY=your_client_id
-DERIBIT_API_SECRET=your_client_secret
+# Export collected data for analysis
+python manage.py export_options --format csv
 ```
 
-Create an `ExchangeAccount`:
+### Next Steps
 
-```python
-from execution.models import ExchangeAccount
-
-ExchangeAccount.objects.create(
-    name='bybit-prod',
-    exchange='bybit',
-    api_key_env='BYBIT_API_KEY',
-    api_secret_env='BYBIT_API_SECRET',
-    is_testnet=False,
-    max_position_usd=5000,
-    max_daily_loss_usd=500,
-)
-```
-
-### Execution Commands
-
-```bash
-# Execute latest signal (dry run first!)
-python manage.py execute_signal --latest --account bybit-prod --dry-run
-python manage.py execute_signal --latest --account bybit-prod
-
-# Execute specific date
-python manage.py execute_signal --date 2024-01-15 --account bybit-prod
-
-# Sync positions from exchange
-python manage.py sync_positions --account bybit-prod
-python manage.py sync_positions --all
-
-# Full reconciliation
-python manage.py reconcile --account bybit-prod
-
-# Check and execute exit rules
-python manage.py manage_exits --account bybit-prod
-python manage.py manage_exits --dry-run
-
-# Alert on unprotected positions
-python manage.py check_protection --max-age-minutes 5
-```
-
-### Cron Setup (Production)
-
-```bash
-# Every minute: alert if unprotected position
-* * * * * cd /app && python manage.py check_protection
-
-# Every 5 minutes: check exits and sync positions
-*/5 * * * * cd /app && python manage.py manage_exits
-*/5 * * * * cd /app && python manage.py sync_positions --all
-
-# Hourly: full reconciliation
-0 * * * * cd /app && python manage.py reconcile --all
-```
-
-### Safety Features
-
-1. **Testnet by default**: `is_testnet=True` on new accounts
-2. **Credentials via env vars**: Never stored in database
-3. **Risk limits enforced**: Position and daily loss limits
-4. **API failure protection**: Position sync won't zero out on errors
-5. **Full audit trail**: Every state change logged to `ExecutionEvent`
-6. **Idempotency**: Duplicate executions prevented by unique keys
-7. **Unprotected alerts**: `check_protection` exits with code 1 for monitoring
+1. Collect 2-4 weeks of options snapshots across market conditions
+2. Build empirical leverage profiles by DTE/moneyness/IV regime
+3. Validate V7 assumptions against real data
+4. Paper trade on testnet before live execution
 
 ---
 
@@ -830,11 +678,13 @@ python manage.py analyze_mvrv_short --today
 
 | Trade Type | Cooldown | Constant |
 |------------|----------|----------|
-| CALL (LONG / BULL_PROBE) | 7 days | `CORE_SIGNAL_COOLDOWN_DAYS` |
-| PUT (SHORT / BEAR_PROBE) | 7 days | `CORE_SIGNAL_COOLDOWN_DAYS` |
+| CALL (LONG) | 7 days | `CORE_SIGNAL_COOLDOWN_DAYS` |
+| PUT (SHORT) | 7 days | `CORE_SIGNAL_COOLDOWN_DAYS` |
+| BULL_PROBE / BEAR_PROBE | 5 days | `PROBE_COOLDOWN_DAYS` |
 | TACTICAL_PUT | 7 days | `TACTICAL_PUT_COOLDOWN_DAYS` |
 | OPTION_CALL | 5 days | `OPTION_SIGNAL_COOLDOWN_DAYS` |
 | OPTION_PUT | 5 days | `OPTION_SIGNAL_COOLDOWN_DAYS` |
+| MVRV_SHORT | 5 days | `MVRV_SHORT_COOLDOWN_DAYS` |
 
 ### Environment Variables
 
