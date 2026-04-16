@@ -96,19 +96,16 @@ def calculate(df: pd.DataFrame) -> pd.DataFrame:
         (z_4d < 0) &
         z_2d_neutral_or_inflow
     )
-    # Apply 2-day persistence: require signal on both today and yesterday
-    features_out['mdia_breadth_strong'] = (
-        raw_strong_inflow & raw_strong_inflow.shift(1).astype(bool).fillna(False)
-    ).astype(int)
+    # No persistence here — applied once at the final regime stage
+    features_out['mdia_breadth_strong'] = raw_strong_inflow.astype(int)
     
     # Moderate Inflow: (7d inflow) OR (4d + 2d both inflow)
     raw_moderate_inflow = (
         z_7d_inflow |
         (z_4d_inflow & z_2d_inflow)
     )
-    features_out['mdia_breadth_moderate'] = (
-        raw_moderate_inflow & raw_moderate_inflow.shift(1).astype(bool).fillna(False)
-    ).astype(int)
+    # No persistence here — applied once at the final regime stage
+    features_out['mdia_breadth_moderate'] = raw_moderate_inflow.astype(int)
     
     # Legacy compatibility
     features_out['mdia_breadth_inflow'] = features_out['mdia_breadth_strong']

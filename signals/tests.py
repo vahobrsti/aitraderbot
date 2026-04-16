@@ -253,6 +253,312 @@ class TestBearMarketStateClassification(SimpleTestCase):
         )
         self.assertEqual(classify_bear_market_state(row), MarketState.NO_TRADE)
 
+    # -----------------------------------------------------------------
+    # BEAR EXHAUSTION LONG — deep_underwater + inflow + NOT bearish
+    # -----------------------------------------------------------------
+    def test_bear_exhaustion_long_with_strong_inflow(self):
+        """Strong inflow also counts as inflow for exhaustion."""
+        row = make_row(
+            mvrv_60d=0.80,
+            mdia_regime_strong_inflow=1,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_EXHAUSTION_LONG)
+
+    def test_bear_exhaustion_long_with_bullish_macro(self):
+        """Bullish macro is NOT bearish, so exhaustion still fires."""
+        row = make_row(
+            mvrv_60d=0.80,
+            mdia_regime_inflow=1,
+            mvrv_ls_regime_call_confirm=1,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_EXHAUSTION_LONG)
+
+    def test_bear_exhaustion_blocked_by_bearish_macro(self):
+        """Bearish macro blocks exhaustion — should fall through to bear_rally_long."""
+        row = make_row(
+            mvrv_60d=0.80,
+            mdia_regime_inflow=1,
+            mvrv_ls_regime_put_confirm=1,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.BEAR_EXHAUSTION_LONG)
+
+    def test_bear_exhaustion_blocked_by_no_inflow(self):
+        """No inflow + deep_underwater → transition_chop, not exhaustion."""
+        row = make_row(
+            mvrv_60d=0.80,
+            mdia_regime_inflow=0,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.BEAR_EXHAUSTION_LONG)
+        self.assertEqual(classify_bear_market_state(row), MarketState.TRANSITION_CHOP)
+
+    def test_bear_exhaustion_boundary_not_deep_underwater(self):
+        """mvrv_60d=0.85 is underwater, not deep_underwater — exhaustion should NOT fire."""
+        row = make_row(
+            mvrv_60d=0.85,
+            mdia_regime_inflow=1,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.BEAR_EXHAUSTION_LONG)
+        # Should fall to bear_rally_long instead
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_RALLY_LONG)
+
+    # -----------------------------------------------------------------
+    # BEAR RALLY LONG — underwater/deep_underwater + inflow + neutral/bullish
+    # -----------------------------------------------------------------
+    def test_bear_rally_long_deep_underwater_neutral(self):
+        """deep_underwater + inflow + neutral macro → rally (exhaustion takes priority if not bearish,
+        but rally also matches; exhaustion fires first in hierarchy)."""
+        row = make_row(
+            mvrv_60d=0.80,
+            mdia_regime_inflow=1,
+        )
+        # Exhaustion fires first for deep_underwater + inflow + neutral
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_EXHAUSTION_LONG)
+
+    def test_bear_rally_long_underwater_bullish(self):
+        """underwater + inflow + bullish macro → rally."""
+        row = make_row(
+            mvrv_60d=0.95,
+            mdia_regime_inflow=1,
+            mvrv_ls_regime_call_confirm=1,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_RALLY_LONG)
+
+    def test_bear_rally_blocked_by_bearish_macro(self):
+        """underwater + inflow + bearish macro → NOT rally."""
+        row = make_row(
+            mvrv_60d=0.95,
+            mdia_regime_inflow=1,
+            mvrv_ls_regime_put_confirm=1,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.BEAR_RALLY_LONG)
+
+    def test_bear_rally_blocked_by_no_inflow(self):
+        """underwater + no inflow → transition_chop, not rally."""
+        row = make_row(
+            mvrv_60d=0.95,
+            mdia_regime_inflow=0,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.BEAR_RALLY_LONG)
+        self.assertEqual(classify_bear_market_state(row), MarketState.TRANSITION_CHOP)
+
+    def test_bear_rally_blocked_by_breakeven_bucket(self):
+        """breakeven (1.0-1.1) is NOT underwater — rally should NOT fire."""
+        row = make_row(
+            mvrv_60d=1.05,
+            mdia_regime_inflow=1,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.BEAR_RALLY_LONG)
+        # breakeven + inflow → transition_chop
+        self.assertEqual(classify_bear_market_state(row), MarketState.TRANSITION_CHOP)
+
+    # -----------------------------------------------------------------
+    # BEAR CONTINUATION SHORT — profitable + NO inflow + (aging OR bearish)
+    # -----------------------------------------------------------------
+    def test_bear_continuation_short_with_bearish_macro(self):
+        """profitable + no inflow + bearish macro (no aging needed)."""
+        row = make_row(
+            mvrv_60d=1.15,
+            mdia_regime_inflow=0,
+            mdia_regime_aging=0,
+            mvrv_ls_regime_bear_continuation=1,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_CONTINUATION_SHORT)
+
+    def test_bear_continuation_short_with_rollover(self):
+        """Rollover counts as bearish macro."""
+        row = make_row(
+            mvrv_60d=1.15,
+            mdia_regime_inflow=0,
+            mvrv_ls_early_rollover=1,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_CONTINUATION_SHORT)
+
+    def test_bear_continuation_blocked_by_inflow(self):
+        """profitable + inflow → transition_chop, not continuation."""
+        row = make_row(
+            mvrv_60d=1.15,
+            mdia_regime_inflow=1,
+            mdia_regime_aging=1,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.BEAR_CONTINUATION_SHORT)
+
+    def test_bear_continuation_blocked_by_neutral_macro_no_aging(self):
+        """profitable + no inflow + neutral macro + no aging → late_distribution instead."""
+        row = make_row(
+            mvrv_60d=1.15,
+            mdia_regime_inflow=0,
+            mdia_regime_aging=0,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.BEAR_CONTINUATION_SHORT)
+        self.assertEqual(classify_bear_market_state(row), MarketState.LATE_DISTRIBUTION_SHORT)
+
+    def test_bear_continuation_blocked_by_breakeven_bucket(self):
+        """breakeven is NOT profitable — continuation should NOT fire."""
+        row = make_row(
+            mvrv_60d=1.05,
+            mdia_regime_inflow=0,
+            mdia_regime_aging=1,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.BEAR_CONTINUATION_SHORT)
+        # Falls to late_distribution_short
+        self.assertEqual(classify_bear_market_state(row), MarketState.LATE_DISTRIBUTION_SHORT)
+
+    # -----------------------------------------------------------------
+    # LATE DISTRIBUTION SHORT — breakeven/profitable + NO inflow + bearish/neutral
+    # -----------------------------------------------------------------
+    def test_late_distribution_short_profitable_neutral(self):
+        """profitable + no inflow + neutral macro → late_distribution
+        (only if aging/bearish don't trigger continuation first)."""
+        row = make_row(
+            mvrv_60d=1.15,
+            mdia_regime_inflow=0,
+            mdia_regime_aging=0,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.LATE_DISTRIBUTION_SHORT)
+
+    def test_late_distribution_short_breakeven_bearish(self):
+        """breakeven + no inflow + bearish macro → late_distribution."""
+        row = make_row(
+            mvrv_60d=1.05,
+            mdia_regime_inflow=0,
+            mvrv_ls_regime_put_confirm=1,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.LATE_DISTRIBUTION_SHORT)
+
+    def test_late_distribution_blocked_by_inflow(self):
+        """breakeven + inflow → transition_chop, not late_distribution."""
+        row = make_row(
+            mvrv_60d=1.05,
+            mdia_regime_inflow=1,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.LATE_DISTRIBUTION_SHORT)
+        self.assertEqual(classify_bear_market_state(row), MarketState.TRANSITION_CHOP)
+
+    def test_late_distribution_blocked_by_bullish_macro(self):
+        """breakeven + no inflow + bullish macro → NOT late_distribution (falls to no_trade)."""
+        row = make_row(
+            mvrv_60d=1.05,
+            mdia_regime_inflow=0,
+            mvrv_ls_regime_call_confirm=1,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.LATE_DISTRIBUTION_SHORT)
+
+    def test_late_distribution_blocked_by_underwater_bucket(self):
+        """underwater is NOT breakeven/profitable — late_distribution should NOT fire."""
+        row = make_row(
+            mvrv_60d=0.95,
+            mdia_regime_inflow=0,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.LATE_DISTRIBUTION_SHORT)
+        self.assertEqual(classify_bear_market_state(row), MarketState.TRANSITION_CHOP)
+
+    # -----------------------------------------------------------------
+    # TRANSITION CHOP — catch-all for conflicting signals
+    # -----------------------------------------------------------------
+    def test_transition_chop_underwater_no_inflow(self):
+        """underwater + no inflow → chop."""
+        row = make_row(
+            mvrv_60d=0.95,
+            mdia_regime_inflow=0,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.TRANSITION_CHOP)
+
+    def test_transition_chop_deep_underwater_no_inflow(self):
+        """deep_underwater + no inflow → chop."""
+        row = make_row(
+            mvrv_60d=0.80,
+            mdia_regime_inflow=0,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.TRANSITION_CHOP)
+
+    def test_transition_chop_profitable_inflow(self):
+        """profitable + inflow → conflicting → chop."""
+        row = make_row(
+            mvrv_60d=1.15,
+            mdia_regime_inflow=1,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.TRANSITION_CHOP)
+
+    def test_transition_chop_breakeven_inflow(self):
+        """breakeven + inflow → conflicting → chop."""
+        row = make_row(
+            mvrv_60d=1.05,
+            mdia_regime_inflow=1,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.TRANSITION_CHOP)
+
+    # -----------------------------------------------------------------
+    # MVRV-60d boundary tests
+    # -----------------------------------------------------------------
+    def test_boundary_deep_underwater_at_084(self):
+        """0.84 is deep_underwater."""
+        row = make_row(mvrv_60d=0.84, mdia_regime_inflow=1)
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_EXHAUSTION_LONG)
+
+    def test_boundary_underwater_at_085(self):
+        """0.85 is underwater (not deep_underwater)."""
+        row = make_row(mvrv_60d=0.85, mdia_regime_inflow=1)
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_RALLY_LONG)
+
+    def test_boundary_underwater_at_099(self):
+        """0.99 is still underwater."""
+        row = make_row(mvrv_60d=0.99, mdia_regime_inflow=1)
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_RALLY_LONG)
+
+    def test_boundary_breakeven_at_100(self):
+        """1.00 is breakeven."""
+        row = make_row(mvrv_60d=1.00, mdia_regime_inflow=0)
+        self.assertEqual(classify_bear_market_state(row), MarketState.LATE_DISTRIBUTION_SHORT)
+
+    def test_boundary_breakeven_at_109(self):
+        """1.09 is still breakeven."""
+        row = make_row(mvrv_60d=1.09, mdia_regime_inflow=0)
+        self.assertEqual(classify_bear_market_state(row), MarketState.LATE_DISTRIBUTION_SHORT)
+
+    def test_boundary_profitable_at_110(self):
+        """1.10 is profitable."""
+        row = make_row(mvrv_60d=1.10, mdia_regime_inflow=0, mdia_regime_aging=1)
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_CONTINUATION_SHORT)
+
+    # -----------------------------------------------------------------
+    # Macro regime variations (all bearish flags)
+    # -----------------------------------------------------------------
+    def test_weak_downtrend_counts_as_bearish(self):
+        """weak_downtrend is bearish — enables continuation short."""
+        row = make_row(
+            mvrv_60d=1.15,
+            mdia_regime_inflow=0,
+            mvrv_ls_weak_downtrend=1,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_CONTINUATION_SHORT)
+
+    def test_distribution_warning_counts_as_bearish(self):
+        """distribution_warning is bearish — enables continuation short."""
+        row = make_row(
+            mvrv_60d=1.15,
+            mdia_regime_inflow=0,
+            mvrv_ls_regime_distribution_warning=1,
+        )
+        self.assertEqual(classify_bear_market_state(row), MarketState.BEAR_CONTINUATION_SHORT)
+
+    def test_recovery_counts_as_bullish(self):
+        """recovery is bullish — blocks late_distribution at breakeven."""
+        row = make_row(
+            mvrv_60d=1.05,
+            mdia_regime_inflow=0,
+            mvrv_ls_regime_call_confirm_recovery=1,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.LATE_DISTRIBUTION_SHORT)
+
+    def test_trend_counts_as_bullish(self):
+        """call_confirm_trend is bullish — blocks late_distribution at breakeven."""
+        row = make_row(
+            mvrv_60d=1.05,
+            mdia_regime_inflow=0,
+            mvrv_ls_regime_call_confirm_trend=1,
+        )
+        self.assertNotEqual(classify_bear_market_state(row), MarketState.LATE_DISTRIBUTION_SHORT)
+
 
 class TestFuseSignals(SimpleTestCase):
     """Test fuse_signals integration."""
