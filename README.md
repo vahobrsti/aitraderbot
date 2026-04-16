@@ -586,29 +586,6 @@ python manage.py runserver
 python manage.py create_api_token --username telegram_bot
 ```
 
-### Diagnostics
-
-```bash
-# Analyze why days are NO_TRADE
-python manage.py diagnose_notrade --year 2024
-
-# Deep dive into fusion engine behavior (includes option signal stats)
-python manage.py analyze_fusion
-python manage.py analyze_fusion --direction all --year 2025  # shows OPTION_CALL/PUT in setups
-
-# Explain a specific date (fusion + option signals)
-python manage.py analyze_fusion --explain --date 2025-05-05
-
-# Backtest hit rates (includes OPTION_CALL/OPTION_PUT)
-python manage.py analyze_hit_rate --year 2025
-
-# Sanity check option signals with MVRV flags
-python manage.py sanity_check --year 2025 --cooldown 7
-
-# Analyze MVRV-LS neutral terrain
-python manage.py analyze_neutral
-```
-
 ### MVRV Short Signal (Bear Market Tactical)
 
 A tactical short signal designed specifically for bear market conditions (cycle days 540-900 post-halving).
@@ -686,22 +663,6 @@ python manage.py analyze_mvrv_short --today
 | OPTION_PUT | 5 days | `OPTION_SIGNAL_COOLDOWN_DAYS` |
 | MVRV_SHORT | 5 days | `MVRV_SHORT_COOLDOWN_DAYS` |
 
-### Environment Variables
-
-Create a `.env` file with:
-
-```bash
-# Database
-DATABASE_URL=sqlite:///db.sqlite3
-
-# Google Sheets credentials path
-GOOGLE_SHEETS_CREDENTIALS=/path/to/service-account.json
-
-# Django settings
-SECRET_KEY=your-secret-key
-DEBUG=False
-```
-
 ---
 
 ## Key Files
@@ -729,48 +690,6 @@ DEBUG=False
 | `execution/models.py` | ExchangeAccount, ExecutionIntent, Order, Position |
 
 ---
-
-## Sample Output
-
-```
-============================================================
-SIGNAL ANALYSIS: 2024-11-06
-============================================================
-
---- ML MODEL SCORES ---
-p_long  = 0.847
-p_short = 0.123
-signal_option_call = 1
-signal_option_put  = 0
-
---- FUSION STATE ---
-🟢 State: strong_bullish
-   Confidence: high
-   Score: +5
-
---- OVERLAY ---
-   LONG EDGE (FULL): Fear + MVRV undervalued rising
-   Size Multiplier: 1.25
-   DTE Multiplier: 1.50
-
---- OPTION STRATEGY ---
-   Structures: call_spread, long_call
-   Strike: slight_itm
-   DTE: 7-14d
-   Rationale: Fresh capital + smart money + exhaustion resolved.
-            [spread width=9%, take-profit=70%, max-hold=6d]
-   Stop Loss: 4.0% stop | scale to 25% on day 5 | hard cut day 6
-
-============================================================
-TRADE DECISIONS
-============================================================
-
-✅ CALL
-   Reason: Fusion: strong_bullish
-   Confidence: high
-   Size: 1.25
-   Structures: LONG_CALL
-```
 
 ---
 
@@ -801,47 +720,6 @@ python manage.py runserver
 ```
 
 ---
-
-## Project Structure
-
-```
-aitrader/
-├── aitrader/           # Django project settings
-├── api/                # REST API app
-│   ├── views.py        # API endpoints
-│   ├── serializers.py  # DRF serializers
-│   └── urls.py         # URL routing
-├── datafeed/           # Data ingestion
-│   └── ingestion/      # Google Sheets sync
-├── features/           # Feature engineering
-│   └── feature_builder.py
-├── ml/                 # Machine learning
-│   ├── training.py     # Model training
-│   └── predict.py      # Inference
-├── signals/            # Signal generation
-│   ├── fusion.py       # Market state classifier
-│   ├── overlays.py     # Edge/veto logic
-│   ├── tactical_puts.py
-│   ├── options.py
-│   ├── services.py     # SignalService
-│   └── models.py       # DailySignal model
-├── execution/          # Exchange integration (NEW)
-│   ├── exchanges/      # Adapter modules
-│   │   ├── base.py     # Provider-agnostic interface
-│   │   ├── bybit.py    # Bybit V5 adapter
-│   │   └── deribit.py  # Deribit adapter
-│   ├── services/       # Business logic
-│   │   ├── orchestrator.py  # Execution flow
-│   │   └── risk.py     # Risk management
-│   ├── models.py       # ExchangeAccount, Intent, Order, etc.
-│   └── management/commands/
-│       ├── execute_signal.py
-│       ├── sync_positions.py
-│       └── reconcile.py
-├── models/             # Trained model artifacts
-├── credentials/        # Service account credentials
-└── manage.py
-```
 
 ---
 
