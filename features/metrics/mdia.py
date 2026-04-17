@@ -157,11 +157,10 @@ def calculate(df: pd.DataFrame) -> pd.DataFrame:
         raw_regime_strong & raw_regime_strong.shift(1).astype(bool).fillna(False)
     ).astype(int)
 
-    # (B) Inflow (Moderate): Breadth without strong (exclusive)
-    raw_regime_inflow = (
-        (features_out['mdia_breadth_moderate'] == 1) &
-        (features_out['mdia_regime_strong_inflow'] == 0)
-    )
+    # (B) Inflow (Moderate): Any breadth_moderate qualifies (inclusive of strong).
+    #     Strong is a *subset* of moderate — excluding it broke persistence chains
+    #     when strong flickered on/off, punching holes in the moderate sequence.
+    raw_regime_inflow = (features_out['mdia_breadth_moderate'] == 1)
     features_out['mdia_regime_inflow'] = (
         raw_regime_inflow & raw_regime_inflow.shift(1).astype(bool).fillna(False)
     ).astype(int)
