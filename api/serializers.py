@@ -50,6 +50,11 @@ class DailySignalSerializer(serializers.ModelSerializer):
             'max_hold_days',
             'spread_width_pct',
             'take_profit_pct',
+            # Iron condor gate
+            'condor_score',
+            'condor_eligible',
+            'condor_veto_reasons',
+            'condor_score_components',
             'created_at',
             'updated_at',
         ]
@@ -72,5 +77,7 @@ class DailySignalSummarySerializer(serializers.ModelSerializer):
             'fusion_score',
             'short_source',
             'trade_decision',
+            'condor_score',
+            'condor_eligible',
         ]
         read_only_fields = fields

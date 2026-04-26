@@ -18,6 +18,7 @@ from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multip
 from signals.tactical_puts import tactical_put_inside_bull
 from signals.options import get_strategy_with_path_risk, get_decision_strategy_summary, DECISION_STRATEGY_MAP, format_stop_loss_string
 from signals.mvrv_short import check_mvrv_short_signal
+from signals.condor_gate import evaluate_condor_gate, CondorGateResult, CONDOR_COOLDOWN_DAYS, compute_vol_metrics
 
 # Cooldown constants — single source of truth for live + backtest alignment
 # These values must match analyze_path_stats.py for calibration consistency
@@ -88,6 +89,11 @@ class SignalResult:
     model_versions: dict
     # Short signal source tracking
     short_source: Optional[str] = None  # Tracks specific rule origin for short setups
+    # Iron condor gate
+    condor_score: float = 0.0
+    condor_eligible: bool = False
+    condor_veto_reasons: list = None
+    condor_score_components: dict = None
 
 
 class SignalService:
@@ -210,12 +216,44 @@ class SignalService:
             latest_date, "MVRV_SHORT", MVRV_SHORT_COOLDOWN_DAYS
         )
         
+        # 10) Iron Condor gate evaluation
+        # Compute vol metrics from raw OHLC (no lookahead)
+        ohlc_qs = RawDailyData.objects.filter(date__lte=latest_date).order_by("date").values(
+            "btc_open", "btc_high", "btc_low", "btc_close"
+        )
+        ohlc_df = pd.DataFrame.from_records(ohlc_qs)
+        if len(ohlc_df) >= 31:
+            atr_ratio, gap_pct = compute_vol_metrics(ohlc_df)
+        else:
+            atr_ratio, gap_pct = None, None
+
+        # Expanding median of distribution_pressure_score (no lookahead)
+        dp_val = row.get("distribution_pressure_score", None)
+        if dp_val is not None:
+            dp_series = feats.loc[:latest_date, "distribution_pressure_score"]
+            dp_expanding_median = float(dp_series.expanding().median().iloc[-1])
+        else:
+            dp_expanding_median = None
+
+        condor_gate = evaluate_condor_gate(
+            row,
+            fusion_state=fusion_result.state.value,
+            dp_expanding_median=dp_expanding_median,
+            atr_ratio=atr_ratio,
+            gap_pct=gap_pct,
+        )
+        condor_cooldown_ok = self._check_trade_cooldown(
+            latest_date, "IRON_CONDOR", CONDOR_COOLDOWN_DAYS
+        )
+        condor_ok = condor_gate.eligible and condor_cooldown_ok
+        
         trade_decision, trade_notes, no_trade_reasons, decision_trace = self._determine_trade_decision(
             fusion_result, size_mult, dte_mult, tactical_result, p_long, p_short,
             signal_option_call, signal_option_put, overlay, row,
             core_call_ok=core_call_ok, core_put_ok=core_put_ok,
             option_call_ok=option_call_ok, option_put_ok=option_put_ok,
             mvrv_short_ok=mvrv_short_ok, mvrv_short_signal=mvrv_short_signal,
+            condor_ok=condor_ok, condor_gate=condor_gate,
         )
         
         # 10) Get strategy recommendation based on final trade decision
@@ -237,6 +275,10 @@ class SignalService:
             # MVRV short uses fixed initial size (DCA handled separately)
             effective_size = MVRV_SHORT_SIZE_MULT
             size_mult = effective_size
+        elif trade_decision == "IRON_CONDOR":
+            # Iron condor uses fixed size (premium selling)
+            effective_size = 0.50  # 50% of base — conservative for premium selling
+            size_mult = effective_size
         else:
             effective_size = size_mult
         
@@ -245,7 +287,7 @@ class SignalService:
             'long': self.long_model_path.name,
             'short': self.short_model_path.name,
         }
-        decision_version = "2026-02-24.1"
+        decision_version = "2026-04-26.1"
         
         return SignalResult(
             date=latest_date,
@@ -281,6 +323,10 @@ class SignalService:
             decision_version=decision_version,
             model_versions=model_versions,
             short_source=fusion_result.short_source,
+            condor_score=condor_gate.score,
+            condor_eligible=condor_gate.eligible,
+            condor_veto_reasons=condor_gate.veto_reasons,
+            condor_score_components=condor_gate.score_components,
         )
 
     def _get_strategy_summary_with_path_risk(self, state: MarketState) -> dict:
@@ -373,6 +419,7 @@ class SignalService:
         core_call_ok=True, core_put_ok=True,
         option_call_ok=False, option_put_ok=False,
         mvrv_short_ok=False, mvrv_short_signal=None,
+        condor_ok=False, condor_gate=None,
     ) -> tuple[str, str, list, list]:
         """
         Determine final trade decision, notes, and diagnostics.
@@ -381,7 +428,9 @@ class SignalService:
             1. Fusion state (CALL/PUT/probes)
             2. Tactical Put (when fusion=NO_TRADE or CALL is cooldown-blocked)
             3. Option signal fallback (when fusion=NO_TRADE, with cooldown + overlay)
-            4. NO_TRADE
+            4. MVRV Short (bear market tactical)
+            5. Iron Condor (range gate passes in chop)
+            6. NO_TRADE
         
         Returns:
             Tuple of (decision, notes, no_trade_reasons, decision_trace)
@@ -541,6 +590,23 @@ class SignalService:
         elif mvrv_short_signal is not None and not mvrv_short_signal.active:
             decision_trace.append(f"mvrv_short=inactive({mvrv_short_signal.reason})")
         
+        # Iron Condor fallback (range-bound strategy when everything is flat)
+        if condor_ok and condor_gate is not None:
+            decision_trace.append(
+                f"condor_gate=eligible(score={condor_gate.score:.0f}, thresh={condor_gate.threshold:.0f}) "
+                f"-> IRON_CONDOR"
+            )
+            return "IRON_CONDOR", f"Range gate: score={condor_gate.score:.0f}, chop state", [], decision_trace
+        elif condor_gate is not None:
+            reasons = []
+            if condor_gate.score < condor_gate.threshold:
+                reasons.append(f"score={condor_gate.score:.0f}<{condor_gate.threshold:.0f}")
+            if condor_gate.veto_reasons:
+                reasons.append(f"vetoes={','.join(condor_gate.veto_reasons)}")
+            if condor_gate.eligible and not condor_ok:
+                reasons.append("cooldown")
+            decision_trace.append(f"condor_gate=blocked({'; '.join(reasons)})")
+        
         # Default NO_TRADE
         no_trade_reasons.append("FUSION_STATE_NO_TRADE")
         decision_trace.append("stop_reason=FUSION_STATE_NO_TRADE")
@@ -591,6 +657,10 @@ class SignalService:
                 'effective_size': result.effective_size,
                 'decision_version': result.decision_version,
                 'model_versions': result.model_versions,
+                'condor_score': result.condor_score,
+                'condor_eligible': result.condor_eligible,
+                'condor_veto_reasons': result.condor_veto_reasons or [],
+                'condor_score_components': result.condor_score_components or {},
             }
         )
         return signal
