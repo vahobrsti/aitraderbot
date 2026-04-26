@@ -407,6 +407,29 @@ DECISION_STRATEGY_MAP["MVRV_SHORT"] = {
     "take_profit_pct": _MVRV_SHORT_SPREAD.take_profit_pct,
 }
 
+# Iron Condor: Range-bound strategy when chop gate passes
+# 7d DTE, ±10% wings — optimised for capital preservation
+_IRON_CONDOR_SPREAD = SpreadGuidance(
+    width_pct=0.10,       # 10% wing width (10% OTM each side)
+    take_profit_pct=0.50,  # Take profit at 50% of max credit
+    max_hold_days=7,       # Aligned with 7-day range horizon
+    stop_loss_pct=0.06,    # Exit if underlying moves 6% from entry
+    scale_down_day=5,      # Reduce to 25% on day 5 if not yet profitable
+)
+
+DECISION_STRATEGY_MAP["IRON_CONDOR"] = {
+    "primary_structures": "iron_condor",
+    "strike_guidance": "otm",
+    "dte_range": "7-14d",
+    "rationale": "Range gate: chop state + neutral metrics + no directional signals. Sell premium, wide wings.",
+    "stop_loss": format_stop_loss_string(_IRON_CONDOR_SPREAD),
+    "stop_loss_pct": _IRON_CONDOR_SPREAD.stop_loss_pct,
+    "scale_down_day": _IRON_CONDOR_SPREAD.scale_down_day,
+    "max_hold_days": _IRON_CONDOR_SPREAD.max_hold_days,
+    "spread_width_pct": _IRON_CONDOR_SPREAD.width_pct,
+    "take_profit_pct": _IRON_CONDOR_SPREAD.take_profit_pct,
+}
+
 _EMPTY_STRATEGY = {
     "primary_structures": "",
     "strike_guidance": "",

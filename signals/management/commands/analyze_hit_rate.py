@@ -17,6 +17,7 @@ from collections import defaultdict
 from signals.fusion import fuse_signals, add_fusion_features, MarketState
 from signals.overlays import apply_overlays, get_size_multiplier, compute_efb_veto
 from signals.tactical_puts import tactical_put_inside_bull
+from signals.condor_gate import compute_range_score, check_hard_vetoes, DEFAULT_SCORE_THRESHOLD, CONDOR_COOLDOWN_DAYS, compute_vol_metrics
 
 
 class Command(BaseCommand):
@@ -110,6 +111,33 @@ class Command(BaseCommand):
         }, index=df.index)
         df = pd.concat([df, prob_df], axis=1)
 
+        # Pre-compute iron condor range labels (7d / ±10%) from DB OHLC
+        from datafeed.models import RawDailyData
+        from features.metrics.range_label import calculate as calc_range_labels
+        raw_qs = RawDailyData.objects.order_by("date").values("date", "btc_open", "btc_high", "btc_low", "btc_close")
+        raw_ohlc = pd.DataFrame.from_records(raw_qs).sort_values("date").set_index("date")
+        if len(raw_ohlc) > 0:
+            range_labels = calc_range_labels(raw_ohlc, horizon=7, threshold=0.10)
+            # Align index types: DB uses datetime.date, CSV uses Timestamp
+            range_labels.index = pd.to_datetime(range_labels.index)
+            # ATR ratio and gap pct for vol vetoes
+            prev_close = raw_ohlc["btc_close"].shift(1)
+            tr = pd.concat([
+                raw_ohlc["btc_high"] - raw_ohlc["btc_low"],
+                (raw_ohlc["btc_high"] - prev_close).abs(),
+                (raw_ohlc["btc_low"] - prev_close).abs(),
+            ], axis=1).max(axis=1)
+            atr_ratio_series = (tr.rolling(7).mean() / tr.rolling(30).mean()).reindex(df.index)
+            gap_pct_series = ((raw_ohlc["btc_open"] - prev_close).abs() / prev_close).reindex(df.index)
+            # Expanding median for distribution pressure (no lookahead)
+            if "distribution_pressure_score" in df.columns:
+                dp_expanding_median = df["distribution_pressure_score"].expanding().median()
+            else:
+                dp_expanding_median = pd.Series(0.5, index=df.index)
+            has_condor_data = True
+        else:
+            has_condor_data = False
+
         # Define state categories
         long_states = {
             MarketState.STRONG_BULLISH,
@@ -180,6 +208,7 @@ class Command(BaseCommand):
             last_option_call_date = None
             last_option_put_date = None
             last_mvrv_short_date = None
+            last_condor_date = None
 
             for date, row in df_year.iterrows():
                 result = fuse_signals(row)
@@ -368,6 +397,38 @@ class Command(BaseCommand):
                             })
                             last_mvrv_short_date = date
 
+                # === IRON CONDOR (only when fusion = NO_TRADE/TRANSITION_CHOP, no other signal fired) ===
+                if has_condor_data and fusion_no_signal and not option_call_fired and not option_put_fired:
+                    condor_cooldown_ok = no_cooldown or last_condor_date is None or (date - last_condor_date).days >= CONDOR_COOLDOWN_DAYS
+                    if condor_cooldown_ok:
+                        # Get expanding median up to this row (no lookahead)
+                        dp_med = float(dp_expanding_median.loc[date]) if date in dp_expanding_median.index and pd.notna(dp_expanding_median.loc[date]) else 0.5
+                        atr_r = float(atr_ratio_series.loc[date]) if date in atr_ratio_series.index and pd.notna(atr_ratio_series.loc[date]) else None
+                        gap_p = float(gap_pct_series.loc[date]) if date in gap_pct_series.index and pd.notna(gap_pct_series.loc[date]) else None
+
+                        score, _ = compute_range_score(row, fusion_state=result.state.value, dp_expanding_median=dp_med)
+                        vetoes = check_hard_vetoes(row, atr_ratio=atr_r, gap_pct=gap_p)
+
+                        if score >= DEFAULT_SCORE_THRESHOLD and len(vetoes) == 0:
+                            # Hit = price stayed within ±10% over next 7 days
+                            if date in range_labels.index and pd.notna(range_labels.loc[date, "range_7d_binary"]):
+                                hit = int(range_labels.loc[date, "range_7d_binary"])
+                            else:
+                                hit = 0  # No outcome data = conservative miss
+                            all_trades.append({
+                                "date": date_str,
+                                "year": year,
+                                "type": "IRON_CONDOR",
+                                "direction": "NEUTRAL",
+                                "state": result.state.value,
+                                "score": int(score),
+                                "source": "condor_gate",
+                                "hit": hit,
+                                "p_long": row["p_long"],
+                                "p_short": row["p_short"],
+                            })
+                            last_condor_date = date
+
         # === PRINT RESULTS ===
         if not all_trades:
             self.stdout.write("No trades found.")
@@ -404,7 +465,7 @@ class Command(BaseCommand):
             self.stdout.write(f"\n{year}: {hits}/{total} = {hit_rate:.1f}%")
 
             # Breakdown by direction
-            for direction in ["LONG", "SHORT", "PUT"]:
+            for direction in ["LONG", "SHORT", "PUT", "NEUTRAL"]:
                 dir_df = year_df[year_df["direction"] == direction]
                 if len(dir_df) > 0:
                     d_total = len(dir_df)
@@ -417,7 +478,7 @@ class Command(BaseCommand):
         self.stdout.write("HIT RATE BY TRADE TYPE")
         self.stdout.write(f"{'=' * 100}")
 
-        for trade_type in ["LONG", "BULL_PROBE", "PRIMARY_SHORT", "BEAR_PROBE", "TACTICAL_PUT", "OPTION_CALL", "OPTION_PUT", "MVRV_SHORT"]:
+        for trade_type in ["LONG", "BULL_PROBE", "PRIMARY_SHORT", "BEAR_PROBE", "TACTICAL_PUT", "OPTION_CALL", "OPTION_PUT", "MVRV_SHORT", "IRON_CONDOR"]:
             type_df = trades_df[trades_df["type"] == trade_type]
             if len(type_df) > 0:
                 t_total = len(type_df)
@@ -461,7 +522,7 @@ class Command(BaseCommand):
 
         for _, t in trades_df.iterrows():
             hit_emoji = "✅" if t["hit"] == 1 else "❌"
-            dir_emoji = "🟢" if t["direction"] == "LONG" else "🔴"
+            dir_emoji = "🟢" if t["direction"] == "LONG" else ("🟡" if t["direction"] == "NEUTRAL" else "🔴")
             self.stdout.write(
                 f"{t['date']:12s} | {t['type']:15s} | {dir_emoji} {t['direction']:4s} | "
                 f"{t['state']:22s} | {t['score']:+4d}  | {t['source']:10s} | {hit_emoji}  | "
