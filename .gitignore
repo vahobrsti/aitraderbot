@@ -62,3 +62,6 @@ features_14d_5pct.csv
 
 # ML Models
 models/*.joblib
+
+# Report CSVs (research artifacts, regenerated on demand)
+reports/**/*.csv

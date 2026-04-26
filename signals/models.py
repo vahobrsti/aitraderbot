@@ -170,6 +170,26 @@ class DailySignal(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Iron Condor Gate
+    condor_score = models.FloatField(
+        default=0.0,
+        help_text="Range score (0-100) for iron condor eligibility"
+    )
+    condor_eligible = models.BooleanField(
+        default=False,
+        help_text="Whether condor gate passed (score >= threshold, no vetoes)"
+    )
+    condor_veto_reasons = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Hard veto reasons blocking condor entry"
+    )
+    condor_score_components = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Breakdown of range score components"
+    )
+
     class Meta:
         db_table = "daily_signal"
         ordering = ["-date"]

@@ -19,6 +19,7 @@ from datafeed.models import RawDailyData
 from signals.fusion import MarketState, add_fusion_features, fuse_signals
 from signals.overlays import apply_overlays, compute_efb_veto, get_size_multiplier
 from signals.tactical_puts import tactical_put_inside_bull
+from signals.condor_gate import compute_range_score, check_hard_vetoes, DEFAULT_SCORE_THRESHOLD, CONDOR_COOLDOWN_DAYS
 
 
 class Command(BaseCommand):
@@ -129,6 +130,27 @@ class Command(BaseCommand):
         }, index=df.index)
         df = pd.concat([df, prob_df], axis=1)
 
+        # Pre-compute iron condor vol metrics from DB OHLC
+        from features.metrics.range_label import calculate as calc_range_labels
+        raw_qs = RawDailyData.objects.order_by("date").values("date", "btc_open", "btc_high", "btc_low", "btc_close")
+        raw_ohlc = pd.DataFrame.from_records(raw_qs).sort_values("date").set_index("date")
+        if len(raw_ohlc) > 0:
+            prev_close = raw_ohlc["btc_close"].shift(1)
+            tr = pd.concat([
+                raw_ohlc["btc_high"] - raw_ohlc["btc_low"],
+                (raw_ohlc["btc_high"] - prev_close).abs(),
+                (raw_ohlc["btc_low"] - prev_close).abs(),
+            ], axis=1).max(axis=1)
+            atr_ratio_series = (tr.rolling(7).mean() / tr.rolling(30).mean()).reindex(df.index)
+            gap_pct_series = ((raw_ohlc["btc_open"] - prev_close).abs() / prev_close).reindex(df.index)
+            if "distribution_pressure_score" in df.columns:
+                dp_expanding_median = df["distribution_pressure_score"].expanding().median()
+            else:
+                dp_expanding_median = pd.Series(0.5, index=df.index)
+            has_condor_data = True
+        else:
+            has_condor_data = False
+
         long_states = {
             MarketState.STRONG_BULLISH,
             MarketState.EARLY_RECOVERY,
@@ -177,6 +199,7 @@ class Command(BaseCommand):
             last_option_call_date = None
             last_option_put_date = None
             last_mvrv_short_date = None
+            last_condor_date = None
 
             for date, row in year_df.iterrows():
                 result = fuse_signals(row)
@@ -325,6 +348,28 @@ class Command(BaseCommand):
                                 }
                             )
                             last_mvrv_short_date = date
+
+                # === IRON CONDOR (only when fusion = NO_TRADE/TRANSITION_CHOP, no other signal fired) ===
+                if has_condor_data and fusion_no_signal and not option_call_fired and not option_put_fired:
+                    condor_cooldown_ok = no_cooldown or last_condor_date is None or (date - last_condor_date).days >= CONDOR_COOLDOWN_DAYS
+                    if condor_cooldown_ok:
+                        dp_med = float(dp_expanding_median.loc[date]) if date in dp_expanding_median.index and pd.notna(dp_expanding_median.loc[date]) else 0.5
+                        atr_r = float(atr_ratio_series.loc[date]) if date in atr_ratio_series.index and pd.notna(atr_ratio_series.loc[date]) else None
+                        gap_p = float(gap_pct_series.loc[date]) if date in gap_pct_series.index and pd.notna(gap_pct_series.loc[date]) else None
+                        score, _ = compute_range_score(row, fusion_state=result.state.value, dp_expanding_median=dp_med)
+                        vetoes = check_hard_vetoes(row, atr_ratio=atr_r, gap_pct=gap_p)
+                        if score >= DEFAULT_SCORE_THRESHOLD and len(vetoes) == 0:
+                            all_trades.append(
+                                {
+                                    "date": pd.Timestamp(date).normalize(),
+                                    "year": year,
+                                    "type": "IRON_CONDOR",
+                                    "direction": "NEUTRAL",
+                                    "source": "condor_gate",
+                                    "state": result.state.value,
+                                }
+                            )
+                            last_condor_date = date
 
         return pd.DataFrame(all_trades)
 

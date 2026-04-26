@@ -297,6 +297,7 @@ Hit rates from 5% target, 14-day horizon, 266 trades (with overlays and cooldown
 | MVRV_SHORT | 🔴 Short | 0.75x | Rule | **70.0%** |
 | BEAR_PROBE | 🔴 Short | 0.35-0.60x | Fusion | **55.6%** |
 | TACTICAL_PUT | 🔴 Put | 0.4-0.6x | Tactical | **43.5%** |
+| IRON_CONDOR | 🟡 Neutral | 0.50x | Condor Gate | **60.0%** (±10%/7d range) |
 
 ### Option Strategy Selection — Fusion States (`STRATEGY_MAP` in `options.py`)
 
@@ -325,6 +326,7 @@ Trade decisions that don't map 1:1 to a fusion MarketState get their own strateg
 | OPTION_CALL | long_call, call_spread | slight_itm | 7–14d | MVRV cheap + Sentiment fear. Exploratory long probe. |
 | OPTION_PUT | long_put, put_spread | slight_itm | 7–14d | MVRV overheated + Sentiment greed. Defined-risk short. |
 | TACTICAL_PUT | put_spread | slight_otm | 7–12d | Hedge inside bull: MVRV-60d near-peak & rolling over. |
+| IRON_CONDOR | iron_condor | otm | 7–14d | Range gate: chop state + neutral metrics. Sell premium, wide wings. |
 
 ### Per-State Path-Risk Adjustment (`get_strategy_with_path_risk`)
 
@@ -441,7 +443,7 @@ curl -H "Authorization: Token YOUR_API_TOKEN" \
 | `tactical_put_active` | bool | Whether tactical put is triggered |
 | `tactical_put_strategy` | string | Strategy type if tactical put active |
 | `tactical_put_size` | float | Tactical put sizing |
-| `trade_decision` | string | Final decision (CALL/PUT/TACTICAL_PUT/OPTION_CALL/OPTION_PUT/MVRV_SHORT/NO_TRADE) |
+| `trade_decision` | string | Final decision (CALL/PUT/TACTICAL_PUT/OPTION_CALL/OPTION_PUT/MVRV_SHORT/IRON_CONDOR/NO_TRADE) |
 | `trade_notes` | string | Additional notes |
 | `no_trade_reasons` | list | Reasons why trade was blocked (if NO_TRADE) |
 | `decision_trace` | list | Step-by-step decision trace for debugging |
@@ -458,6 +460,10 @@ curl -H "Authorization: Token YOUR_API_TOKEN" \
 | `max_hold_days` | int | Maximum days to hold position |
 | `spread_width_pct` | float | Spread width percentage |
 | `take_profit_pct` | float | Take profit percentage |
+| `condor_score` | float | Iron condor range score (0-100) |
+| `condor_eligible` | bool | Whether condor gate passed |
+| `condor_veto_reasons` | list | Hard veto reasons blocking condor |
+| `condor_score_components` | dict | Breakdown of range score components |
 | `created_at` | datetime | Record creation timestamp |
 | `updated_at` | datetime | Record update timestamp |
 
@@ -472,6 +478,8 @@ curl -H "Authorization: Token YOUR_API_TOKEN" \
 | `fusion_score` | int | Fusion score |
 | `short_source` | string | Source of short signal |
 | `trade_decision` | string | Final trade decision |
+| `condor_score` | float | Iron condor range score |
+| `condor_eligible` | bool | Whether condor gate passed |
 
 ### Creating API Tokens
 
@@ -649,6 +657,44 @@ python manage.py analyze_mvrv_short --today
 
 ---
 
+## Iron Condor Range Gate
+
+Monetizes NO_TRADE / TRANSITION_CHOP days by selling iron condors when BTC is likely to stay range-bound.
+
+**How it works:** Scores each day 0-100 based on existing features (chop fusion state, MVRV neutral, flat sentiment, no directional signals, calm exchange flows). Score ≥ 75 + no hard vetoes → `IRON_CONDOR` fires. Sits at priority 6 in the decision cascade — only evaluates after all directional signals are exhausted.
+
+**Label:** ±10% band, 7-observation forward horizon. Base rate: 58% of days stay in range.
+
+**Performance:** 60% hit rate overall (89 trades, 2017–2026). 80.6% since 2023 (25/31 trades).
+
+**Strategy:** 10% OTM wings, 7–14d DTE, 50% take-profit, 6% stop-loss, scale down day 5, hard cut day 7.
+
+**Hard vetoes:** Option signals active, MVRV strong trend, MDIA strong inflow, extreme sentiment persisting 5d+, strong whale distribution, ATR expansion (7d/30d > 1.5), large gap (> 4%).
+
+```bash
+# Research commands (run ad-hoc, not daily)
+python manage.py chop_analysis --out reports/chop
+python manage.py condor_walkforward --out reports/condor_wf
+
+# Hit rate analysis (includes IRON_CONDOR alongside all other types)
+python manage.py analyze_hit_rate --type IRON_CONDOR
+```
+
+**Report CSVs** (`reports/chop/`): Research artifacts for calibration, not daily outputs. Re-run when adding features, changing fusion rules, or quarterly for recalibration.
+
+| File | Purpose |
+|------|---------|
+| `feature_prevalence.csv` | Which features predict range vs breakout (lift ratios) |
+| `fusion_state_alignment.csv` | How each fusion state correlates with 7d range outcomes |
+| `chop_condition_combos.csv` | Precision of combined chop conditions |
+| `range_score_calibration.csv` | Actual range rate per score decile |
+| `breakout_risk_conditions.csv` | Conditions that predict breakout (hard veto source) |
+| `chop_analysis_full.csv` | Complete labeled dataset for ad-hoc analysis |
+
+See [docs/iron_condor_spec.md](docs/iron_condor_spec.md) for full specification including tail risk profile, stop vs label band rationale, and monitoring triggers.
+
+---
+
 ## Configuration
 
 ### Cooldown Settings (Anti-Clustering)
@@ -662,6 +708,7 @@ python manage.py analyze_mvrv_short --today
 | OPTION_CALL | 5 days | `OPTION_SIGNAL_COOLDOWN_DAYS` |
 | OPTION_PUT | 5 days | `OPTION_SIGNAL_COOLDOWN_DAYS` |
 | MVRV_SHORT | 5 days | `MVRV_SHORT_COOLDOWN_DAYS` |
+| IRON_CONDOR | 5 days | `CONDOR_COOLDOWN_DAYS` |
 
 ---
 
@@ -683,6 +730,8 @@ python manage.py analyze_mvrv_short --today
 | `api/serializers.py` | DRF serializers |
 | `api/urls.py` | API URL routing |
 | `execution/exchanges/base.py` | Provider-agnostic exchange interface |
+| `signals/condor_gate.py` | Iron condor range gate (score, vetoes, evaluation) |
+| `docs/iron_condor_spec.md` | Full iron condor specification |
 | `execution/exchanges/bybit.py` | Bybit V5 API adapter |
 | `execution/exchanges/deribit.py` | Deribit API adapter |
 | `execution/services/orchestrator.py` | Signal → Intent → Risk → Exchange flow |
