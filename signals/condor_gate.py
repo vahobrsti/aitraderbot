@@ -24,6 +24,7 @@ Score components (additive, max 100):
     +15  sentiment bucket is neutral
     +10  sentiment is flattening
     +10  distribution pressure below expanding median (no lookahead)
+    + 5  MVRV-60d flat 7d+ AND mvrv_usd_60d in 0.88–1.02 (provisional, pending WF)
     + 5  whale regime is mixed (not directional)
 
 Score penalties (subtractive):
@@ -169,6 +170,40 @@ def compute_range_score(
     whale_contrib = 5.0 * whale_mixed
     score += whale_contrib
     components["whale_mixed"] = whale_contrib
+
+    # MVRV-60d flat in undervalued zone (+5, provisional)
+    # When MVRV-60d z-score is flat for 7+ consecutive days AND mvrv_usd_60d
+    # is in the 0.9–1.0 range, historical analysis shows 78% safe rate
+    # (vs 58% base) with tight 9.2% median range.
+    #
+    # Weight is +5 (provisional) pending walk-forward validation against all
+    # other contributors on the same sample. Will promote to +10 if
+    # incremental lift is confirmed out-of-sample.
+    #
+    # Uses mvrv_60d_flat_streak_7d (7+ consecutive flat days) instead of
+    # single-day mvrv_60d_is_flattening to avoid flip-flop entries near
+    # the ±0.5 z-score threshold boundary.
+    #
+    # Band hysteresis: entry requires [0.90, 1.00] inclusive.
+    # Once active, stays active while [0.88, 1.02] to reduce churn.
+    # The gate is stateless (row-level), so hysteresis is approximated:
+    # we check the relaxed band and require the streak flag (which itself
+    # implies the strict band was met at streak start).
+    #
+    # Source: features/management/commands/analyze_flat_z_range.py
+    MVRV_60D_ENTRY_LO, MVRV_60D_ENTRY_HI = 0.90, 1.00
+    MVRV_60D_STAY_LO, MVRV_60D_STAY_HI = 0.88, 1.02
+
+    mvrv_60d_flat_streak = float(row.get("mvrv_60d_flat_streak_7d", 0))
+    mvrv_60d_raw = float(row.get("mvrv_60d", row.get("mvrv_usd_60d", 0.0)))
+
+    # Streak flag implies strict band was met at streak start;
+    # current value only needs to be within the relaxed stay band.
+    in_stay_band = MVRV_60D_STAY_LO <= mvrv_60d_raw <= MVRV_60D_STAY_HI
+    is_flat_underval = 1.0 if (mvrv_60d_flat_streak == 1 and in_stay_band) else 0.0
+    flat_underval_contrib = 5.0 * is_flat_underval
+    score += flat_underval_contrib
+    components["mvrv_60d_flat_underval"] = flat_underval_contrib
 
     # --- Penalties (diagnostic — overlap with hard vetoes is intentional) ---
 

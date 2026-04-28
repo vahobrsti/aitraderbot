@@ -124,6 +124,13 @@ def calculate(df: pd.DataFrame) -> pd.DataFrame:
     feats["mvrv_60d_is_flattening"] = ((mvrv_60d_delta_z >= -0.5) & (mvrv_60d_delta_z <= 0.5)).astype(int)
     feats["mvrv_60d_is_rising"] = (mvrv_60d_delta_z > 0.5).astype(int)
 
+    # Stability-buffered flat streak: 7+ consecutive days of |delta_z| <= 0.5.
+    # Reduces flip-flop entries near threshold boundaries.
+    # Used by condor_gate.py for the flat-undervalued score component.
+    is_flat_day = feats["mvrv_60d_is_flattening"]
+    flat_streak = is_flat_day.groupby((is_flat_day != is_flat_day.shift()).cumsum()).cumsum()
+    feats["mvrv_60d_flat_streak_7d"] = (flat_streak >= 7).astype(int)
+
     # (e) Composite MVRV (Valuation Backbone) - Z-Score Buckets & Relaive Regimes
     z_long = feats["mvrv_comp_z_365d"]
 

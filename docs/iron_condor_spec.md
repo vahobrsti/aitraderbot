@@ -38,6 +38,29 @@ Waiting for a full 10% move before stopping would mean the short strike is deep 
 - **Pass rate:** ~6% of days (~1–2 trades/month)
 - **Cooldown:** 5 days between entries
 
+### Score Components
+
+| Component | Points | Condition |
+|-----------|--------|-----------|
+| Fusion chop state | +25 | NO_TRADE or TRANSITION_CHOP |
+| MVRV LS neutral | +20 | mvrv_ls_level_neutral == 1 |
+| No option signals | +15 | Neither CALL nor PUT active |
+| Sentiment neutral | +15 | sent_bucket_neutral == 1 |
+| Sentiment flattening | +10 | sent_is_flattening == 1 |
+| Low distribution pressure | +10 | dp_score ≤ expanding median |
+| MVRV-60d flat + undervalued | +5 (provisional) | mvrv_60d_flat_streak_7d == 1 AND mvrv_usd_60d in stay band [0.88, 1.02] |
+| Whale mixed | +5 | whale_regime_mixed == 1 |
+| MVRV strong trend | -15 | Strong uptrend or downtrend |
+| MDIA strong inflow | -10 | mdia_regime_strong_inflow == 1 |
+| Sentiment extreme | -10 | Extreme fear or greed bucket |
+
+The MVRV-60d flat + undervalued component was added based on analysis showing 78% safe rate (vs 58% base) when the MVRV-60d z-score is flat and the raw value is in the 0.9–1.0 range. See `features/management/commands/analyze_flat_z_range.py` for the research command.
+
+Design choices:
+- **Weight +5 (provisional):** Reduced from initial +10 pending walk-forward calibration against all other contributors on the same sample. Will promote to +10 if incremental lift is confirmed out-of-sample.
+- **Streak stability:** Uses `mvrv_60d_flat_streak_7d` (7+ consecutive flat days) instead of single-day `mvrv_60d_is_flattening` to avoid flip-flop entries near the ±0.5 z-score threshold boundary.
+- **Band hysteresis:** Entry requires mvrv_usd_60d in [0.90, 1.00]. Once the 7-day streak is established, the gate uses a relaxed stay band [0.88, 1.02] to reduce churn from minor oscillations at band edges.
+
 ### Precedence Rule
 
 Veto overrides score. Penalties are diagnostic and threshold-shaping only. At execution time, hard vetoes are the binding constraint.
@@ -88,6 +111,18 @@ The hit rate measures whether the underlying stayed in range — not whether the
 
 These require real option snapshot data from the `OptionSnapshot` collection pipeline. Until that data is available, treat the hit rate as an upper bound on win rate.
 
+## Operational Validation TODOs
+
+The statistical edge (range-staying rate) is necessary but not sufficient for profitability. The following must be validated before treating condor signals as fully tradeable:
+
+- [ ] **IV floor filter** — Define minimum IV rank (or IV percentile) at entry to ensure collected premium justifies tail risk. Requires `OptionSnapshot` pipeline data. Without sufficient premium, even a 78% win rate can be net negative.
+- [ ] **Liquidity gate** — Validate bid-ask spread on all 4 legs is within acceptable bounds (e.g., spread < X% of credit). Thin OTM BTC options can erode the theoretical edge entirely. Requires real-time option book data.
+- [ ] **Stop-loss execution realism** — Backtest actual slippage on 4-leg close during fast moves. The 6% stop assumes clean fills; the -25.9% worst-case flat-z period shows price can gap through stops. Quantify expected slippage under stress.
+- [ ] **Combined filter backtest** — Re-run `condor_walkforward` with the new `mvrv_60d_flat_underval` score component active. Verify precision improvement holds out-of-sample and doesn't just overfit to the 27 qualifying periods.
+- [ ] **Conditional lift validation** — Measure the incremental lift of `mvrv_60d_flat_underval` conditional on existing score components (chop state, MVRV neutral, sentiment neutral, etc.), not standalone. A strong standalone feature can add zero incremental edge once trend/vol filters are already active. If conditional lift < 2pp, remove the component.
+- [ ] **Score weight calibration** — Current +5 is provisional. Run `condor_walkforward` with +5, +7, +10 variants and compare precision/pass-rate tradeoff. Promote weight only if out-of-sample precision improves without inflating pass rate into bad regimes.
+- [ ] **OptionSnapshot integration** — Once the option snapshot pipeline is live, overlay IV/spread/volume data onto flat-z qualifying periods to measure actual P&L (not just range-staying).
+
 ## Monitoring & Recalibration Triggers
 
 Re-run `chop_analysis` + `condor_walkforward` when ANY of these fire:
@@ -128,6 +163,7 @@ Priority 7: NO_TRADE
 | `signals/options.py` | IRON_CONDOR strategy mapping |
 | `signals/services.py` | Live pipeline integration |
 | `signals/models.py` | DailySignal condor fields |
+| `features/management/commands/analyze_flat_z_range.py` | Flat-z price range research |
 
 ## Report CSVs (`reports/chop/`, `reports/condor_wf/`)
 
