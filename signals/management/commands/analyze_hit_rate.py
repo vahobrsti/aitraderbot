@@ -234,20 +234,21 @@ class Command(BaseCommand):
                 # No dynamic score thresholding needed here.
 
                 # Cooldown checks
+                # Use <= to match live _check_trade_cooldown which uses date__gte=cutoff
                 can_long_fire = True
                 can_short_fire = True
                 if not no_cooldown:
                     if is_long_state and last_long_date is not None:
-                        if (date - last_long_date).days < core_cooldown_days:
+                        if (date - last_long_date).days <= core_cooldown_days:
                             can_long_fire = False
                     if is_short_state and last_short_date is not None:
-                        if (date - last_short_date).days < core_cooldown_days:
+                        if (date - last_short_date).days <= core_cooldown_days:
                             can_short_fire = False
                     if is_bull_probe and last_long_date is not None:
-                        if (date - last_long_date).days < probe_cooldown_days:
+                        if (date - last_long_date).days <= probe_cooldown_days:
                             can_long_fire = False
                     if is_bear_probe and last_short_date is not None:
-                        if (date - last_short_date).days < probe_cooldown_days:
+                        if (date - last_short_date).days <= probe_cooldown_days:
                             can_short_fire = False
 
                 # Probe sizing (simplified: limit to 0.5x base overlay)
@@ -299,7 +300,7 @@ class Command(BaseCommand):
                 tactical_cooldown_ok = (
                     no_cooldown
                     or last_tactical_date is None
-                    or (date - last_tactical_date).days >= tactical_cooldown_days
+                    or (date - last_tactical_date).days > tactical_cooldown_days
                 )
                 if result.state in long_states and not long_trade_fired and tactical_cooldown_ok:
 
@@ -328,8 +329,10 @@ class Command(BaseCommand):
                 fusion_traded = (result.state in long_states and size_mult > 0 and not long_veto and can_long_fire) or \
                                (result.state in short_states and size_mult > 0 and not short_veto and can_short_fire)
 
+                cooldown_ok = False
+                overlay_ok = False
                 if signal_call == 1 and not fusion_traded:
-                    cooldown_ok = no_cooldown or last_option_call_date is None or (date - last_option_call_date).days >= option_cooldown_days
+                    cooldown_ok = no_cooldown or last_option_call_date is None or (date - last_option_call_date).days > option_cooldown_days
                     overlay_ok = no_overlay or size_mult > 0
                     if cooldown_ok and overlay_ok:
                         hit = int(row.get("label_good_move_long", 0))
@@ -351,7 +354,7 @@ class Command(BaseCommand):
                 option_call_fired = signal_call == 1 and not fusion_traded and cooldown_ok and overlay_ok
                 option_put_fired = False
                 if signal_put == 1 and not fusion_traded and not option_call_fired:
-                    cooldown_ok_put = no_cooldown or last_option_put_date is None or (date - last_option_put_date).days >= option_cooldown_days
+                    cooldown_ok_put = no_cooldown or last_option_put_date is None or (date - last_option_put_date).days > option_cooldown_days
                     overlay_ok_put = no_overlay or size_mult > 0
                     if cooldown_ok_put and overlay_ok_put:
                         # EFB veto for OPTION_PUT
@@ -380,7 +383,7 @@ class Command(BaseCommand):
                     from signals.mvrv_short import check_mvrv_short_signal
                     mvrv_signal = check_mvrv_short_signal(row)
                     if mvrv_signal.active:
-                        mvrv_cooldown_ok = no_cooldown or last_mvrv_short_date is None or (date - last_mvrv_short_date).days >= mvrv_short_cooldown_days
+                        mvrv_cooldown_ok = no_cooldown or last_mvrv_short_date is None or (date - last_mvrv_short_date).days > mvrv_short_cooldown_days
                         if mvrv_cooldown_ok:
                             hit = int(row.get("label_good_move_short", 0))
                             all_trades.append({
@@ -399,7 +402,7 @@ class Command(BaseCommand):
 
                 # === IRON CONDOR (only when fusion = NO_TRADE/TRANSITION_CHOP, no other signal fired) ===
                 if has_condor_data and fusion_no_signal and not option_call_fired and not option_put_fired:
-                    condor_cooldown_ok = no_cooldown or last_condor_date is None or (date - last_condor_date).days >= CONDOR_COOLDOWN_DAYS
+                    condor_cooldown_ok = no_cooldown or last_condor_date is None or (date - last_condor_date).days > CONDOR_COOLDOWN_DAYS
                     if condor_cooldown_ok:
                         # Get expanding median up to this row (no lookahead)
                         dp_med = float(dp_expanding_median.loc[date]) if date in dp_expanding_median.index and pd.notna(dp_expanding_median.loc[date]) else 0.5
