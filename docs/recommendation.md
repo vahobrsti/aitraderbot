@@ -52,7 +52,8 @@ The system evaluates trades in this order — first match wins:
 | 3 | OPTION_CALL | 🟢 Long | 0.75x | Rule | MVRV cheap (2+ flags) + Sentiment fear |
 | 3 | OPTION_PUT | 🔴 Short | 0.75x | Rule | MVRV hot + Sentiment greed + Whale distribution |
 | 4 | MVRV_SHORT | 🔴 Short | 0.75x | Rule | Bear market tactical (MVRV-7d/60d overlay in cycle days 540-900) |
-| 5 | NO_TRADE | — | 0 | — | Stay flat |
+| 5 | IRON_CONDOR | 🟡 Neutral | 0.50x | Condor Gate | Iron condor (sell premium, MVRV drift wings) |
+| 6 | NO_TRADE | — | 0 | — | Stay flat |
 
 > **Key rule**: Fusion state always beats tactical and option signals. OPTION_CALL takes priority over OPTION_PUT when both fire.
 
@@ -79,6 +80,7 @@ The system evaluates trades in this order — first match wins:
 | PRIMARY_SHORT (DISTRIBUTION_RISK) | **74.4%** | Full size |
 | Core LONG (STRONG_BULLISH, MOMENTUM) | **72.2%** | Full size |
 | MVRV_SHORT | **70.0%** | 0.75x — bear market tactical |
+| IRON_CONDOR | **76.3%** | 0.50x — range gate + MVRV drift strikes (85% in MVRV 1.00–1.04 zone) |
 
 ### Tier 3: Marginal (<60%)
 
@@ -241,6 +243,8 @@ Based on 114 successful trades (hits) from 2017–2025:
 7. **TACTICAL_PUT is weak** — 43.5% hit rate. Only fires when fusion = NO_TRADE. Don't size up.
 
 8. **MVRV_SHORT is viable** — 70.0% hit rate in bear market windows. Bear market tactical signal.
+
+9. **IRON_CONDOR uses MVRV drift strikes** — 76.3% win rate with adaptive wings. Best in MVRV 1.00–1.04 zone (85%). Strikes widen automatically in volatile markets. See `docs/iron_condor_spec.md` for full spec.
 
 ---
 

@@ -186,6 +186,78 @@ Do not trade:
 
 ---
 
+## Iron Condor Execution (Premium Selling)
+
+IRON_CONDOR is a fundamentally different trade type from directional options. It sells premium on both sides and profits from time decay in range-bound markets.
+
+### Entry Policy
+
+| Component | Value |
+|---|---|
+| Risk budget | $2,000 per condor (Tier 2 equivalent) |
+| Structure | 4-leg iron condor (sell put spread + sell call spread) |
+| Wing width | $2,000 per side (nearest available strikes) |
+| Max concurrent condors | 1 |
+
+### Strike Selection (MVRV Drift-Based)
+
+Strikes are computed by `signals/options.py::compute_condor_strikes()`:
+
+```
+cost_basis = spot / mvrv_60d
+drift = max(trailing_7d_mvrv) - min(trailing_7d_mvrv)
+
+short_call = max(spot × 1.10, cost_basis × (mvrv + 1.5 × drift))
+short_put  = min(spot × 0.90, cost_basis × (mvrv - 1.5 × drift))
+```
+
+Map to nearest available exchange strikes. Long wings = next strike beyond short strikes.
+
+The signal stores computed levels in `condor_short_call`, `condor_short_put`, and `condor_strike_meta` (includes drift, sources, distances).
+
+### Expiry Selection
+
+| Parameter | Value | Rationale |
+|---|---|---|
+| Target DTE | 13–14 days | Matches 7d hold + theta buffer |
+| Min DTE | 10 days | Enough time value for premium |
+| Max DTE | 21 days | Beyond this, premium is too thin for OTM wings |
+
+Prefer the nearest monthly/weekly expiry in the 10–21d window.
+
+### Exit Rules
+
+| Rule | Trigger | Action |
+|---|---|---|
+| Take profit | 50% of max credit collected | Close all 4 legs |
+| Scale down | Day 5 of hold | Reduce to 25% position |
+| Hard time stop | Day 7 of hold | Close all remaining |
+| Stop loss | Underlying moves 6% from entry | Close all 4 legs |
+
+### R:R Profile
+
+Based on real option data (May 1 2026 expiry, Apr 18 entry):
+
+| Metric | Value |
+|---|---|
+| Typical credit (13d DTE, $2k wings) | $300–$500 |
+| Max risk | $1,500–$1,700 |
+| R:R | ~1:3.9 |
+| Win rate needed for breakeven | ~80% |
+| Backtested win rate (drift method) | 76.3% overall, **85% in MVRV 1.00–1.04** |
+
+### Key Differences from Directional Trades
+
+| Aspect | Directional (CALL/PUT) | Iron Condor |
+|---|---|---|
+| Edge source | Underlying direction | Time decay + range |
+| Leverage concern | Gamma spikes near ATM | Both wings tested simultaneously |
+| Exit trigger | Underlying adverse move | Underlying moves to either wing |
+| Worst case | One-sided loss | One spread goes max loss |
+| Sizing | Tier 1/2 based on signal | Fixed $2k risk budget |
+
+---
+
 ## Exit Rules
 
 ### Naked Option Exits
@@ -314,3 +386,5 @@ Applied to model real-world execution:
 | `docs/options_data_leverage_plan.md` | Current options data collection and leverage modeling plan |
 | `features_14d_5pct.csv` | Historical feature dataset |
 | `docs/recommendation.md` | Signal performance recommendations |
+| `docs/iron_condor_spec.md` | Full iron condor specification (gate, strikes, tail risk) |
+| `signals/options.py` | `compute_condor_strikes()` — MVRV drift strike logic |
