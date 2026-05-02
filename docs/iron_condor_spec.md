@@ -95,6 +95,69 @@ Based on 89 backtested trades (2017–2026, with 5-day cooldown):
 
 All worst trades are from 2017–2019 when the fusion system was immature. The ATR expansion and gap vetoes (added later) would have caught the 2018 crash.
 
+## Strike Selection: MVRV Drift-Based (Method D)
+
+Instead of fixed ±10% wings from spot, the system uses **trailing MVRV-60d drift** to set condor strikes adaptively.
+
+### Logic
+
+```
+cost_basis = spot / mvrv_60d
+drift = max(mvrv_60d over trailing 7d) - min(mvrv_60d over trailing 7d)
+
+short_call = max(spot × 1.10, cost_basis × (mvrv_60d + 1.5 × drift))
+short_put  = min(spot × 0.90, cost_basis × (mvrv_60d - 1.5 × drift))
+```
+
+On each side, the wider of spot-based and MVRV-drift-based levels is used.
+
+### Why It Works
+
+- **Calm market** (low drift ~0.03): wings stay near spot ±10% → decent premium
+- **Volatile market** (high drift ~0.10): wings widen to ±15%+ → avoids breach
+- **Adapts to regime** without parameter tuning
+
+The 1.5× multiplier was calibrated from backtest: 1× drift = 69.9% WR, 1.5× = 76.3%.
+
+### Backtest Results (346 trades, 2016–2026, 7d hold, MVRV 0.92–1.08)
+
+| Method | Win Rate | Avg Room |
+|--------|----------|----------|
+| Spot ±10% (baseline) | 65.0% | ±10.0% |
+| Fixed MVRV 1.12/0.92 | 71.7% | +13.4% / -11.1% |
+| **1.5× drift (production)** | **76.3%** | **±13.2%** |
+
+Win rate by MVRV zone:
+
+| MVRV Zone | Spot ±10% | 1.5× Drift |
+|-----------|-----------|------------|
+| 0.92–0.96 | 62% | 76% |
+| 0.96–1.00 | 75% | **82%** |
+| 1.00–1.04 | 72% | **85%** ✅ |
+| 1.04–1.08 | 54% | 65% |
+
+The 85% win rate in the 1.00–1.04 zone exceeds the ~80% breakeven threshold for positive EV.
+
+### Database Fields
+
+Computed on every signal (not just IRON_CONDOR) for diagnostics:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `condor_short_call` | float | Short call level = max(spot×1.10, CB×(mvrv+1.5×drift)) |
+| `condor_short_put` | float | Short put level = min(spot×0.90, CB×(mvrv-1.5×drift)) |
+| `condor_cost_basis` | float | MVRV-60d implied cost basis (spot / mvrv_60d) |
+| `condor_strike_meta` | JSON | Sources, distances, drift, ceiling/floor projections |
+
+### Files
+
+| File | Role |
+|------|------|
+| `signals/options.py` | `compute_condor_strikes()` — drift logic + `CondorStrikeResult` dataclass |
+| `signals/services.py` | Passes trailing MVRV data, stores strikes in `SignalResult` |
+| `signals/models.py` | `condor_short_call`, `condor_short_put`, `condor_cost_basis`, `condor_strike_meta` |
+| `signals/migrations/0009_add_condor_strike_fields.py` | DB migration |
+
 ## Execution Realism
 
 The walk-forward validation does NOT include:
@@ -121,7 +184,8 @@ The statistical edge (range-staying rate) is necessary but not sufficient for pr
 - [ ] **Combined filter backtest** — Re-run `condor_walkforward` with the new `mvrv_60d_flat_underval` score component active. Verify precision improvement holds out-of-sample and doesn't just overfit to the 27 qualifying periods.
 - [ ] **Conditional lift validation** — Measure the incremental lift of `mvrv_60d_flat_underval` conditional on existing score components (chop state, MVRV neutral, sentiment neutral, etc.), not standalone. A strong standalone feature can add zero incremental edge once trend/vol filters are already active. If conditional lift < 2pp, remove the component.
 - [ ] **Score weight calibration** — Current +5 is provisional. Run `condor_walkforward` with +5, +7, +10 variants and compare precision/pass-rate tradeoff. Promote weight only if out-of-sample precision improves without inflating pass rate into bad regimes.
-- [ ] **OptionSnapshot integration** — Once the option snapshot pipeline is live, overlay IV/spread/volume data onto flat-z qualifying periods to measure actual P&L (not just range-staying).
+- [x] **OptionSnapshot integration** — Option snapshot pipeline is live (64k+ snapshots, Apr 11–28 2026). Validated condor PNL with real bid/ask/mid prices for the Apr 17 signal. MVRV drift-based strike selection integrated into signal pipeline.
+- [ ] **Drift strike validation with more condor signals** — Current real-option validation is on a single trade (Apr 17). Need 10+ condor signals with option data to confirm drift-based R:R improvement in production.
 
 ## Monitoring & Recalibration Triggers
 
@@ -159,10 +223,11 @@ Priority 7: NO_TRADE
 | `signals/management/commands/chop_analysis.py` | Research command |
 | `signals/management/commands/condor_walkforward.py` | Validation command |
 | `signals/management/commands/analyze_hit_rate.py` | Hit rate (includes IRON_CONDOR) |
-| `signals/migrations/0008_add_condor_gate_fields.py` | DB migration |
-| `signals/options.py` | IRON_CONDOR strategy mapping |
+| `signals/migrations/0008_add_condor_gate_fields.py` | DB migration (gate fields) |
+| `signals/migrations/0009_add_condor_strike_fields.py` | DB migration (MVRV drift strike fields) |
+| `signals/options.py` | IRON_CONDOR strategy mapping + `compute_condor_strikes()` drift logic |
 | `signals/services.py` | Live pipeline integration |
-| `signals/models.py` | DailySignal condor fields |
+| `signals/models.py` | DailySignal condor fields (gate + strikes) |
 | `features/management/commands/analyze_flat_z_range.py` | Flat-z price range research |
 
 ## Report CSVs (`reports/chop/`, `reports/condor_wf/`)

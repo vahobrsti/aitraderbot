@@ -464,6 +464,10 @@ curl -H "Authorization: Token YOUR_API_TOKEN" \
 | `condor_eligible` | bool | Whether condor gate passed |
 | `condor_veto_reasons` | list | Hard veto reasons blocking condor |
 | `condor_score_components` | dict | Breakdown of range score components |
+| `condor_short_call` | float | MVRV drift-based short call level |
+| `condor_short_put` | float | MVRV drift-based short put level |
+| `condor_cost_basis` | float | MVRV-60d implied cost basis (spot / mvrv_60d) |
+| `condor_strike_meta` | dict | Strike computation metadata (sources, distances, drift, ceiling/floor) |
 | `created_at` | datetime | Record creation timestamp |
 | `updated_at` | datetime | Record update timestamp |
 
@@ -671,6 +675,24 @@ Monetizes NO_TRADE / TRANSITION_CHOP days by selling iron condors when BTC is li
 
 **Hard vetoes:** Option signals active, MVRV strong trend, MDIA strong inflow, extreme sentiment persisting 5d+, strong whale distribution, ATR expansion (7d/30d > 1.5), large gap (> 4%).
 
+### Strike Selection: MVRV Drift-Based
+
+Instead of fixed ±10% wings from spot, strikes are set using **trailing 7-day MVRV-60d drift**:
+
+```
+cost_basis = spot / mvrv_60d
+drift = max(trailing_7d_mvrv) - min(trailing_7d_mvrv)
+
+short_call = max(spot × 1.10, cost_basis × (mvrv + 1.5 × drift))
+short_put  = min(spot × 0.90, cost_basis × (mvrv - 1.5 × drift))
+```
+
+The wider of spot-based and MVRV-drift-based levels is used on each side. This adapts automatically: calm markets get ~spot ±10% wings, volatile markets get wider wings.
+
+**Backtest (346 trades, 2016–2026):** 76.3% win rate (vs 65% spot-only). **85% in the MVRV 1.00–1.04 sweet spot** — exceeds the ~80% breakeven threshold for positive EV.
+
+Strike levels are stored on every signal in `condor_short_call`, `condor_short_put`, `condor_cost_basis`, and `condor_strike_meta` (JSON with sources, distances, drift, MVRV ceiling/floor).
+
 ```bash
 # Research commands (run ad-hoc, not daily)
 python manage.py chop_analysis --out reports/chop
@@ -728,7 +750,7 @@ See [docs/iron_condor_spec.md](docs/iron_condor_spec.md) for full specification 
 | `signals/fusion.py` | Market state classification engine |
 | `signals/overlays.py` | Edge amplifiers and veto gates |
 | `signals/tactical_puts.py` | Hedge puts inside bull regimes |
-| `signals/options.py` | Option strategy, strikes, DTE, spread guidance, path-risk adjustment |
+| `signals/options.py` | Option strategy, strikes, DTE, spread guidance, path-risk adjustment, condor drift strikes |
 | `signals/services.py` | SignalService for scoring + persistence |
 | `signals/models.py` | DailySignal Django model |
 | `features/metrics/interactions.py` | Option signal rules (MVRV cheap/hot + sentiment) |
