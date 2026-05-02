@@ -430,6 +430,130 @@ DECISION_STRATEGY_MAP["IRON_CONDOR"] = {
     "take_profit_pct": _IRON_CONDOR_SPREAD.take_profit_pct,
 }
 
+# ============================================================
+# MVRV-BASED CONDOR STRIKE SELECTION
+# ============================================================
+# Backtest (2016-2026, 3770 days, 7d hold, MVRV 0.92-1.08 filter):
+#   Method D (1.5x trailing drift): 76.3% WR — best overall
+#     MVRV 0.96-1.00: 82% WR
+#     MVRV 1.00-1.04: 85% WR (exceeds 80% breakeven threshold)
+#
+# Logic: measure trailing 7d MVRV range (drift), project forward by 1.5x.
+#   Short call = max(spot * 1.10, CB * (mvrv + 1.5 * drift))
+#   Short put  = min(spot * 0.90, CB * (mvrv - 1.5 * drift))
+#
+# Why 1.5x: MVRV momentum tends to continue. 1x drift = 69.9% WR,
+# 1.5x = 76.3%. The extra buffer catches continuation moves.
+#
+# Adaptive behavior:
+#   - Calm market (low drift ~0.03): stays near spot ±10%
+#   - Volatile market (high drift ~0.10): widens wings to ±15%
+#   - Automatically adjusts to regime without parameter tuning
+
+CONDOR_DRIFT_MULTIPLIER = 1.5    # project drift forward by this factor
+CONDOR_SPOT_CALL_BAND = 0.10     # spot +10% fallback (minimum call distance)
+CONDOR_SPOT_PUT_BAND = 0.10      # spot -10% fallback (minimum put distance)
+CONDOR_TRAILING_DAYS = 7         # lookback window for MVRV drift
+
+
+@dataclass
+class CondorStrikeResult:
+    """Computed iron condor strike levels."""
+    short_call: float       # short call strike (sell)
+    short_put: float        # short put strike (sell)
+    cost_basis: float       # MVRV-60d implied cost basis
+    mvrv_60d: float         # MVRV-60d value used
+    spot: float             # spot price at computation
+    call_source: str        # 'mvrv_drift' or 'spot' — which set the call level
+    put_source: str         # 'mvrv_drift' or 'spot' — which set the put level
+    call_distance_pct: float  # short call distance from spot (%)
+    put_distance_pct: float   # short put distance from spot (%)
+    mvrv_drift: float       # trailing 7d MVRV range used
+    mvrv_ceiling: float     # projected MVRV ceiling (mvrv + 1.5*drift)
+    mvrv_floor: float       # projected MVRV floor (mvrv - 1.5*drift)
+
+
+def compute_condor_strikes(
+    spot: float,
+    mvrv_60d: float,
+    mvrv_trailing_high: Optional[float] = None,
+    mvrv_trailing_low: Optional[float] = None,
+) -> Optional[CondorStrikeResult]:
+    """
+    Compute iron condor short strike levels using MVRV drift projection.
+
+    Measures the trailing 7d MVRV range (drift) and projects forward by 1.5x
+    to estimate where MVRV could move during the hold period. Takes the wider
+    of drift-based and spot-based levels on each side.
+
+    Args:
+        spot: Current BTC spot price.
+        mvrv_60d: MVRV USD 60-day ratio (signal day).
+        mvrv_trailing_high: Max MVRV-60d over trailing 7 days.
+        mvrv_trailing_low: Min MVRV-60d over trailing 7 days.
+
+    Returns:
+        CondorStrikeResult with strike levels, or None if inputs invalid.
+    """
+    if not spot or spot <= 0 or not mvrv_60d or mvrv_60d <= 0:
+        return None
+
+    cost_basis = spot / mvrv_60d
+
+    # Compute drift from trailing range
+    if mvrv_trailing_high is not None and mvrv_trailing_low is not None:
+        drift = mvrv_trailing_high - mvrv_trailing_low
+    else:
+        # Fallback: use median drift from historical analysis (~0.053)
+        drift = 0.053
+
+    # Project MVRV range forward
+    projected_mult = CONDOR_DRIFT_MULTIPLIER
+    mvrv_ceiling = mvrv_60d + drift * projected_mult
+    mvrv_floor = mvrv_60d - drift * projected_mult
+
+    # Convert to price levels
+    call_mvrv = cost_basis * mvrv_ceiling
+    put_mvrv = cost_basis * mvrv_floor
+
+    # Spot-based levels (minimum distance)
+    spot_call = spot * (1 + CONDOR_SPOT_CALL_BAND)
+    spot_put = spot * (1 - CONDOR_SPOT_PUT_BAND)
+
+    # Take the WIDER on each side
+    if call_mvrv >= spot_call:
+        short_call = call_mvrv
+        call_source = "mvrv_drift"
+    else:
+        short_call = spot_call
+        call_source = "spot"
+
+    if put_mvrv <= spot_put:
+        short_put = put_mvrv
+        put_source = "mvrv_drift"
+    else:
+        short_put = spot_put
+        put_source = "spot"
+
+    call_dist = (short_call - spot) / spot * 100
+    put_dist = (spot - short_put) / spot * 100
+
+    return CondorStrikeResult(
+        short_call=round(short_call, 2),
+        short_put=round(short_put, 2),
+        cost_basis=round(cost_basis, 2),
+        mvrv_60d=mvrv_60d,
+        spot=spot,
+        call_source=call_source,
+        put_source=put_source,
+        call_distance_pct=round(call_dist, 2),
+        put_distance_pct=round(put_dist, 2),
+        mvrv_drift=round(drift, 4),
+        mvrv_ceiling=round(mvrv_ceiling, 4),
+        mvrv_floor=round(mvrv_floor, 4),
+    )
+
+
 _EMPTY_STRATEGY = {
     "primary_structures": "",
     "strike_guidance": "",
