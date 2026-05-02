@@ -16,7 +16,7 @@ from signals.models import DailySignal
 from signals.fusion import fuse_signals, MarketState
 from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier, compute_efb_veto
 from signals.tactical_puts import tactical_put_inside_bull
-from signals.options import get_strategy_with_path_risk, get_decision_strategy_summary, DECISION_STRATEGY_MAP, format_stop_loss_string
+from signals.options import get_strategy_with_path_risk, get_decision_strategy_summary, DECISION_STRATEGY_MAP, format_stop_loss_string, compute_condor_strikes
 from signals.mvrv_short import check_mvrv_short_signal
 from signals.condor_gate import evaluate_condor_gate, CondorGateResult, CONDOR_COOLDOWN_DAYS, compute_vol_metrics
 
@@ -94,6 +94,11 @@ class SignalResult:
     condor_eligible: bool = False
     condor_veto_reasons: list = None
     condor_score_components: dict = None
+    # Iron condor MVRV-based strikes
+    condor_short_call: Optional[float] = None
+    condor_short_put: Optional[float] = None
+    condor_cost_basis: Optional[float] = None
+    condor_strike_meta: dict = None
 
 
 class SignalService:
@@ -246,6 +251,33 @@ class SignalService:
             latest_date, "IRON_CONDOR", CONDOR_COOLDOWN_DAYS
         )
         condor_ok = condor_gate.eligible and condor_cooldown_ok
+
+        # 11) Compute MVRV-based condor strikes (always, for diagnostics)
+        condor_strikes = None
+        if row_with_mvrv is not None:
+            mvrv_60d_val = getattr(raw_data, 'mvrv_usd_60d', None) if raw_data else None
+            btc_close_val = getattr(raw_data, 'btc_close', None) if raw_data else None
+            if mvrv_60d_val and btc_close_val:
+                # Get trailing 7d MVRV range for drift calculation
+                from signals.options import CONDOR_TRAILING_DAYS
+                trailing_qs = RawDailyData.objects.filter(
+                    date__lte=latest_date,
+                    mvrv_usd_60d__isnull=False,
+                ).order_by('-date')[:CONDOR_TRAILING_DAYS]
+                trailing_mvrv = [r.mvrv_usd_60d for r in trailing_qs]
+                if len(trailing_mvrv) >= CONDOR_TRAILING_DAYS:
+                    mvrv_trail_high = max(trailing_mvrv)
+                    mvrv_trail_low = min(trailing_mvrv)
+                else:
+                    mvrv_trail_high = None
+                    mvrv_trail_low = None
+
+                condor_strikes = compute_condor_strikes(
+                    spot=btc_close_val,
+                    mvrv_60d=mvrv_60d_val,
+                    mvrv_trailing_high=mvrv_trail_high,
+                    mvrv_trailing_low=mvrv_trail_low,
+                )
         
         trade_decision, trade_notes, no_trade_reasons, decision_trace = self._determine_trade_decision(
             fusion_result, size_mult, dte_mult, tactical_result, p_long, p_short,
@@ -327,6 +359,20 @@ class SignalService:
             condor_eligible=condor_gate.eligible,
             condor_veto_reasons=condor_gate.veto_reasons,
             condor_score_components=condor_gate.score_components,
+            condor_short_call=condor_strikes.short_call if condor_strikes else None,
+            condor_short_put=condor_strikes.short_put if condor_strikes else None,
+            condor_cost_basis=condor_strikes.cost_basis if condor_strikes else None,
+            condor_strike_meta={
+                'call_source': condor_strikes.call_source,
+                'put_source': condor_strikes.put_source,
+                'call_distance_pct': condor_strikes.call_distance_pct,
+                'put_distance_pct': condor_strikes.put_distance_pct,
+                'mvrv_60d': condor_strikes.mvrv_60d,
+                'mvrv_drift': condor_strikes.mvrv_drift,
+                'mvrv_ceiling': condor_strikes.mvrv_ceiling,
+                'mvrv_floor': condor_strikes.mvrv_floor,
+                'spot': condor_strikes.spot,
+            } if condor_strikes else {},
         )
 
     def _get_strategy_summary_with_path_risk(self, state: MarketState) -> dict:
@@ -596,7 +642,8 @@ class SignalService:
                 f"condor_gate=eligible(score={condor_gate.score:.0f}, thresh={condor_gate.threshold:.0f}) "
                 f"-> IRON_CONDOR"
             )
-            return "IRON_CONDOR", f"Range gate: score={condor_gate.score:.0f}, chop state", [], decision_trace
+            notes = f"Range gate: score={condor_gate.score:.0f}, chop state"
+            return "IRON_CONDOR", notes, [], decision_trace
         elif condor_gate is not None:
             reasons = []
             if condor_gate.score < condor_gate.threshold:
@@ -661,6 +708,10 @@ class SignalService:
                 'condor_eligible': result.condor_eligible,
                 'condor_veto_reasons': result.condor_veto_reasons or [],
                 'condor_score_components': result.condor_score_components or {},
+                'condor_short_call': result.condor_short_call,
+                'condor_short_put': result.condor_short_put,
+                'condor_cost_basis': result.condor_cost_basis,
+                'condor_strike_meta': result.condor_strike_meta or {},
             }
         )
         return signal

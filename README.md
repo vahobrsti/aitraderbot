@@ -693,6 +693,14 @@ python manage.py analyze_hit_rate --type IRON_CONDOR
 
 See [docs/iron_condor_spec.md](docs/iron_condor_spec.md) for full specification including tail risk profile, stop vs label band rationale, and monitoring triggers.
 
+**TODOs (Condor Gate Hardening):**
+- [ ] Validate `mvrv_60d_flat_underval` (+5 provisional) incremental lift conditional on existing score components — standalone 78% safe rate may collapse once trend/vol filters are active
+- [ ] Run `condor_walkforward` with +5/+7/+10 weight variants; promote weight only if out-of-sample precision improves without inflating pass rate into bad regimes
+- [ ] Add IV floor filter (min IV rank at entry) — 58.9% hit rate on underlying ≠ profitable condors without sufficient premium collected
+- [ ] Add liquidity gate (max bid-ask spread on 4 legs) — thin OTM BTC options can erase theoretical edge
+- [ ] Backtest stop-loss slippage on 4-leg close during fast moves — the -25.9% worst-case flat-z period shows price can gap through the 6% stop
+- [ ] Integrate `OptionSnapshot` data to measure actual condor P&L (not just range-staying rate)
+
 ---
 
 ## Configuration

@@ -190,6 +190,28 @@ class DailySignal(models.Model):
         help_text="Breakdown of range score components"
     )
 
+    # Iron Condor MVRV-based strike levels
+    condor_short_call = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Short call strike = max(spot*1.10, CB*1.12)"
+    )
+    condor_short_put = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Short put strike = min(spot*0.90, CB*0.92)"
+    )
+    condor_cost_basis = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="MVRV-60d implied cost basis (spot / mvrv_60d)"
+    )
+    condor_strike_meta = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Strike computation metadata: sources, distances, mvrv_60d"
+    )
+
     class Meta:
         db_table = "daily_signal"
         ordering = ["-date"]
