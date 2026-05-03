@@ -17,7 +17,9 @@ Usage:
 """
 from dataclasses import dataclass, field
 from decimal import Decimal
+from pathlib import Path
 from typing import Optional
+import copy
 import json
 
 
@@ -36,6 +38,15 @@ class DTEConfig:
     min_dte: int
     max_dte: int
     optimal_dte: int
+
+
+@dataclass
+class ExitConfig:
+    """Exit policy parameters per signal type."""
+    stop_loss_pct: float
+    take_profit_pct: float
+    max_hold_days: int
+    scale_down_day: Optional[int] = None
 
 
 @dataclass
@@ -101,6 +112,11 @@ class PolicyVersion:
     # Spread configuration
     spread_enabled: dict[str, bool] = field(default_factory=dict)
     spread_width_pct: dict[str, float] = field(default_factory=dict)
+    exit_params: dict[str, ExitConfig] = field(default_factory=dict)
+    expected_edge_by_signal: dict[str, float] = field(default_factory=dict)
+    
+    # Per-signal delta targets (calibrated from MAE analysis)
+    signal_delta_targets: dict[str, float] = field(default_factory=dict)
     
     # Liquidity and execution
     liquidity: LiquidityConfig = field(default_factory=LiquidityConfig)
@@ -143,6 +159,24 @@ class PolicyVersion:
     def get_spread_width(self, signal_type: str) -> float:
         """Get spread width % for signal type."""
         return self.spread_width_pct.get(signal_type, 0.10)
+
+    def get_signal_delta(self, signal_type: str) -> float:
+        """
+        Get target delta for a signal type.
+        
+        Calibrated from MAE analysis:
+        - Higher MAE = need more ITM cushion (higher absolute delta)
+        - Lower MAE = can use ATM or slight OTM
+        """
+        return self.signal_delta_targets.get(signal_type, 0.55)
+
+    def get_exit_params(self, signal_type: str) -> Optional[ExitConfig]:
+        """Get exit params for a signal type, if configured."""
+        return self.exit_params.get(signal_type)
+
+    def get_expected_edge(self, signal_type: str, default: float = 0.08) -> float:
+        """Get expected edge for cost checks."""
+        return self.expected_edge_by_signal.get(signal_type, default)
     
     def estimate_edge_after_costs(
         self, 
@@ -167,8 +201,11 @@ class PolicyVersion:
             "signal_tier_map": self.signal_tier_map,
             "dte_targets": {k: vars(v) for k, v in self.dte_targets.items()},
             "delta_targets": self.delta_targets,
+            "signal_delta_targets": self.signal_delta_targets,
             "spread_enabled": self.spread_enabled,
             "spread_width_pct": self.spread_width_pct,
+            "exit_params": {k: vars(v) for k, v in self.exit_params.items()},
+            "expected_edge_by_signal": self.expected_edge_by_signal,
             "liquidity": vars(self.liquidity),
             "execution_costs": vars(self.execution_costs),
             "condor": vars(self.condor),
@@ -183,8 +220,8 @@ class PolicyVersion:
 # =============================================================================
 
 POLICY_V1 = PolicyVersion(
-    version="2026-05-03.1",
-    description="V7 path-stable policy with spread support for all signals",
+    version="2026-05-03.3",
+    description="Path-analysis calibrated policy with corrected IRON_CONDOR (63.1% win rate, 7d range-bound)",
     
     tiers={
         "1": TierConfig(risk_usd=4000, naked_pct=0.20, spread_pct=0.80),
@@ -204,16 +241,18 @@ POLICY_V1 = PolicyVersion(
         "IRON_CONDOR": 2,
     },
     
+    # DTE targets calibrated from TTH p75 + 2d buffer
+    # Source: analyze_path_stats (14d horizon, 5% target, 4% invalidation)
     dte_targets={
-        "CALL": DTEConfig(min_dte=12, max_dte=21, optimal_dte=14),
-        "PUT": DTEConfig(min_dte=10, max_dte=14, optimal_dte=12),
-        "OPTION_CALL": DTEConfig(min_dte=11, max_dte=14, optimal_dte=12),
-        "OPTION_PUT": DTEConfig(min_dte=11, max_dte=14, optimal_dte=12),
-        "TACTICAL_PUT": DTEConfig(min_dte=10, max_dte=14, optimal_dte=12),
-        "BULL_PROBE": DTEConfig(min_dte=10, max_dte=14, optimal_dte=12),
-        "BEAR_PROBE": DTEConfig(min_dte=12, max_dte=16, optimal_dte=14),
-        "IRON_CONDOR": DTEConfig(min_dte=10, max_dte=21, optimal_dte=14),
-        "MVRV_SHORT": DTEConfig(min_dte=10, max_dte=14, optimal_dte=12),  # Shortened for options
+        "CALL": DTEConfig(min_dte=9, max_dte=14, optimal_dte=11),       # TTH p75=7d
+        "PUT": DTEConfig(min_dte=8, max_dte=12, optimal_dte=10),        # TTH p75=6d
+        "OPTION_CALL": DTEConfig(min_dte=7, max_dte=12, optimal_dte=9), # TTH p75=5d, fast signal
+        "OPTION_PUT": DTEConfig(min_dte=5, max_dte=10, optimal_dte=7),  # TTH p75=3d, fastest
+        "TACTICAL_PUT": DTEConfig(min_dte=8, max_dte=12, optimal_dte=10),  # TTH p75=5.5d
+        "BULL_PROBE": DTEConfig(min_dte=7, max_dte=11, optimal_dte=9),  # TTH p75=5d, fast
+        "BEAR_PROBE": DTEConfig(min_dte=11, max_dte=16, optimal_dte=13),  # TTH p75=8.5d, slow
+        "IRON_CONDOR": DTEConfig(min_dte=9, max_dte=13, optimal_dte=9),  # 7d horizon + 2d buffer
+        "MVRV_SHORT": DTEConfig(min_dte=12, max_dte=18, optimal_dte=14),  # TTH p75=10d, slowest
     },
     
     delta_targets={
@@ -225,6 +264,20 @@ POLICY_V1 = PolicyVersion(
         "deep_otm": {"call": 0.10, "put": -0.10},
     },
     
+    # Per-signal delta targets based on MAE analysis
+    # Higher MAE = need more ITM cushion
+    signal_delta_targets={
+        "CALL": 0.60,          # MAE(W) p75=4.71%, slight ITM
+        "PUT": -0.60,          # MAE(W) p75=4.41%, slight ITM
+        "OPTION_CALL": 0.65,   # MAE(W) p75=8.48%, need ITM cushion
+        "OPTION_PUT": -0.65,   # MAE(W) p75=6.82%, need ITM cushion
+        "TACTICAL_PUT": -0.40, # MAE(W) p75=3.08%, hedge so slight OTM
+        "BULL_PROBE": 0.55,    # MAE(W) p75=3.84%, ATM to slight ITM
+        "BEAR_PROBE": -0.55,   # MAE(W) p75=6.53%, need cushion
+        "IRON_CONDOR": 0.20,   # OTM wings for premium selling
+        "MVRV_SHORT": -0.60,   # MAE(W) p75=7.19%, shakeout-heavy
+    },
+    
     # Enable spreads for ALL signals including MVRV_SHORT
     spread_enabled={
         "CALL": True,
@@ -234,20 +287,47 @@ POLICY_V1 = PolicyVersion(
         "TACTICAL_PUT": True,
         "BULL_PROBE": True,
         "BEAR_PROBE": True,
-        "MVRV_SHORT": True,  # NOW ENABLED
+        "MVRV_SHORT": True,
         "IRON_CONDOR": True,
     },
     
+    # Spread width calibrated from MFE p75 × 0.65-0.70
     spread_width_pct={
-        "CALL": 0.10,
-        "PUT": 0.10,
-        "OPTION_CALL": 0.10,
-        "OPTION_PUT": 0.10,
-        "TACTICAL_PUT": 0.08,
-        "BULL_PROBE": 0.07,
-        "BEAR_PROBE": 0.07,
-        "MVRV_SHORT": 0.065,  # ~$5k width at $77k spot (like your trade)
-        "IRON_CONDOR": 0.10,
+        "CALL": 0.10,          # MFE p75=15.03% × 0.67 = 10%
+        "PUT": 0.09,           # MFE p75=14.28% × 0.65 = 9.3%
+        "OPTION_CALL": 0.10,   # MFE p75=15.26% × 0.67 = 10%
+        "OPTION_PUT": 0.12,    # MFE p75=23.08% × 0.52 = 12% (capped)
+        "TACTICAL_PUT": 0.07,  # MFE p75=10.40% × 0.67 = 7%
+        "BULL_PROBE": 0.12,    # MFE p75=28.24% × 0.42 = 12% (capped, highest MFE)
+        "BEAR_PROBE": 0.08,    # MFE p75=12.13% × 0.67 = 8%
+        "IRON_CONDOR": 0.10,   # Standard condor width
+        "MVRV_SHORT": 0.09,    # MFE p75=13.90% × 0.65 = 9%
+    },
+    
+    # Exit params calibrated from MAE(W) p75 for stop loss
+    exit_params={
+        "CALL": ExitConfig(stop_loss_pct=0.045, take_profit_pct=0.70, max_hold_days=9, scale_down_day=6),
+        "PUT": ExitConfig(stop_loss_pct=0.045, take_profit_pct=0.70, max_hold_days=8, scale_down_day=5),
+        "OPTION_CALL": ExitConfig(stop_loss_pct=0.085, take_profit_pct=0.70, max_hold_days=7, scale_down_day=4),  # Wide MAE
+        "OPTION_PUT": ExitConfig(stop_loss_pct=0.070, take_profit_pct=0.70, max_hold_days=5, scale_down_day=3),   # Wide MAE
+        "TACTICAL_PUT": ExitConfig(stop_loss_pct=0.035, take_profit_pct=0.70, max_hold_days=8, scale_down_day=5), # Tight MAE
+        "BULL_PROBE": ExitConfig(stop_loss_pct=0.040, take_profit_pct=0.70, max_hold_days=7, scale_down_day=5),
+        "BEAR_PROBE": ExitConfig(stop_loss_pct=0.065, take_profit_pct=0.70, max_hold_days=11, scale_down_day=7),  # Wide MAE, slow
+        "MVRV_SHORT": ExitConfig(stop_loss_pct=0.070, take_profit_pct=0.70, max_hold_days=12, scale_down_day=7),  # Shakeout-heavy
+        "IRON_CONDOR": ExitConfig(stop_loss_pct=0.068, take_profit_pct=0.50, max_hold_days=9, scale_down_day=8),
+    },
+    
+    # Expected edge = win_rate × spread_width (from path analysis)
+    expected_edge_by_signal={
+        "CALL": 0.069,         # 69.4% × 10%
+        "PUT": 0.068,          # 75.7% × 9%
+        "OPTION_CALL": 0.092,  # 92.3% × 10%
+        "OPTION_PUT": 0.096,   # 80.0% × 12%
+        "TACTICAL_PUT": 0.034, # 48.0% × 7%
+        "BULL_PROBE": 0.085,   # 71.1% × 12%
+        "BEAR_PROBE": 0.047,   # 58.8% × 8%
+        "IRON_CONDOR": 0.063,  # 63.1% × 10%
+        "MVRV_SHORT": 0.060,   # 66.7% × 9%
     },
     
     liquidity=LiquidityConfig(
@@ -288,10 +368,52 @@ POLICY_V1 = PolicyVersion(
 
 # Active policy registry
 _POLICIES = {
-    "2026-05-03.1": POLICY_V1,
+    "2026-05-03.3": POLICY_V1,
 }
 
-_ACTIVE_VERSION = "2026-05-03.1"
+_ACTIVE_VERSION = "2026-05-03.3"
+_CALIBRATION_PATH = Path(__file__).resolve().parents[1] / "data" / "policy_calibration.json"
+
+
+def _coerce_dte_config(payload: dict) -> DTEConfig:
+    return DTEConfig(
+        min_dte=int(payload["min_dte"]),
+        max_dte=int(payload["max_dte"]),
+        optimal_dte=int(payload["optimal_dte"]),
+    )
+
+
+def _coerce_exit_config(payload: dict) -> ExitConfig:
+    return ExitConfig(
+        stop_loss_pct=float(payload["stop_loss_pct"]),
+        take_profit_pct=float(payload["take_profit_pct"]),
+        max_hold_days=int(payload["max_hold_days"]),
+        scale_down_day=(None if payload.get("scale_down_day") is None else int(payload["scale_down_day"])),
+    )
+
+
+def _apply_calibration(policy: PolicyVersion) -> PolicyVersion:
+    """
+    Apply disk calibration overrides to a copied policy.
+    Falls back silently to defaults if file is missing/invalid.
+    """
+    if not _CALIBRATION_PATH.exists():
+        return policy
+    try:
+        payload = json.loads(_CALIBRATION_PATH.read_text())
+    except Exception:
+        return policy
+
+    calibrated = copy.deepcopy(policy)
+    for signal_type, dte_cfg in payload.get("dte_targets", {}).items():
+        calibrated.dte_targets[signal_type] = _coerce_dte_config(dte_cfg)
+    for signal_type, width in payload.get("spread_width_pct", {}).items():
+        calibrated.spread_width_pct[signal_type] = float(width)
+    for signal_type, exit_cfg in payload.get("exit_params", {}).items():
+        calibrated.exit_params[signal_type] = _coerce_exit_config(exit_cfg)
+    for signal_type, edge in payload.get("expected_edge_by_signal", {}).items():
+        calibrated.expected_edge_by_signal[signal_type] = float(edge)
+    return calibrated
 
 
 def get_policy(version: Optional[str] = None) -> PolicyVersion:
@@ -307,7 +429,7 @@ def get_policy(version: Optional[str] = None) -> PolicyVersion:
     v = version or _ACTIVE_VERSION
     if v not in _POLICIES:
         raise ValueError(f"Unknown policy version: {v}. Available: {list(_POLICIES.keys())}")
-    return _POLICIES[v]
+    return _apply_calibration(_POLICIES[v])
 
 
 def get_active_version() -> str:

@@ -64,6 +64,19 @@ class Command(BaseCommand):
             dest="persist",
             help="Don't persist signal to database (dry run)",
         )
+        parser.add_argument(
+            "--include-setup",
+            action="store_true",
+            default=True,
+            dest="include_setup",
+            help="Include trade setup in Telegram notification (default: True)",
+        )
+        parser.add_argument(
+            "--no-setup",
+            action="store_false",
+            dest="include_setup",
+            help="Don't include trade setup in Telegram notification",
+        )
 
     def handle(self, *args, **options):
         from datetime import datetime
@@ -141,13 +154,13 @@ class Command(BaseCommand):
             
             # Send Telegram notification if requested
             if options["notify"]:
-                self._send_telegram_notification(signal, options["verbose"])
+                self._send_telegram_notification(signal, options["verbose"], options["include_setup"])
                 
         except Exception as e:
             self.stderr.write(self.style.ERROR(f"Error: {e}"))
             raise
 
-    def _send_telegram_notification(self, signal, verbose: bool):
+    def _send_telegram_notification(self, signal, verbose: bool, include_setup: bool = True):
         """Send Telegram notification for tradeable or vetoed signals."""
         # Check if overlay vetoed (fusion wanted to trade but overlay said no)
         no_trade_reasons = signal.no_trade_reasons or []
@@ -166,12 +179,16 @@ class Command(BaseCommand):
         try:
             from notifications.notifier import TelegramNotifier
             notifier = TelegramNotifier()
-            success = notifier.send_from_model(signal)
+            success = notifier.send_from_model(signal, include_setup=include_setup)
             
             if success:
                 self.stdout.write(
                     self.style.SUCCESS(f"✓ Telegram notification sent")
                 )
+                if include_setup:
+                    self.stdout.write(
+                        self.style.SUCCESS(f"✓ Trade setup included")
+                    )
             else:
                 self.stderr.write(
                     self.style.WARNING("Telegram notification failed")

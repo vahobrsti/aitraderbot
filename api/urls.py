@@ -15,7 +15,9 @@ urlpatterns = [
     # Signal endpoints (auth required)
     path('v1/signals/', views.DailySignalListView.as_view(), name='signal-list'),
     path('v1/signals/latest/', views.DailySignalLatestView.as_view(), name='signal-latest'),
+    path('v1/signals/latest/setup/', views.TradeSetupLatestView.as_view(), name='signal-latest-setup'),
     path('v1/signals/<str:date>/', views.DailySignalDetailView.as_view(), name='signal-detail'),
+    path('v1/signals/<str:date>/setup/', views.TradeSetupView.as_view(), name='signal-setup'),
     
     # Research endpoints (auth required)
     path('v1/fusion/explain/', research_views.FusionExplainView.as_view(), name='fusion-explain'),

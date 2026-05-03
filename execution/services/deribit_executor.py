@@ -94,20 +94,6 @@ class DeribitExecutor:
     5. Policy-driven configuration
     """
 
-    # Historical realized edge by signal type (from backtest data)
-    # These should be updated periodically based on actual performance
-    EXPECTED_EDGE_BY_SIGNAL = {
-        "CALL": 0.12,           # 12% expected from path analysis
-        "PUT": 0.10,
-        "OPTION_CALL": 0.08,    # Lower confidence signals
-        "OPTION_PUT": 0.08,
-        "TACTICAL_PUT": 0.06,
-        "BULL_PROBE": 0.10,
-        "BEAR_PROBE": 0.08,
-        "MVRV_SHORT": 0.06,     # Lower edge, DCA strategy
-        "IRON_CONDOR": 0.04,    # Premium selling, lower edge but higher win rate
-    }
-    
     # Minimum edge required after costs (by trade type)
     MIN_EDGE_REQUIRED = {
         "directional": 0.02,    # 2% min for directional trades
@@ -293,10 +279,7 @@ class DeribitExecutor:
         )
         
         # Get expected edge for this signal type
-        expected_edge = self.EXPECTED_EDGE_BY_SIGNAL.get(
-            plan.trade_decision, 
-            0.08  # Default 8% if unknown
-        )
+        expected_edge = self.policy.get_expected_edge(plan.trade_decision, default=0.08)
         
         # Determine minimum edge required
         if plan.is_condor:
