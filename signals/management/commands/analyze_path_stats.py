@@ -225,13 +225,13 @@ class Command(BaseCommand):
                 can_long_fire = True
                 can_short_fire = True
                 if not no_cooldown:
-                    if is_long_state and last_long_date is not None and (date - last_long_date).days < core_cooldown_days:
+                    if is_long_state and last_long_date is not None and (date - last_long_date).days <= core_cooldown_days:
                         can_long_fire = False
-                    if is_short_state and last_short_date is not None and (date - last_short_date).days < core_cooldown_days:
+                    if is_short_state and last_short_date is not None and (date - last_short_date).days <= core_cooldown_days:
                         can_short_fire = False
-                    if is_bull_probe and last_long_date is not None and (date - last_long_date).days < probe_cooldown_days:
+                    if is_bull_probe and last_long_date is not None and (date - last_long_date).days <= probe_cooldown_days:
                         can_long_fire = False
-                    if is_bear_probe and last_short_date is not None and (date - last_short_date).days < probe_cooldown_days:
+                    if is_bear_probe and last_short_date is not None and (date - last_short_date).days <= probe_cooldown_days:
                         can_short_fire = False
 
                 # Probe sizing (simplified: limit to 0.5x base overlay)
@@ -267,7 +267,7 @@ class Command(BaseCommand):
                     last_short_date = date
 
                 tactical_cooldown_ok = (
-                    no_cooldown or last_tactical_date is None or (date - last_tactical_date).days >= tactical_cooldown_days
+                    no_cooldown or last_tactical_date is None or (date - last_tactical_date).days > tactical_cooldown_days
                 )
                 if result.state in long_states and not long_trade_fired and tactical_cooldown_ok:
                     tactical = tactical_put_inside_bull(result, row)
@@ -293,7 +293,7 @@ class Command(BaseCommand):
 
                 option_call_fired = False
                 if signal_call == 1 and not fusion_traded:
-                    cooldown_ok = no_cooldown or last_option_call_date is None or (date - last_option_call_date).days >= option_cooldown_days
+                    cooldown_ok = no_cooldown or last_option_call_date is None or (date - last_option_call_date).days > option_cooldown_days
                     overlay_ok = no_overlay or size_mult > 0
                     if cooldown_ok and overlay_ok:
                         all_trades.append(
@@ -311,7 +311,7 @@ class Command(BaseCommand):
 
                 option_put_fired = False
                 if signal_put == 1 and not fusion_traded and not option_call_fired:
-                    cooldown_ok = no_cooldown or last_option_put_date is None or (date - last_option_put_date).days >= option_cooldown_days
+                    cooldown_ok = no_cooldown or last_option_put_date is None or (date - last_option_put_date).days > option_cooldown_days
                     overlay_ok = no_overlay or size_mult > 0
                     if cooldown_ok and overlay_ok:
                         efb_veto, _ = compute_efb_veto(row)
@@ -335,7 +335,7 @@ class Command(BaseCommand):
                     from signals.mvrv_short import check_mvrv_short_signal
                     mvrv_signal = check_mvrv_short_signal(row)
                     if mvrv_signal.active:
-                        mvrv_cooldown_ok = no_cooldown or last_mvrv_short_date is None or (date - last_mvrv_short_date).days >= mvrv_short_cooldown_days
+                        mvrv_cooldown_ok = no_cooldown or last_mvrv_short_date is None or (date - last_mvrv_short_date).days > mvrv_short_cooldown_days
                         if mvrv_cooldown_ok:
                             all_trades.append(
                                 {
@@ -351,7 +351,7 @@ class Command(BaseCommand):
 
                 # === IRON CONDOR (only when fusion = NO_TRADE/TRANSITION_CHOP, no other signal fired) ===
                 if has_condor_data and fusion_no_signal and not option_call_fired and not option_put_fired:
-                    condor_cooldown_ok = no_cooldown or last_condor_date is None or (date - last_condor_date).days >= CONDOR_COOLDOWN_DAYS
+                    condor_cooldown_ok = no_cooldown or last_condor_date is None or (date - last_condor_date).days > CONDOR_COOLDOWN_DAYS
                     if condor_cooldown_ok:
                         dp_med = float(dp_expanding_median.loc[date]) if date in dp_expanding_median.index and pd.notna(dp_expanding_median.loc[date]) else 0.5
                         atr_r = float(atr_ratio_series.loc[date]) if date in atr_ratio_series.index and pd.notna(atr_ratio_series.loc[date]) else None
@@ -391,6 +391,10 @@ class Command(BaseCommand):
         target: float,
         invalidation: float,
     ) -> pd.DataFrame:
+        # Iron condor uses different hit definition: price stays within ±10% over 7 days
+        CONDOR_HORIZON = 7
+        CONDOR_RANGE = 0.10  # ±10%
+        
         rows = []
         for _, t in trades_df.iterrows():
             dt = pd.Timestamp(t["date"])
@@ -400,8 +404,12 @@ class Command(BaseCommand):
             if not np.isfinite(entry) or entry <= 0:
                 continue
 
-            path = price_df.loc[dt:].iloc[1 : horizon + 1]
-            if len(path) < horizon:
+            # For IRON_CONDOR, use 7-day horizon; for others, use specified horizon
+            is_condor = t["type"] == "IRON_CONDOR"
+            effective_horizon = CONDOR_HORIZON if is_condor else horizon
+
+            path = price_df.loc[dt:].iloc[1 : effective_horizon + 1]
+            if len(path) < effective_horizon:
                 continue
 
             highs = path["btc_high"].to_numpy(dtype=float)
@@ -410,30 +418,48 @@ class Command(BaseCommand):
             if np.isnan(highs).any() or np.isnan(lows).any() or np.isnan(closes).any():
                 continue
 
-            is_long = t["direction"] == "LONG"
-            if is_long:
-                favorable_daily = highs / entry - 1.0
-                adverse_daily = 1.0 - (lows / entry)  # positive adverse magnitude
-                terminal_dir_ret = closes[-1] / entry - 1.0
+            if is_condor:
+                # IRON_CONDOR: hit = price stayed within ±10% range
+                max_up = np.max(highs / entry - 1.0)
+                max_down = np.max(1.0 - lows / entry)
+                hit = (max_up < CONDOR_RANGE) and (max_down < CONDOR_RANGE)
+                hit_day = None  # N/A for condors
+                
+                # For condors, MAE is the max move in either direction
+                mae = max(max_up, max_down)
+                # MFE for condors is how close to expiry we got without breaching
+                # (inverted: lower max move = better)
+                mfe = 1.0 - mae  # Higher is better
+                terminal_dir_ret = 0.0  # N/A for neutral
+                tti = effective_horizon + 1  # N/A
+                invalid_before_hit = 0
+                same_day_ambiguous = 0
             else:
-                favorable_daily = 1.0 - (lows / entry)
-                adverse_daily = (highs / entry) - 1.0
-                terminal_dir_ret = 1.0 - (closes[-1] / entry)
+                # Directional trades: original logic
+                is_long = t["direction"] == "LONG"
+                if is_long:
+                    favorable_daily = highs / entry - 1.0
+                    adverse_daily = 1.0 - (lows / entry)  # positive adverse magnitude
+                    terminal_dir_ret = closes[-1] / entry - 1.0
+                else:
+                    favorable_daily = 1.0 - (lows / entry)
+                    adverse_daily = (highs / entry) - 1.0
+                    terminal_dir_ret = 1.0 - (closes[-1] / entry)
 
-            hit_idx = np.where(favorable_daily >= target)[0]
-            hit_day = int(hit_idx[0] + 1) if len(hit_idx) else None
-            hit = hit_day is not None
+                hit_idx = np.where(favorable_daily >= target)[0]
+                hit_day = int(hit_idx[0] + 1) if len(hit_idx) else None
+                hit = hit_day is not None
 
-            mfe = float(np.max(favorable_daily))
-            if hit:
-                mae = float(np.max(adverse_daily[:hit_day]))
-                tti_idx = np.where(adverse_daily[:hit_day] >= invalidation)[0]
-            else:
-                mae = float(np.max(adverse_daily))
-                tti_idx = np.where(adverse_daily >= invalidation)[0]
-            tti = int(tti_idx[0] + 1) if len(tti_idx) else horizon + 1
-            invalid_before_hit = (tti < hit_day) if hit else (tti <= horizon)
-            same_day_ambiguous = int(hit and (tti == hit_day))
+                mfe = float(np.max(favorable_daily))
+                if hit:
+                    mae = float(np.max(adverse_daily[:hit_day]))
+                    tti_idx = np.where(adverse_daily[:hit_day] >= invalidation)[0]
+                else:
+                    mae = float(np.max(adverse_daily))
+                    tti_idx = np.where(adverse_daily >= invalidation)[0]
+                tti = int(tti_idx[0] + 1) if len(tti_idx) else effective_horizon + 1
+                invalid_before_hit = (tti < hit_day) if hit else (tti <= effective_horizon)
+                same_day_ambiguous = int(hit and (tti == hit_day))
 
             rows.append(
                 {
@@ -461,37 +487,59 @@ class Command(BaseCommand):
         return float(s.mean() * 100.0) if len(s) else 0.0
 
     def _print_tth(self, df: pd.DataFrame):
-        hits = df[df["hit"] == 1].copy()
-        misses = df[df["hit"] == 0].copy()
-        if hits.empty:
+        # Filter out IRON_CONDOR (no TTH for range-bound trades)
+        directional_df = df[df["type"] != "IRON_CONDOR"]
+        hits = directional_df[directional_df["hit"] == 1].copy()
+        misses = directional_df[directional_df["hit"] == 0].copy()
+        
+        # Also show IRON_CONDOR summary separately
+        condor_df = df[df["type"] == "IRON_CONDOR"]
+        
+        if hits.empty and condor_df.empty:
             self.stdout.write("\nTTH: no winners.")
             return
-        tth = hits["tth"].astype(int)
-        all_n = len(df)
-
-        in_1d = (df["hit"].eq(1) & df["tth"].eq(1)).mean() * 100
-        in_2_3 = (df["hit"].eq(1) & df["tth"].between(2, 3)).mean() * 100
-        in_4_7 = (df["hit"].eq(1) & df["tth"].between(4, 7)).mean() * 100
-        in_8_14 = (df["hit"].eq(1) & df["tth"].between(8, 14)).mean() * 100
-
+        
         self.stdout.write("\n" + "-" * 100)
         self.stdout.write("1) TIME-TO-HIT DISTRIBUTION (TTH)")
         self.stdout.write("-" * 100)
-        self.stdout.write(f"Total trades: {all_n} | Winners: {len(hits)}")
-        self.stdout.write(f"% hit in 1 day   : {in_1d:.1f}%")
-        self.stdout.write(f"% hit in 2-3 days: {in_2_3:.1f}%")
-        self.stdout.write(f"% hit in 4-7 days: {in_4_7:.1f}%")
-        self.stdout.write(f"% hit in 8-14 days: {in_8_14:.1f}%")
-        self.stdout.write(f"Median TTH: {float(tth.median()):.1f} days")
-        self.stdout.write(f"75th pct TTH: {float(tth.quantile(0.75)):.1f} days")
-        if not misses.empty:
-            mm = misses["max_move_if_no_hit"].astype(float)
-            self.stdout.write(
-                "No-hit max move achieved: "
-                f"avg={self._fmt_pct(float(mm.mean()))}, "
-                f"median={self._fmt_pct(float(mm.median()))}, "
-                f"75th={self._fmt_pct(float(mm.quantile(0.75)))}"
-            )
+        
+        if not hits.empty:
+            tth = hits["tth"].dropna().astype(int)
+            all_n = len(directional_df)
+
+            in_1d = (directional_df["hit"].eq(1) & directional_df["tth"].eq(1)).mean() * 100
+            in_2_3 = (directional_df["hit"].eq(1) & directional_df["tth"].between(2, 3)).mean() * 100
+            in_4_7 = (directional_df["hit"].eq(1) & directional_df["tth"].between(4, 7)).mean() * 100
+            in_8_14 = (directional_df["hit"].eq(1) & directional_df["tth"].between(8, 14)).mean() * 100
+
+            self.stdout.write(f"Directional trades: {all_n} | Winners: {len(hits)}")
+            self.stdout.write(f"% hit in 1 day   : {in_1d:.1f}%")
+            self.stdout.write(f"% hit in 2-3 days: {in_2_3:.1f}%")
+            self.stdout.write(f"% hit in 4-7 days: {in_4_7:.1f}%")
+            self.stdout.write(f"% hit in 8-14 days: {in_8_14:.1f}%")
+            if len(tth) > 0:
+                self.stdout.write(f"Median TTH: {float(tth.median()):.1f} days")
+                self.stdout.write(f"75th pct TTH: {float(tth.quantile(0.75)):.1f} days")
+            if not misses.empty:
+                mm = misses["max_move_if_no_hit"].dropna().astype(float)
+                if len(mm) > 0:
+                    self.stdout.write(
+                        "No-hit max move achieved: "
+                        f"avg={self._fmt_pct(float(mm.mean()))}, "
+                        f"median={self._fmt_pct(float(mm.median()))}, "
+                        f"75th={self._fmt_pct(float(mm.quantile(0.75)))}"
+                    )
+        
+        # IRON_CONDOR summary
+        if not condor_df.empty:
+            condor_wins = condor_df[condor_df["hit"] == 1]
+            condor_losses = condor_df[condor_df["hit"] == 0]
+            win_rate = len(condor_wins) / len(condor_df) * 100 if len(condor_df) > 0 else 0
+            self.stdout.write(f"\nIRON_CONDOR (range-bound): {len(condor_df)} trades | {len(condor_wins)} wins ({win_rate:.1f}%)")
+            if not condor_wins.empty:
+                self.stdout.write(f"  Winners avg MAE (max move): {self._fmt_pct(float(condor_wins['mae'].mean()))}")
+            if not condor_losses.empty:
+                self.stdout.write(f"  Losers avg MAE (breach size): {self._fmt_pct(float(condor_losses['mae'].mean()))}")
 
     def _print_mae(self, df: pd.DataFrame):
         winners = df[df["hit"] == 1]

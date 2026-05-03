@@ -51,6 +51,7 @@ class TelegramNotifier:
     Usage:
         notifier = TelegramNotifier()
         notifier.send_signal(signal_data)
+        notifier.send_trade_setup(setup)  # NEW: Send trade setup
     """
     
     def __init__(
@@ -76,6 +77,10 @@ class TelegramNotifier:
             "TACTICAL_PUT": "🟠",
             "OPTION_CALL": "🟢",
             "OPTION_PUT": "🔴",
+            "MVRV_SHORT": "🔴",
+            "BULL_PROBE": "🟢",
+            "BEAR_PROBE": "🔴",
+            "IRON_CONDOR": "🟡",
             "NO_TRADE": "⚪",
         }.get(decision, "❓")
     
@@ -175,8 +180,8 @@ class TelegramNotifier:
         parts.append(f"*Fusion State:* `{signal.fusion_state}`")
         parts.append(f"*Score:* {signal.fusion_score:+d} ({signal.fusion_confidence})")
         parts.append("")
-        parts.append(f"📈 p\_long: `{signal.p_long:.1%}`")
-        parts.append(f"📉 p\_short: `{signal.p_short:.1%}`")
+        parts.append(f"📈 p\\_long: `{signal.p_long:.1%}`")
+        parts.append(f"📉 p\\_short: `{signal.p_short:.1%}`")
         parts.append("")
         parts.append("_Rule-based signal (not fusion). Use as supplementary alert._")
         
@@ -223,12 +228,26 @@ class TelegramNotifier:
         
         return result
     
-    def send_from_model(self, daily_signal) -> bool:
+    def send_trade_setup(self, setup) -> bool:
+        """
+        Send trade setup notification to Telegram.
+        
+        Args:
+            setup: TradeSetup instance from execution.services.trade_setup
+            
+        Returns:
+            True if sent successfully, False otherwise.
+        """
+        message = setup.to_telegram_message()
+        return asyncio.run(self._send_async(message))
+    
+    def send_from_model(self, daily_signal, include_setup: bool = True) -> bool:
         """
         Send notification from DailySignal model instance.
         
         Args:
             daily_signal: DailySignal model instance
+            include_setup: If True, also send trade setup (if available)
             
         Returns:
             True if sent, False if NO_TRADE (non-vetoed) or error.
@@ -259,4 +278,18 @@ class TelegramNotifier:
             signal_option_put=daily_signal.signal_option_put,
             stop_loss=getattr(daily_signal, 'stop_loss', '') or "",
         )
-        return self.send_signal(signal)
+        result = self.send_signal(signal)
+        
+        # Send trade setup if requested and signal is tradeable
+        if include_setup and daily_signal.trade_decision != "NO_TRADE" and not overlay_veto:
+            try:
+                from execution.services.trade_setup import TradeSetupBuilder
+                builder = TradeSetupBuilder()
+                setup = builder.build_setup(daily_signal.date)
+                if setup:
+                    setup_result = self.send_trade_setup(setup)
+                    result = result and setup_result
+            except Exception as e:
+                print(f"Trade setup notification error: {e}")
+        
+        return result

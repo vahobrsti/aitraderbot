@@ -19,6 +19,7 @@ from signals.tactical_puts import tactical_put_inside_bull
 from signals.options import get_strategy_with_path_risk, get_decision_strategy_summary, DECISION_STRATEGY_MAP, format_stop_loss_string, compute_condor_strikes
 from signals.mvrv_short import check_mvrv_short_signal
 from signals.condor_gate import evaluate_condor_gate, CondorGateResult, CONDOR_COOLDOWN_DAYS, compute_vol_metrics
+from execution.services.policy import get_policy
 
 # Cooldown constants — single source of truth for live + backtest alignment
 # These values must match analyze_path_stats.py for calibration consistency
@@ -293,6 +294,18 @@ class SignalService:
             strategy_summary = get_decision_strategy_summary(trade_decision)
         else:
             strategy_summary = self._get_strategy_summary_with_path_risk(fusion_result.state)
+
+        # Policy is source of truth for executable numeric params.
+        policy = get_policy()
+        policy_exit = policy.get_exit_params(trade_decision)
+        if policy_exit is not None:
+            strategy_summary["stop_loss_pct"] = policy_exit.stop_loss_pct
+            strategy_summary["take_profit_pct"] = policy_exit.take_profit_pct
+            strategy_summary["max_hold_days"] = policy_exit.max_hold_days
+            strategy_summary["scale_down_day"] = policy_exit.scale_down_day
+        strategy_summary["spread_width_pct"] = policy.get_spread_width(trade_decision)
+        dte_cfg = policy.get_dte_target(trade_decision)
+        strategy_summary["dte_range"] = f"{dte_cfg.min_dte}-{dte_cfg.max_dte}d"
         
         # Compute effective values
         if trade_decision == "NO_TRADE":

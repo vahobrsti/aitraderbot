@@ -186,9 +186,17 @@ class DeribitEntryEngine:
 
         # Get policy parameters
         dte_cfg = self.policy.get_dte_target(decision)
-        strike_guidance = signal.strike_guidance or "slight_itm"
-        target_delta = self.policy.get_delta_target(strike_guidance, option_type)
-        abs_target_delta = abs(target_delta)
+        
+        # Use signal-specific delta target from policy (calibrated from MAE analysis)
+        # Falls back to strike_guidance-based lookup if signal not in policy
+        signal_delta = self.policy.get_signal_delta(decision)
+        if signal_delta != 0.55:  # Not default
+            abs_target_delta = abs(signal_delta)
+        else:
+            # Fallback to strike_guidance-based lookup
+            strike_guidance = signal.strike_guidance or "slight_itm"
+            target_delta = self.policy.get_delta_target(strike_guidance, option_type)
+            abs_target_delta = abs(target_delta)
 
         # Find best contract for LONG leg (always buy the primary option)
         candidates = self.selector.find_candidates(

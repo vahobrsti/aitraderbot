@@ -1,0 +1,654 @@
+"""
+Trade Setup Builder - Generates complete trade setups from signals.
+
+Combines signal data with option snapshots and policy to produce
+executable trade setups with full validation.
+
+Usage:
+    from execution.services.trade_setup import TradeSetupBuilder
+    
+    builder = TradeSetupBuilder()
+    setup = builder.build_setup(signal_date=date(2026, 5, 2))
+    
+    # For Telegram
+    message = setup.to_telegram_message()
+    
+    # For API
+    data = setup.to_dict()
+"""
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from decimal import Decimal
+from typing import Optional
+import math
+
+from django.db.models import Max
+
+from datafeed.models import OptionSnapshot, RawDailyData
+from signals.models import DailySignal
+from execution.services.policy import get_policy, PolicyVersion
+from execution.services.trade_validator import (
+    TradeValidator, 
+    SpreadPlan, 
+    ValidationResult,
+    IssueSeverity,
+)
+
+
+@dataclass
+class LegSetup:
+    """Single option leg details."""
+    symbol: str
+    action: str  # "BUY" or "SELL"
+    strike: float
+    delta: float
+    iv: float
+    price: float  # Ask for buy, Bid for sell
+    open_interest: int
+    bid_ask_spread_pct: float
+
+
+@dataclass
+class ExitRules:
+    """Exit rule configuration."""
+    stop_loss_spot: float       # BTC price trigger
+    stop_loss_spot_pct: float   # % move from entry
+    stop_loss_value: float      # Spread value trigger
+    stop_loss_value_pct: float  # % of debit lost
+    take_profit_pct: float      # % of max profit
+    take_profit_value: float    # $ per contract
+    max_hold_days: int
+    max_hold_date: date
+    scale_down_day: Optional[int]
+    scale_down_date: Optional[date]
+    scale_down_action: str      # "reduce_50pct" or "close_full"
+
+
+@dataclass
+class TradeSetup:
+    """Complete trade setup with all execution details."""
+    # Signal info
+    signal_date: date
+    signal_type: str
+    direction: str  # "LONG" or "SHORT" or "NEUTRAL"
+    
+    # Market context
+    spot_price: float
+    
+    # Option details
+    expiry: date
+    dte: int
+    long_leg: LegSetup
+    short_leg: Optional[LegSetup]
+    
+    # Spread metrics
+    spread_width: float
+    spread_width_pct: float
+    net_debit: float
+    max_profit: float
+    max_loss: float
+    risk_reward: float
+    breakeven: float
+    
+    # Adjusted metrics (after costs)
+    execution_cost: float
+    adjusted_max_profit: float
+    net_edge_pct: float
+    
+    # Position sizing
+    risk_budget: float
+    contracts: int
+    total_risk: float
+    total_max_profit: float
+    
+    # Exit rules
+    exit_rules: ExitRules
+    
+    # Validation
+    validation_passed: bool
+    validation_warnings: list[str] = field(default_factory=list)
+    validation_blocking: list[str] = field(default_factory=list)
+    
+    # Policy version
+    policy_version: str = ""
+    
+    def to_dict(self) -> dict:
+        """Convert to dictionary for API response."""
+        return {
+            "signal_date": self.signal_date.isoformat(),
+            "signal_type": self.signal_type,
+            "direction": self.direction,
+            "spot_price": self.spot_price,
+            "expiry": self.expiry.isoformat(),
+            "dte": self.dte,
+            "legs": {
+                "long": {
+                    "symbol": self.long_leg.symbol,
+                    "action": self.long_leg.action,
+                    "strike": self.long_leg.strike,
+                    "delta": self.long_leg.delta,
+                    "iv": self.long_leg.iv,
+                    "price": self.long_leg.price,
+                    "open_interest": self.long_leg.open_interest,
+                },
+                "short": {
+                    "symbol": self.short_leg.symbol,
+                    "action": self.short_leg.action,
+                    "strike": self.short_leg.strike,
+                    "delta": self.short_leg.delta,
+                    "iv": self.short_leg.iv,
+                    "price": self.short_leg.price,
+                    "open_interest": self.short_leg.open_interest,
+                } if self.short_leg else None,
+            },
+            "metrics": {
+                "spread_width": self.spread_width,
+                "spread_width_pct": self.spread_width_pct,
+                "net_debit": self.net_debit,
+                "max_profit": self.max_profit,
+                "max_loss": self.max_loss,
+                "risk_reward": self.risk_reward,
+                "breakeven": self.breakeven,
+                "execution_cost": self.execution_cost,
+                "adjusted_max_profit": self.adjusted_max_profit,
+                "net_edge_pct": self.net_edge_pct,
+            },
+            "position": {
+                "risk_budget": self.risk_budget,
+                "contracts": self.contracts,
+                "total_risk": self.total_risk,
+                "total_max_profit": self.total_max_profit,
+            },
+            "exit_rules": {
+                "stop_loss_spot": self.exit_rules.stop_loss_spot,
+                "stop_loss_spot_pct": self.exit_rules.stop_loss_spot_pct,
+                "stop_loss_value": self.exit_rules.stop_loss_value,
+                "stop_loss_value_pct": self.exit_rules.stop_loss_value_pct,
+                "take_profit_pct": self.exit_rules.take_profit_pct,
+                "take_profit_value": self.exit_rules.take_profit_value,
+                "max_hold_days": self.exit_rules.max_hold_days,
+                "max_hold_date": self.exit_rules.max_hold_date.isoformat(),
+                "scale_down_day": self.exit_rules.scale_down_day,
+                "scale_down_date": self.exit_rules.scale_down_date.isoformat() if self.exit_rules.scale_down_date else None,
+                "scale_down_action": self.exit_rules.scale_down_action,
+            },
+            "validation": {
+                "passed": self.validation_passed,
+                "warnings": self.validation_warnings,
+                "blocking": self.validation_blocking,
+            },
+            "policy_version": self.policy_version,
+        }
+    
+    def to_telegram_message(self) -> str:
+        """Format as Telegram message with markdown."""
+        emoji = "🟢" if self.direction == "LONG" else "🔴" if self.direction == "SHORT" else "🟡"
+        
+        lines = [
+            f"{emoji} *{self.signal_type} TRADE SETUP*",
+            f"📅 {self.signal_date}",
+            "",
+            f"*Market:* BTC @ `${self.spot_price:,.0f}`",
+            f"*Expiry:* {self.expiry} ({self.dte} DTE)",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "*TRADE: Bear Put Spread*" if self.direction == "SHORT" else "*TRADE: Bull Call Spread*" if self.direction == "LONG" else "*TRADE: Iron Condor*",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            f"*BUY:* `{self.long_leg.symbol}`",
+            f"  Strike: `${self.long_leg.strike:,.0f}` | Δ: `{self.long_leg.delta:.3f}` | IV: `{self.long_leg.iv*100:.1f}%`",
+            f"  Ask: `${self.long_leg.price:,.2f}`",
+        ]
+        
+        if self.short_leg:
+            lines.extend([
+                "",
+                f"*SELL:* `{self.short_leg.symbol}`",
+                f"  Strike: `${self.short_leg.strike:,.0f}` | Δ: `{self.short_leg.delta:.3f}` | IV: `{self.short_leg.iv*100:.1f}%`",
+                f"  Bid: `${self.short_leg.price:,.2f}`",
+            ])
+        
+        lines.extend([
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "*METRICS*",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            f"Width: `${self.spread_width:,.0f}` ({self.spread_width_pct*100:.1f}%)",
+            f"Net Debit: `${self.net_debit:,.2f}`",
+            f"Max Profit: `${self.max_profit:,.2f}`",
+            f"Max Loss: `${self.max_loss:,.2f}`",
+            f"R:R: `1:{self.risk_reward:.2f}`",
+            f"Breakeven: `${self.breakeven:,.0f}`",
+            f"Net Edge: `{self.net_edge_pct*100:.1f}%`",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "*POSITION*",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            f"Contracts: `{self.contracts}`",
+            f"Total Risk: `${self.total_risk:,.2f}`",
+            f"Total Max Profit: `${self.total_max_profit:,.2f}`",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "*EXIT RULES*",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            f"🛑 Stop (Spot): BTC > `${self.exit_rules.stop_loss_spot:,.0f}` (+{self.exit_rules.stop_loss_spot_pct*100:.1f}%)",
+            f"🛑 Stop (Value): Spread < `${self.exit_rules.stop_loss_value:,.0f}` ({self.exit_rules.stop_loss_value_pct*100:.0f}% lost)",
+            f"✅ Take Profit: `{self.exit_rules.take_profit_pct*100:.0f}%` = `${self.exit_rules.take_profit_value:,.0f}`/contract",
+            f"⏰ Max Hold: {self.exit_rules.max_hold_days}d (until {self.exit_rules.max_hold_date})",
+        ])
+        
+        if self.exit_rules.scale_down_day:
+            action = "CLOSE FULL" if self.exit_rules.scale_down_action == "close_full_position" else "Reduce 50%"
+            lines.append(f"📉 Scale Down: Day {self.exit_rules.scale_down_day} → {action}")
+        
+        # Validation status
+        if not self.validation_passed:
+            lines.extend([
+                "",
+                "⚠️ *VALIDATION FAILED*",
+            ])
+            for msg in self.validation_blocking:
+                lines.append(f"  🛑 {msg[:60]}...")
+        elif self.validation_warnings:
+            lines.extend([
+                "",
+                "⚠️ *WARNINGS*",
+            ])
+            for msg in self.validation_warnings[:3]:  # Limit to 3
+                lines.append(f"  ⚠️ {msg[:60]}...")
+        
+        lines.extend([
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "*ORDER ENTRY*",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            f"1\\. Buy: `{self.long_leg.symbol}` × {self.contracts}",
+        ])
+        
+        if self.short_leg:
+            lines.append(f"2\\. Sell: `{self.short_leg.symbol}` × {self.contracts}")
+            lines.append(f"3\\. Limit: `${self.net_debit:,.2f}` debit")
+        
+        return "\n".join(lines)
+
+
+class TradeSetupBuilder:
+    """
+    Builds complete trade setups from signals and option data.
+    
+    Integrates:
+    - Signal data (direction, type)
+    - Policy parameters (DTE, delta, spread width, exits)
+    - Option snapshots (prices, greeks, liquidity)
+    - Validation (risk checks, liquidity stress)
+    """
+    
+    def __init__(self, policy: Optional[PolicyVersion] = None):
+        self.policy = policy or get_policy()
+        self.validator = TradeValidator(policy=self.policy)
+    
+    def build_setup(
+        self,
+        signal_date: date,
+        signal_type: Optional[str] = None,
+    ) -> Optional[TradeSetup]:
+        """
+        Build a complete trade setup for a signal date.
+        
+        Args:
+            signal_date: Date of the signal
+            signal_type: Override signal type (uses DB signal if None)
+        
+        Returns:
+            TradeSetup or None if no valid setup found
+        """
+        # Get signal from DB if not overridden
+        if signal_type is None:
+            try:
+                signal = DailySignal.objects.get(date=signal_date)
+                signal_type = signal.trade_decision
+            except DailySignal.DoesNotExist:
+                return None
+        
+        # Skip NO_TRADE
+        if signal_type == "NO_TRADE":
+            return None
+        
+        # Get spot price
+        try:
+            raw = RawDailyData.objects.get(date=signal_date)
+            spot_price = float(raw.btc_close)
+        except RawDailyData.DoesNotExist:
+            return None
+        
+        # Determine direction and option type
+        direction, option_type = self._get_direction_and_type(signal_type)
+        if direction is None:
+            return None
+        
+        # Get policy parameters
+        dte_cfg = self.policy.get_dte_target(signal_type)
+        exit_cfg = self.policy.get_exit_params(signal_type)
+        delta_target = self.policy.get_signal_delta(signal_type)
+        spread_width_pct = self.policy.get_spread_width(signal_type)
+        tier = self.policy.get_tier(signal_type)
+        risk_budget = tier.risk_usd * tier.spread_pct
+        
+        # Get option snapshots
+        latest_ts = OptionSnapshot.objects.filter(
+            timestamp__date=signal_date,
+            option_type=option_type,
+            dte__gte=dte_cfg.min_dte,
+            dte__lte=dte_cfg.max_dte,
+        ).aggregate(Max('timestamp'))['timestamp__max']
+        
+        if not latest_ts:
+            return None
+        
+        options = list(OptionSnapshot.objects.filter(
+            timestamp=latest_ts,
+            option_type=option_type,
+            dte__gte=dte_cfg.min_dte,
+            dte__lte=dte_cfg.max_dte,
+        ))
+        
+        if not options:
+            return None
+        
+        # Find long leg (closest to target delta)
+        long_opt = min(options, key=lambda x: abs(float(x.delta or 0) - delta_target))
+        
+        # Find short leg (budget-constrained width)
+        short_opt = self._find_best_short_leg(
+            options, long_opt, option_type, direction, 
+            spot_price, spread_width_pct, risk_budget
+        )
+        
+        if not short_opt:
+            return None
+        
+        # Calculate spread metrics
+        width = abs(float(long_opt.strike) - float(short_opt.strike))
+        net_debit = float(long_opt.ask) - float(short_opt.bid)
+        max_profit = width - net_debit
+        max_loss = net_debit
+        
+        if max_loss <= 0 or max_profit <= 0:
+            return None
+        
+        risk_reward = max_profit / max_loss
+        breakeven = float(long_opt.strike) - net_debit if option_type == "put" else float(long_opt.strike) + net_debit
+        
+        # Position sizing
+        contracts = int(risk_budget / max_loss) if max_loss > 0 else 0
+        if contracts < 1:
+            contracts = 1  # Minimum 1 contract
+        
+        total_risk = contracts * max_loss
+        total_max_profit = contracts * max_profit
+        
+        # Validate
+        validation_result = self.validator.validate(SpreadPlan(
+            signal_type=signal_type,
+            direction=direction.lower(),
+            option_type=option_type,
+            long_strike=float(long_opt.strike),
+            short_strike=float(short_opt.strike),
+            expiry_dte=int(long_opt.dte),
+            net_debit=net_debit,
+            max_profit=max_profit,
+            max_loss=max_loss,
+            contracts=contracts,
+            spot_price=spot_price,
+            long_delta=float(long_opt.delta) if long_opt.delta else None,
+            short_delta=float(short_opt.delta) if short_opt.delta else None,
+            long_iv=float(long_opt.iv) if long_opt.iv else None,
+            short_iv=float(short_opt.iv) if short_opt.iv else None,
+            long_bid_ask_spread_pct=float(long_opt.spread_pct) if long_opt.spread_pct else None,
+            short_bid_ask_spread_pct=float(short_opt.spread_pct) if short_opt.spread_pct else None,
+            long_open_interest=int(long_opt.open_interest) if long_opt.open_interest else None,
+            short_open_interest=int(short_opt.open_interest) if short_opt.open_interest else None,
+        ))
+        
+        # Extract adjusted params
+        adj = validation_result.adjusted_params
+        execution_cost = adj.get('estimated_execution_cost', 0)
+        adjusted_max_profit = adj.get('adjusted_max_profit', max_profit)
+        net_edge_pct = adj.get('net_edge_pct', 0)
+        
+        # Build exit rules
+        if direction == "SHORT":
+            stop_spot = spot_price * (1 + exit_cfg.stop_loss_pct)
+        else:
+            stop_spot = spot_price * (1 - exit_cfg.stop_loss_pct)
+        
+        stop_value_pct = adj.get('option_value_stop_pct', 0.6)
+        stop_value = net_debit * (1 - stop_value_pct)
+        
+        scale_action = adj.get('scale_down_action', 'reduce_50pct')
+        
+        exit_rules = ExitRules(
+            stop_loss_spot=stop_spot,
+            stop_loss_spot_pct=exit_cfg.stop_loss_pct,
+            stop_loss_value=stop_value,
+            stop_loss_value_pct=stop_value_pct,
+            take_profit_pct=exit_cfg.take_profit_pct,
+            take_profit_value=max_profit * exit_cfg.take_profit_pct,
+            max_hold_days=exit_cfg.max_hold_days,
+            max_hold_date=signal_date + timedelta(days=exit_cfg.max_hold_days),
+            scale_down_day=exit_cfg.scale_down_day,
+            scale_down_date=signal_date + timedelta(days=exit_cfg.scale_down_day) if exit_cfg.scale_down_day else None,
+            scale_down_action=scale_action,
+        )
+        
+        # Build leg setups
+        long_leg = LegSetup(
+            symbol=long_opt.symbol,
+            action="BUY",
+            strike=float(long_opt.strike),
+            delta=float(long_opt.delta) if long_opt.delta else 0,
+            iv=float(long_opt.iv) if long_opt.iv else 0,
+            price=float(long_opt.ask),
+            open_interest=int(long_opt.open_interest) if long_opt.open_interest else 0,
+            bid_ask_spread_pct=float(long_opt.spread_pct) if long_opt.spread_pct else 0,
+        )
+        
+        short_leg = LegSetup(
+            symbol=short_opt.symbol,
+            action="SELL",
+            strike=float(short_opt.strike),
+            delta=float(short_opt.delta) if short_opt.delta else 0,
+            iv=float(short_opt.iv) if short_opt.iv else 0,
+            price=float(short_opt.bid),
+            open_interest=int(short_opt.open_interest) if short_opt.open_interest else 0,
+            bid_ask_spread_pct=float(short_opt.spread_pct) if short_opt.spread_pct else 0,
+        )
+        
+        # Extract validation messages
+        warnings = [i.message for i in validation_result.warnings]
+        blocking = [i.message for i in validation_result.blocking_issues]
+        
+        expiry_date = long_opt.expiry.date() if hasattr(long_opt.expiry, 'date') else long_opt.expiry
+        
+        return TradeSetup(
+            signal_date=signal_date,
+            signal_type=signal_type,
+            direction=direction,
+            spot_price=spot_price,
+            expiry=expiry_date,
+            dte=int(long_opt.dte),
+            long_leg=long_leg,
+            short_leg=short_leg,
+            spread_width=width,
+            spread_width_pct=width / spot_price,
+            net_debit=net_debit,
+            max_profit=max_profit,
+            max_loss=max_loss,
+            risk_reward=risk_reward,
+            breakeven=breakeven,
+            execution_cost=execution_cost,
+            adjusted_max_profit=adjusted_max_profit,
+            net_edge_pct=net_edge_pct,
+            risk_budget=risk_budget,
+            contracts=contracts,
+            total_risk=total_risk,
+            total_max_profit=total_max_profit,
+            exit_rules=exit_rules,
+            validation_passed=validation_result.is_valid,
+            validation_warnings=warnings,
+            validation_blocking=blocking,
+            policy_version=self.policy.version,
+        )
+    
+    def _get_direction_and_type(self, signal_type: str) -> tuple[Optional[str], Optional[str]]:
+        """Map signal type to direction and option type."""
+        mapping = {
+            "CALL": ("LONG", "call"),
+            "OPTION_CALL": ("LONG", "call"),
+            "BULL_PROBE": ("LONG", "call"),
+            "PUT": ("SHORT", "put"),
+            "OPTION_PUT": ("SHORT", "put"),
+            "TACTICAL_PUT": ("SHORT", "put"),
+            "BEAR_PROBE": ("SHORT", "put"),
+            "MVRV_SHORT": ("SHORT", "put"),
+            "IRON_CONDOR": ("NEUTRAL", None),  # Special handling needed
+        }
+        return mapping.get(signal_type, (None, None))
+    
+    def _find_best_short_leg(
+        self,
+        options: list[OptionSnapshot],
+        long_opt: OptionSnapshot,
+        option_type: str,
+        direction: str,
+        spot_price: float,
+        policy_width_pct: float,
+        risk_budget: float,
+    ) -> Optional[OptionSnapshot]:
+        """
+        Find the best short leg balancing R:R, width, budget, and liquidity.
+        
+        Scoring weights:
+        - R:R score (40%): Prefer R:R >= 1:1, penalize < 0.8
+        - Width score (30%): Prefer closer to policy target width
+        - Budget fit (20%): Prefer spreads that fit budget with 1+ contracts
+        - Liquidity (10%): Prefer higher OI on short leg
+        
+        Minimum requirements:
+        - R:R >= 0.5 (hard floor)
+        - Fits budget (at least 1 contract)
+        """
+        policy_width_usd = spot_price * policy_width_pct
+        candidates = []
+        
+        for opt in options:
+            if opt.expiry != long_opt.expiry:
+                continue
+            
+            # For puts: short strike < long strike
+            # For calls: short strike > long strike
+            if option_type == "put":
+                if float(opt.strike) >= float(long_opt.strike):
+                    continue
+            else:
+                if float(opt.strike) <= float(long_opt.strike):
+                    continue
+            
+            width = abs(float(long_opt.strike) - float(opt.strike))
+            net_debit = float(long_opt.ask) - float(opt.bid)
+            
+            if net_debit <= 0:
+                continue
+            
+            max_profit = width - net_debit
+            max_loss = net_debit
+            
+            if max_profit <= 0:
+                continue
+            
+            rr = max_profit / max_loss
+            
+            # Hard floor: R:R must be at least 0.5
+            if rr < 0.5:
+                continue
+            
+            contracts = int(risk_budget / max_loss)
+            oi = int(opt.open_interest) if opt.open_interest else 0
+            
+            # === SCORING ===
+            
+            # R:R score (0-1): optimal at 1.0-1.5, penalize below 0.8
+            if rr >= 1.0:
+                rr_score = min(1.0, 0.7 + (rr - 1.0) * 0.3)  # 0.7-1.0 for R:R 1.0-2.0
+            elif rr >= 0.8:
+                rr_score = 0.5 + (rr - 0.8) * 1.0  # 0.5-0.7 for R:R 0.8-1.0
+            else:
+                rr_score = rr * 0.625  # 0-0.5 for R:R 0-0.8
+            
+            # Width score (0-1): prefer closer to policy target
+            # Allow 50% to 150% of target as acceptable range
+            width_ratio = width / policy_width_usd if policy_width_usd > 0 else 0
+            if 0.5 <= width_ratio <= 1.5:
+                # Within acceptable range - score based on proximity to 1.0
+                width_score = 1.0 - abs(width_ratio - 1.0) * 0.5
+            elif width_ratio < 0.5:
+                # Too narrow - penalize more
+                width_score = width_ratio * 0.6  # 0-0.3 for 0-50% of target
+            else:
+                # Too wide - slight penalty
+                width_score = max(0.3, 1.0 - (width_ratio - 1.5) * 0.2)
+            
+            # Budget fit score (0-1): prefer 1-3 contracts
+            if contracts >= 3:
+                budget_score = 1.0
+            elif contracts >= 1:
+                budget_score = 0.7 + contracts * 0.1  # 0.8-1.0 for 1-3 contracts
+            else:
+                budget_score = 0.3  # Doesn't fit budget
+            
+            # Liquidity score (0-1): prefer OI >= 50
+            if oi >= 100:
+                liq_score = 1.0
+            elif oi >= 50:
+                liq_score = 0.8 + (oi - 50) * 0.004  # 0.8-1.0 for 50-100
+            elif oi >= 10:
+                liq_score = 0.4 + (oi - 10) * 0.01  # 0.4-0.8 for 10-50
+            else:
+                liq_score = oi * 0.04  # 0-0.4 for 0-10
+            
+            # Weighted total score
+            total_score = (
+                rr_score * 0.40 +
+                width_score * 0.30 +
+                budget_score * 0.20 +
+                liq_score * 0.10
+            )
+            
+            candidates.append({
+                'opt': opt,
+                'score': total_score,
+                'rr': rr,
+                'rr_score': rr_score,
+                'width': width,
+                'width_score': width_score,
+                'contracts': contracts,
+                'budget_score': budget_score,
+                'oi': oi,
+                'liq_score': liq_score,
+                'net_debit': net_debit,
+                'max_profit': max_profit,
+            })
+        
+        if not candidates:
+            return None
+        
+        # Sort by total score descending
+        candidates.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Prefer candidates that fit budget (contracts >= 1)
+        budget_fit = [c for c in candidates if c['contracts'] >= 1]
+        if budget_fit:
+            return budget_fit[0]['opt']
+        
+        # Fallback to best overall score
+        return candidates[0]['opt']
