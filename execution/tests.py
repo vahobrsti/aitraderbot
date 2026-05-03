@@ -907,118 +907,139 @@ class ExecutionEventTests(TestCase):
 # =============================================================================
 
 class InstrumentSelectorTests(TestCase):
-    """Tests for InstrumentSelector service."""
+    """Tests for InstrumentSelector service (policy-driven version)."""
     
-    def setUp(self):
-        self.mock_adapter = Mock()
-    
-    def test_parse_dte_range_standard(self):
-        """Test parsing standard DTE range."""
+    def test_selector_initialization(self):
+        """Test InstrumentSelector initializes with policy."""
         from execution.services.instrument_selector import InstrumentSelector
-        selector = InstrumentSelector(self.mock_adapter)
+        from execution.services.policy import get_policy
         
-        min_dte, max_dte = selector._parse_dte_range('45-90d')
-        self.assertEqual(min_dte, 45)
-        self.assertEqual(max_dte, 90)
+        selector = InstrumentSelector()
+        self.assertIsNotNone(selector.policy)
+        
+        # With explicit policy
+        policy = get_policy()
+        selector = InstrumentSelector(policy=policy)
+        self.assertEqual(selector.policy, policy)
     
-    def test_parse_dte_range_single(self):
-        """Test parsing single DTE value."""
-        from execution.services.instrument_selector import InstrumentSelector
-        selector = InstrumentSelector(self.mock_adapter)
+    def test_strike_selection_enum(self):
+        """Test StrikeSelection enum values."""
+        from execution.services.instrument_selector import StrikeSelection
         
-        min_dte, max_dte = selector._parse_dte_range('30d')
-        self.assertEqual(min_dte, 30)
-        self.assertEqual(max_dte, 60)  # Default +30
+        self.assertEqual(StrikeSelection.ATM.value, "atm")
+        self.assertEqual(StrikeSelection.ITM.value, "itm")
+        self.assertEqual(StrikeSelection.OTM.value, "otm")
     
-    def test_parse_dte_range_empty(self):
-        """Test parsing empty DTE range returns defaults."""
-        from execution.services.instrument_selector import InstrumentSelector
-        selector = InstrumentSelector(self.mock_adapter)
+    def test_spread_selection_enum(self):
+        """Test SpreadSelection enum values."""
+        from execution.services.instrument_selector import SpreadSelection
         
-        min_dte, max_dte = selector._parse_dte_range('')
-        self.assertEqual(min_dte, 45)
-        self.assertEqual(max_dte, 90)
+        self.assertEqual(SpreadSelection.BULL_CALL.value, "bull_call")
+        self.assertEqual(SpreadSelection.BEAR_PUT.value, "bear_put")
+        self.assertEqual(SpreadSelection.BULL_PUT.value, "bull_put")
+        self.assertEqual(SpreadSelection.BEAR_CALL.value, "bear_call")
     
-    def test_calculate_target_strike_atm(self):
-        """Test ATM strike calculation."""
-        from execution.services.instrument_selector import InstrumentSelector
-        selector = InstrumentSelector(self.mock_adapter)
+    def test_scored_candidate_dataclass(self):
+        """Test ScoredCandidate dataclass."""
+        from execution.services.instrument_selector import ScoredCandidate
         
-        strike = selector._calculate_target_strike(
-            Decimal('100000'), 'call', 'atm'
+        mock_snapshot = Mock()
+        candidate = ScoredCandidate(
+            snapshot=mock_snapshot,
+            total_score=0.85,
+            delta_score=0.90,
+            dte_score=0.80,
+            liquidity_score=0.75,
+            iv_score=0.70,
+            execution_cost_estimate=0.015,
         )
-        self.assertEqual(strike, Decimal('100000'))
-    
-    def test_calculate_target_strike_otm_call(self):
-        """Test OTM call strike calculation."""
-        from execution.services.instrument_selector import InstrumentSelector
-        selector = InstrumentSelector(self.mock_adapter)
         
-        strike = selector._calculate_target_strike(
-            Decimal('100000'), 'call', 'otm'
-        )
-        self.assertEqual(strike, Decimal('105000'))  # 5% above
+        self.assertEqual(candidate.total_score, 0.85)
+        self.assertEqual(candidate.delta_score, 0.90)
+        self.assertEqual(candidate.execution_cost_estimate, 0.015)
     
-    def test_calculate_target_strike_otm_put(self):
-        """Test OTM put strike calculation."""
-        from execution.services.instrument_selector import InstrumentSelector
-        selector = InstrumentSelector(self.mock_adapter)
-        
-        strike = selector._calculate_target_strike(
-            Decimal('100000'), 'put', 'otm'
-        )
-        self.assertEqual(strike, Decimal('95000'))  # 5% below
-    
-    def test_calculate_target_strike_slight_otm(self):
-        """Test slight OTM strike calculation."""
-        from execution.services.instrument_selector import InstrumentSelector
-        selector = InstrumentSelector(self.mock_adapter)
-        
-        strike = selector._calculate_target_strike(
-            Decimal('100000'), 'call', 'slight_otm'
-        )
-        self.assertEqual(strike, Decimal('102000'))  # 2% above
-    
-    def test_classify_moneyness_atm(self):
-        """Test ATM classification."""
-        from execution.services.instrument_selector import InstrumentSelector
-        selector = InstrumentSelector(self.mock_adapter)
-        
-        result = selector._classify_moneyness(
-            Decimal('100500'), Decimal('100000'), 'call'
-        )
-        self.assertEqual(result, 'atm')  # Within 2%
-    
-    def test_classify_moneyness_otm_call(self):
-        """Test OTM call classification."""
-        from execution.services.instrument_selector import InstrumentSelector
-        selector = InstrumentSelector(self.mock_adapter)
-        
-        result = selector._classify_moneyness(
-            Decimal('110000'), Decimal('100000'), 'call'
-        )
-        self.assertEqual(result, 'otm')
-    
-    def test_classify_moneyness_itm_call(self):
-        """Test ITM call classification."""
-        from execution.services.instrument_selector import InstrumentSelector
-        selector = InstrumentSelector(self.mock_adapter)
-        
-        result = selector._classify_moneyness(
-            Decimal('90000'), Decimal('100000'), 'call'
-        )
-        self.assertEqual(result, 'itm')
-    
-    def test_select_single_option_no_instruments(self):
-        """Test selection when no instruments available."""
+    def test_estimate_execution_cost(self):
+        """Test execution cost estimation."""
         from execution.services.instrument_selector import InstrumentSelector
         
-        self.mock_adapter.get_instruments.return_value = []
-        selector = InstrumentSelector(self.mock_adapter)
+        selector = InstrumentSelector()
         
-        result = selector.select_single_option(
-            'BTC', 'call', 'atm', '45-90d', Decimal('100000')
+        mock_snapshot = Mock()
+        mock_snapshot.spread_pct = 0.02  # 2% spread
+        
+        cost = selector._estimate_execution_cost(mock_snapshot)
+        
+        # Should include fee + half spread + slippage
+        self.assertGreater(cost, 0)
+        self.assertLess(cost, 0.05)  # Should be reasonable
+    
+    def test_find_candidates_empty_result(self):
+        """Test find_candidates returns empty list when no data."""
+        from execution.services.instrument_selector import InstrumentSelector
+        
+        selector = InstrumentSelector()
+        
+        # Query with impossible DTE range
+        candidates = selector.find_candidates(
+            option_type="put",
+            side="buy",
+            dte_min=1000,
+            dte_max=2000,
         )
+        
+        self.assertEqual(candidates, [])
+    
+    def test_rank_candidates_empty_returns_none(self):
+        """Test rank_candidates returns None for empty list."""
+        from execution.services.instrument_selector import InstrumentSelector
+        
+        selector = InstrumentSelector()
+        
+        result = selector.rank_candidates(
+            candidates=[],
+            target_delta=-0.60,
+            optimal_dte=12,
+            side="buy",
+        )
+        
+        self.assertIsNone(result)
+    
+    def test_get_latest_spot_no_data(self):
+        """Test get_latest_spot returns None when no data."""
+        from execution.services.instrument_selector import InstrumentSelector
+        
+        selector = InstrumentSelector()
+        
+        # With no option snapshots, should return None
+        result = selector.get_latest_spot(exchange="nonexistent")
+        self.assertIsNone(result)
+    
+    def test_compute_iv_rank_no_data(self):
+        """Test compute_iv_rank returns None when no data."""
+        from execution.services.instrument_selector import InstrumentSelector
+        
+        selector = InstrumentSelector()
+        
+        result = selector.compute_iv_rank(
+            option_type="put",
+            lookback_days=30,
+            exchange="nonexistent",
+        )
+        self.assertIsNone(result)
+    
+    def test_find_nearest_strike_no_candidates(self):
+        """Test find_nearest_strike returns None when no candidates."""
+        from execution.services.instrument_selector import InstrumentSelector
+        
+        selector = InstrumentSelector()
+        
+        result = selector.find_nearest_strike(
+            option_type="put",
+            target_strike=80000,
+            dte_min=1000,
+            dte_max=2000,
+        )
+        
         self.assertIsNone(result)
 
 
@@ -1069,23 +1090,17 @@ class OrderBuilderTests(TestCase):
         self.assertEqual(qty, Decimal('0.1'))
     
     def test_build_single_option_order_long(self):
-        """Test building long option order."""
+        """Test building long option order with mock selection."""
         from execution.services.order_builder import OrderBuilder
-        from execution.services.instrument_selector import StrikeSelection
         
         builder = OrderBuilder(Decimal('10000'))
-        selection = StrikeSelection(
-            symbol='BTC-30JUN25-100000-C',
-            strike=Decimal('100000'),
-            expiry=date.today() + timedelta(days=45),
-            option_type='call',
-            moneyness='atm',
-            dte=45,
-            rationale='test',
-        )
+        
+        # Create a mock selection object with required attributes
+        mock_selection = Mock()
+        mock_selection.symbol = 'BTC-30JUN25-100000-C'
         
         order = builder.build_single_option_order(
-            selection=selection,
+            selection=mock_selection,
             direction='long',
             target_notional=Decimal('1000'),
             mark_price=Decimal('500'),
