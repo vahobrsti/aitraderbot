@@ -1,24 +1,23 @@
 """
-Deribit-specific entry engine.
+Deribit Entry Engine - Policy-driven with IV-aware selection.
 
 Uses OptionSnapshot data (greeks, IV, liquidity) from Postgres to find
-the optimal option contract for each signal type. Replaces the naive
-instrument selection in the base orchestrator.
+the optimal option contract for each signal type.
 
-Key improvements over V1 orchestrator:
-- Greeks-aware strike selection (target delta, avoid gamma spikes)
-- IV-aware sizing (adjust for IV rank)
-- Liquidity filtering (spread %, open interest, volume)
-- Spread construction (vertical spreads for V7 policy)
+Features:
+- Policy-driven configuration (versioned, auditable)
+- IV-aware scoring (buy legs favor low IV, sell legs favor high IV)
+- Spread construction for all signal types (including MVRV_SHORT)
 - Iron condor 4-leg construction with MVRV drift strikes
-- Path-informed DTE selection (uses TTH distribution per state)
+- Uses signal date spot price for historical analysis
+- Execution cost estimation in plan
 
-Architecture:
-    DailySignal
-        -> DeribitEntryEngine.plan_entry(signal)
-        -> EntryPlan (legs, sizing, rationale)
-        -> DeribitEntryEngine.execute_plan(plan)
-        -> Orders on Deribit
+Usage:
+    from execution.services.deribit_entry import DeribitEntryEngine
+    from execution.services.policy import get_policy
+    
+    engine = DeribitEntryEngine()
+    plan = engine.plan_entry(signal, account_size_usd=100_000)
 """
 import logging
 from dataclasses import dataclass, field
@@ -27,44 +26,12 @@ from decimal import Decimal
 from enum import Enum
 from typing import Optional
 
-from django.db.models import Q, Avg, Max, Min
-
-from datafeed.models import OptionSnapshot
+from datafeed.models import OptionSnapshot, RawDailyData
 from signals.models import DailySignal
+from execution.services.policy import get_policy, PolicyVersion
+from execution.services.instrument_selector import InstrumentSelector
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Path-informed DTE targets per signal type
-# Derived from analyze_path_stats: optimal_dte ≈ median_TTH + buffer
-# ---------------------------------------------------------------------------
-PATH_DTE_TARGETS = {
-    "CALL":           {"min": 12, "max": 21, "optimal": 14},
-    "PUT":            {"min": 10, "max": 14, "optimal": 12},
-    "OPTION_CALL":    {"min": 11, "max": 14, "optimal": 12},
-    "OPTION_PUT":     {"min": 11, "max": 14, "optimal": 12},
-    "TACTICAL_PUT":   {"min": 10, "max": 14, "optimal": 12},
-    "BULL_PROBE":     {"min": 10, "max": 14, "optimal": 12},
-    "BEAR_PROBE":     {"min": 12, "max": 16, "optimal": 14},
-    "IRON_CONDOR":    {"min": 10, "max": 21, "optimal": 14},
-    "MVRV_SHORT":     {"min": 15, "max": 21, "optimal": 18},
-}
-
-# Delta targets per strike guidance
-DELTA_TARGETS = {
-    "slight_itm":  {"call": 0.60, "put": -0.60},
-    "atm":         {"call": 0.50, "put": -0.50},
-    "slight_otm":  {"call": 0.35, "put": -0.35},
-    "otm":         {"call": 0.20, "put": -0.20},
-    "itm":         {"call": 0.70, "put": -0.70},
-    "deep_otm":    {"call": 0.10, "put": -0.10},
-}
-
-# Liquidity filters
-MIN_OPEN_INTEREST = Decimal("5")       # Minimum OI for a contract
-MAX_SPREAD_PCT = 0.15                  # Max bid-ask spread as % of mid
-MIN_BID = Decimal("0.0001")            # Must have a bid (in BTC)
 
 
 class LegType(Enum):
@@ -126,25 +93,19 @@ class EntryPlan:
 
 class DeribitEntryEngine:
     """
-    Greeks-aware entry engine for Deribit options.
-
-    Uses OptionSnapshot data from Postgres to find optimal contracts,
-    then constructs entry plans aligned with V7 execution policy.
+    Policy-driven entry engine with IV-aware instrument selection.
+    
+    Key features:
+    1. All parameters from versioned policy
+    2. IV scoring is side-aware (buy vs sell legs)
+    3. Spreads enabled for all signals including MVRV_SHORT
+    4. Uses signal date spot for historical analysis
+    5. Hard-fails on uncapped condors (unlimited risk)
     """
 
-    def __init__(
-        self,
-        max_spread_pct: float = MAX_SPREAD_PCT,
-        min_open_interest: Decimal = MIN_OPEN_INTEREST,
-        snapshot_staleness_hours: int = 2,
-    ):
-        self.max_spread_pct = max_spread_pct
-        self.min_open_interest = min_open_interest
-        self.snapshot_staleness_hours = snapshot_staleness_hours
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def __init__(self, policy: Optional[PolicyVersion] = None):
+        self.policy = policy or get_policy()
+        self.selector = InstrumentSelector(policy=self.policy)
 
     def plan_entry(
         self,
@@ -154,9 +115,14 @@ class DeribitEntryEngine:
     ) -> Optional[EntryPlan]:
         """
         Build an EntryPlan from a DailySignal.
-
-        Reads the latest OptionSnapshot data from Postgres to find the
-        best contracts. Returns None if no suitable instruments found.
+        
+        Args:
+            signal: The DailySignal to execute
+            account_size_usd: Account size for tier sizing
+            spot_price: Override spot price (uses signal date if None)
+        
+        Returns:
+            EntryPlan or None if no suitable instruments found.
         """
         decision = signal.trade_decision.upper()
 
@@ -168,9 +134,23 @@ class DeribitEntryEngine:
 
         return self._plan_directional(signal, account_size_usd, spot_price)
 
-    # ------------------------------------------------------------------
-    # Directional trades (CALL, PUT, spreads)
-    # ------------------------------------------------------------------
+    def _resolve_spot(self, signal: DailySignal, override: Optional[float]) -> Optional[float]:
+        """
+        Resolve spot price, preferring signal date data for historical analysis.
+        """
+        if override is not None:
+            return override
+        
+        # Try to get spot from signal date (for historical accuracy)
+        try:
+            raw = RawDailyData.objects.get(date=signal.date)
+            if raw.btc_close:
+                return float(raw.btc_close)
+        except RawDailyData.DoesNotExist:
+            pass
+        
+        # Fallback to latest snapshot
+        return self.selector.get_latest_spot()
 
     def _plan_directional(
         self,
@@ -178,6 +158,7 @@ class DeribitEntryEngine:
         account_size_usd: float,
         spot_price: Optional[float],
     ) -> Optional[EntryPlan]:
+        """Plan directional trade (calls, puts, spreads)."""
         decision = signal.trade_decision.upper()
 
         # Map decision -> direction + option_type
@@ -187,8 +168,8 @@ class DeribitEntryEngine:
             "PUT":          ("short", "put"),
             "OPTION_PUT":   ("short", "put"),
             "TACTICAL_PUT": ("long",  "put"),
-            "BULL_PROBE":   ("long",  "call"),   # alias
-            "BEAR_PROBE":   ("short", "put"),     # alias
+            "BULL_PROBE":   ("long",  "call"),
+            "BEAR_PROBE":   ("short", "put"),
             "MVRV_SHORT":   ("short", "put"),
         }
         if decision not in decision_map:
@@ -198,72 +179,94 @@ class DeribitEntryEngine:
         direction, option_type = decision_map[decision]
 
         # Resolve spot
-        if spot_price is None:
-            spot_price = self._latest_spot()
-        if spot_price is None:
+        spot = self._resolve_spot(signal, spot_price)
+        if spot is None:
             logger.error("Cannot resolve spot price")
             return None
 
-        # DTE target
-        dte_cfg = PATH_DTE_TARGETS.get(decision, {"min": 11, "max": 14, "optimal": 12})
-
-        # Strike guidance from signal
+        # Get policy parameters
+        dte_cfg = self.policy.get_dte_target(decision)
         strike_guidance = signal.strike_guidance or "slight_itm"
-        target_delta = DELTA_TARGETS.get(strike_guidance, DELTA_TARGETS["slight_itm"])
-        abs_target_delta = abs(target_delta[option_type])
+        target_delta = self.policy.get_delta_target(strike_guidance, option_type)
+        abs_target_delta = abs(target_delta)
 
-        # Find best contract
-        candidates = self._query_candidates(
+        # Find best contract for LONG leg (always buy the primary option)
+        candidates = self.selector.find_candidates(
             option_type=option_type,
-            dte_min=dte_cfg["min"],
-            dte_max=dte_cfg["max"],
+            side="buy",  # Primary leg is always bought
+            dte_min=dte_cfg.min_dte,
+            dte_max=dte_cfg.max_dte,
+            staleness_hours=self.policy.snapshot_staleness_hours,
         )
         if not candidates:
-            logger.warning(f"No {option_type} candidates in DTE {dte_cfg['min']}-{dte_cfg['max']}")
+            logger.warning(f"No {option_type} candidates in DTE {dte_cfg.min_dte}-{dte_cfg.max_dte}")
             return None
 
-        # Score and rank
-        best = self._rank_candidates(candidates, abs_target_delta, dte_cfg["optimal"])
+        # Rank with IV-aware scoring (side="buy" for long leg)
+        best = self.selector.rank_candidates(
+            candidates,
+            target_delta=abs_target_delta,
+            optimal_dte=dte_cfg.optimal_dte,
+            side="buy",
+        )
         if best is None:
             return None
 
         legs: list[LegPlan] = []
         warnings: list[str] = []
 
-        # V7 policy: naked + spread
-        spread_width_pct = signal.spread_width_pct or 0.10
-        has_spread = spread_width_pct > 0 and decision not in ("MVRV_SHORT",)
+        # Check if spread is enabled for this signal
+        spread_enabled = self.policy.is_spread_enabled(decision)
+        spread_width_pct = self.policy.get_spread_width(decision)
+        has_spread = spread_enabled and spread_width_pct > 0
 
-        # Primary (naked) leg — always BUY the option (long call or long put)
-        # Direction 'long' = buy call, direction 'short' = buy put
-        # The "direction" refers to market view, not option side
+        # Primary (long) leg
         primary_leg = self._snapshot_to_leg(
-            best,
+            best.snapshot,
             side="buy",
             leg_type=LegType.SINGLE if not has_spread else LegType.LONG_LEG,
         )
         legs.append(primary_leg)
 
-        # Spread short leg
+        # Spread short leg (if enabled)
         if has_spread:
             short_leg = self._find_spread_short_leg(
-                best, option_type, direction, spread_width_pct, spot_price
+                best.snapshot, option_type, direction, spread_width_pct, spot
             )
             if short_leg:
                 legs.append(short_leg)
             else:
                 warnings.append("Could not find spread short leg; falling back to naked only")
 
-        # Sizing from V7 tiers
-        tier_risk, naked_pct, spread_pct_alloc = self._resolve_tier(decision, signal, account_size_usd)
+        # Sizing from policy
+        tier = self.policy.get_tier(decision)
+        size_mult = signal.effective_size or signal.size_multiplier or 1.0
+        tier_risk = tier.risk_usd * size_mult
 
-        # IV rank (informational)
-        iv_rank = self._compute_iv_rank(option_type)
+        # Cap at max account risk
+        max_risk = account_size_usd * self.policy.max_account_risk_pct
+        tier_risk = min(tier_risk, max_risk)
+
+        # IV rank
+        iv_rank = self.selector.compute_iv_rank(option_type)
+
+        # Estimate execution costs
+        num_legs = len(legs)
+        exec_cost = self.policy.execution_costs.total_cost_multi_leg(num_legs, is_market=False)
+
+        # Allocation: if spread exists, all risk goes to spread
+        if has_spread and len(legs) >= 2:
+            naked_pct = 0.0
+            spread_pct = tier.spread_pct + tier.naked_pct
+        else:
+            naked_pct = tier.naked_pct
+            spread_pct = 0.0
 
         rationale = (
             f"{decision} via {strike_guidance} {option_type} | "
             f"delta={primary_leg.delta:.2f}, IV={primary_leg.iv:.1%}, "
-            f"DTE={primary_leg.dte:.0f}, spread={primary_leg.spread_pct:.1%}"
+            f"DTE={primary_leg.dte:.0f}, spread={primary_leg.spread_pct:.1%}, "
+            f"exec_cost={exec_cost:.1%}"
         ) if primary_leg.delta and primary_leg.iv else f"{decision} {option_type}"
 
         return EntryPlan(
@@ -273,16 +276,12 @@ class DeribitEntryEngine:
             legs=legs,
             total_risk_usd=tier_risk,
             naked_pct=naked_pct,
-            spread_pct=spread_pct_alloc,
+            spread_pct=spread_pct,
             rationale=rationale,
-            spot_price=spot_price,
+            spot_price=spot,
             iv_rank=iv_rank,
             warnings=warnings,
         )
-
-    # ------------------------------------------------------------------
-    # Iron Condor
-    # ------------------------------------------------------------------
 
     def _plan_condor(
         self,
@@ -291,66 +290,69 @@ class DeribitEntryEngine:
         spot_price: Optional[float],
     ) -> Optional[EntryPlan]:
         """Build 4-leg iron condor using MVRV drift strikes from signal."""
-        if spot_price is None:
-            spot_price = self._latest_spot()
-        if spot_price is None:
+        spot = self._resolve_spot(signal, spot_price)
+        if spot is None:
             return None
 
-        dte_cfg = PATH_DTE_TARGETS["IRON_CONDOR"]
+        dte_cfg = self.policy.get_dte_target("IRON_CONDOR")
+        condor_cfg = self.policy.condor
 
         # MVRV drift strike targets from signal pipeline
-        target_short_call = signal.condor_short_call or spot_price * 1.10
-        target_short_put = signal.condor_short_put or spot_price * 0.90
-
-        # Wing width: $2000 per side (from iron_condor_spec)
-        wing_offset = 2000
+        target_short_call = signal.condor_short_call or spot * (1 + condor_cfg.spot_call_band)
+        target_short_put = signal.condor_short_put or spot * (1 - condor_cfg.spot_put_band)
 
         legs: list[LegPlan] = []
         warnings: list[str] = []
 
-        # --- Short call ---
-        short_call = self._find_nearest_strike(
-            "call", target_short_call, dte_cfg["min"], dte_cfg["max"]
+        # --- Short call (SELL) ---
+        call_candidates = self.selector.find_candidates(
+            option_type="call",
+            side="sell",
+            dte_min=dte_cfg.min_dte,
+            dte_max=dte_cfg.max_dte,
         )
+        short_call = self._find_nearest_from_candidates(call_candidates, target_short_call)
         if not short_call:
-            warnings.append("No short call strike found")
+            logger.warning("No short call strike found for condor")
             return None
 
         # --- Long call (wing) ---
-        long_call_target = float(short_call.strike) + wing_offset
-        long_call = self._find_nearest_strike(
-            "call", long_call_target, dte_cfg["min"], dte_cfg["max"],
-            same_expiry_as=short_call,
+        long_call_target = float(short_call.strike) + condor_cfg.wing_offset_usd
+        long_call = self._find_nearest_from_candidates(
+            call_candidates, long_call_target, same_expiry_as=short_call
         )
+        if not long_call:
+            logger.error("No long call wing found - condor would have unlimited upside risk")
+            return None
 
-        # --- Short put ---
-        short_put = self._find_nearest_strike(
-            "put", target_short_put, dte_cfg["min"], dte_cfg["max"],
-            same_expiry_as=short_call,
+        # --- Short put (SELL) ---
+        put_candidates = self.selector.find_candidates(
+            option_type="put",
+            side="sell",
+            dte_min=dte_cfg.min_dte,
+            dte_max=dte_cfg.max_dte,
+        )
+        short_put = self._find_nearest_from_candidates(
+            put_candidates, target_short_put, same_expiry_as=short_call
         )
         if not short_put:
-            warnings.append("No short put strike found")
+            logger.warning("No short put strike found for condor")
             return None
 
         # --- Long put (wing) ---
-        long_put_target = float(short_put.strike) - wing_offset
-        long_put = self._find_nearest_strike(
-            "put", long_put_target, dte_cfg["min"], dte_cfg["max"],
-            same_expiry_as=short_call,
+        long_put_target = float(short_put.strike) - condor_cfg.wing_offset_usd
+        long_put = self._find_nearest_from_candidates(
+            put_candidates, long_put_target, same_expiry_as=short_call
         )
+        if not long_put:
+            logger.error("No long put wing found - condor would have unlimited downside risk")
+            return None
 
-        # Build legs
+        # Build legs (all 4 required)
         legs.append(self._snapshot_to_leg(short_call, side="sell", leg_type=LegType.SHORT_CALL))
-        if long_call:
-            legs.append(self._snapshot_to_leg(long_call, side="buy", leg_type=LegType.LONG_CALL))
-        else:
-            warnings.append("No long call wing; condor is uncapped on upside")
-
+        legs.append(self._snapshot_to_leg(long_call, side="buy", leg_type=LegType.LONG_CALL))
         legs.append(self._snapshot_to_leg(short_put, side="sell", leg_type=LegType.SHORT_PUT))
-        if long_put:
-            legs.append(self._snapshot_to_leg(long_put, side="buy", leg_type=LegType.LONG_PUT))
-        else:
-            warnings.append("No long put wing; condor is uncapped on downside")
+        legs.append(self._snapshot_to_leg(long_put, side="buy", leg_type=LegType.LONG_PUT))
 
         # Estimate credit
         credit = Decimal("0")
@@ -361,16 +363,26 @@ class DeribitEntryEngine:
                 else:
                     credit -= leg.mid_price
 
-        tier_risk = 2000.0  # Fixed $2k risk budget for condors
+        # Check minimum credit threshold
+        wing_width = condor_cfg.wing_offset_usd
+        credit_usd = float(credit) * spot
+        credit_pct = credit_usd / wing_width if wing_width > 0 else 0
+        
+        if credit_pct < condor_cfg.min_credit_pct:
+            warnings.append(f"Credit {credit_pct:.1%} below minimum {condor_cfg.min_credit_pct:.1%}")
 
-        call_dist = (float(short_call.strike) - spot_price) / spot_price * 100
-        put_dist = (spot_price - float(short_put.strike)) / spot_price * 100
+        tier = self.policy.get_tier("IRON_CONDOR")
+        tier_risk = tier.risk_usd
+
+        call_dist = (float(short_call.strike) - spot) / spot * 100
+        put_dist = (spot - float(short_put.strike)) / spot * 100
+        exec_cost = self.policy.execution_costs.total_cost_multi_leg(4, is_market=False)
 
         rationale = (
             f"IRON_CONDOR | short call {short_call.strike} (+{call_dist:.1f}%), "
             f"short put {short_put.strike} (-{put_dist:.1f}%) | "
-            f"est credit={float(credit):.4f} BTC | "
-            f"DTE={short_call.dte:.0f}"
+            f"est credit={float(credit):.4f} BTC ({credit_pct:.1%} of wing) | "
+            f"DTE={short_call.dte:.0f} | exec_cost={exec_cost:.1%}"
         )
 
         return EntryPlan(
@@ -382,176 +394,9 @@ class DeribitEntryEngine:
             naked_pct=0.0,
             spread_pct=1.0,
             rationale=rationale,
-            spot_price=spot_price,
+            spot_price=spot,
             warnings=warnings,
         )
-
-    # ------------------------------------------------------------------
-    # Snapshot queries
-    # ------------------------------------------------------------------
-
-    def _query_candidates(
-        self,
-        option_type: str,
-        dte_min: int,
-        dte_max: int,
-        exchange: str = "deribit",
-    ) -> list[OptionSnapshot]:
-        """
-        Query latest OptionSnapshot rows matching filters.
-        Returns one snapshot per symbol (the most recent).
-        """
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=self.snapshot_staleness_hours)
-
-        # Get the latest snapshot timestamp per symbol
-        qs = (
-            OptionSnapshot.objects
-            .filter(
-                exchange=exchange,
-                option_type=option_type,
-                timestamp__gte=cutoff,
-                dte__gte=dte_min,
-                dte__lte=dte_max,
-            )
-            .exclude(bid__isnull=True)
-            .exclude(bid__lte=0)
-            .order_by("symbol", "-timestamp")
-            .distinct("symbol")
-        )
-
-        # Postgres-specific: distinct on symbol gives latest per symbol
-        # For SQLite fallback, we'd need a subquery
-        try:
-            results = list(qs)
-        except Exception:
-            # Fallback for SQLite (no DISTINCT ON)
-            results = self._query_candidates_fallback(
-                option_type, dte_min, dte_max, cutoff, exchange
-            )
-
-        # Apply liquidity filters
-        filtered = []
-        for snap in results:
-            if snap.open_interest and snap.open_interest < self.min_open_interest:
-                continue
-            if snap.spread_pct and snap.spread_pct > self.max_spread_pct:
-                continue
-            if snap.bid and snap.bid < MIN_BID:
-                continue
-            filtered.append(snap)
-
-        return filtered
-
-    def _query_candidates_fallback(
-        self, option_type, dte_min, dte_max, cutoff, exchange
-    ) -> list[OptionSnapshot]:
-        """SQLite-compatible fallback (no DISTINCT ON)."""
-        from django.db.models import Subquery, OuterRef
-
-        latest_ts = (
-            OptionSnapshot.objects
-            .filter(symbol=OuterRef("symbol"), exchange=exchange)
-            .order_by("-timestamp")
-            .values("timestamp")[:1]
-        )
-        qs = (
-            OptionSnapshot.objects
-            .filter(
-                exchange=exchange,
-                option_type=option_type,
-                timestamp__gte=cutoff,
-                dte__gte=dte_min,
-                dte__lte=dte_max,
-                timestamp=Subquery(latest_ts),
-            )
-            .exclude(bid__isnull=True)
-            .exclude(bid__lte=0)
-        )
-        return list(qs)
-
-    def _find_nearest_strike(
-        self,
-        option_type: str,
-        target_strike: float,
-        dte_min: int,
-        dte_max: int,
-        same_expiry_as: Optional[OptionSnapshot] = None,
-        exchange: str = "deribit",
-    ) -> Optional[OptionSnapshot]:
-        """Find the snapshot closest to target_strike."""
-        candidates = self._query_candidates(option_type, dte_min, dte_max, exchange)
-
-        if same_expiry_as and same_expiry_as.expiry:
-            # Filter to same expiry (within 1 hour tolerance for timestamp differences)
-            target_expiry = same_expiry_as.expiry
-            candidates = [
-                c for c in candidates
-                if c.expiry and abs((c.expiry - target_expiry).total_seconds()) < 3600
-            ]
-
-        if not candidates:
-            return None
-
-        return min(candidates, key=lambda s: abs(float(s.strike) - target_strike))
-
-    # ------------------------------------------------------------------
-    # Ranking
-    # ------------------------------------------------------------------
-
-    def _rank_candidates(
-        self,
-        candidates: list[OptionSnapshot],
-        target_abs_delta: float,
-        optimal_dte: int,
-    ) -> Optional[OptionSnapshot]:
-        """
-        Rank candidates by composite score:
-        - Delta proximity (40% weight)
-        - DTE proximity (30% weight)
-        - Liquidity / spread (20% weight)
-        - IV relative value (10% weight)
-        """
-        if not candidates:
-            return None
-
-        scored = []
-        for snap in candidates:
-            delta_score = 0.0
-            if snap.delta is not None:
-                delta_diff = abs(abs(float(snap.delta)) - target_abs_delta)
-                delta_score = max(0, 1.0 - delta_diff / 0.30)  # 0.30 delta range
-
-            dte_score = 0.0
-            if snap.dte is not None:
-                dte_diff = abs(snap.dte - optimal_dte)
-                dte_score = max(0, 1.0 - dte_diff / 15.0)  # 15 day range
-
-            liq_score = 0.0
-            if snap.spread_pct is not None:
-                liq_score = max(0, 1.0 - snap.spread_pct / self.max_spread_pct)
-            if snap.open_interest:
-                oi_bonus = min(float(snap.open_interest) / 100.0, 1.0)
-                liq_score = (liq_score + oi_bonus) / 2.0
-
-            # Lower IV is better for buying, higher for selling
-            iv_score = 0.5  # neutral default
-            if snap.iv is not None:
-                iv_score = max(0, 1.0 - float(snap.iv))  # lower IV = higher score for buying
-
-            composite = (
-                0.40 * delta_score
-                + 0.30 * dte_score
-                + 0.20 * liq_score
-                + 0.10 * iv_score
-            )
-            scored.append((composite, snap))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return scored[0][1] if scored else None
-
-    # ------------------------------------------------------------------
-    # Spread construction
-    # ------------------------------------------------------------------
 
     def _find_spread_short_leg(
         self,
@@ -561,22 +406,15 @@ class DeribitEntryEngine:
         width_pct: float,
         spot_price: float,
     ) -> Optional[LegPlan]:
-        """
-        Find the short leg for a vertical spread.
-
-        For bull call spread: sell higher strike call
-        For bear put spread: sell lower strike put
-        """
+        """Find the short leg for a vertical spread."""
         width_amount = spot_price * width_pct
 
         if option_type == "call":
-            # Bull call spread: short leg is higher strike
             target_short_strike = float(long_snap.strike) + width_amount
         else:
-            # Bear put spread: short leg is lower strike
             target_short_strike = float(long_snap.strike) - width_amount
 
-        short_snap = self._find_nearest_strike(
+        short_snap = self.selector.find_nearest_strike(
             option_type=option_type,
             target_strike=target_short_strike,
             dte_min=int(long_snap.dte or 7) - 2,
@@ -587,15 +425,26 @@ class DeribitEntryEngine:
         if short_snap is None:
             return None
 
-        return self._snapshot_to_leg(
-            short_snap,
-            side="sell",
-            leg_type=LegType.SHORT_LEG,
-        )
+        return self._snapshot_to_leg(short_snap, side="sell", leg_type=LegType.SHORT_LEG)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    def _find_nearest_from_candidates(
+        self,
+        candidates: list[OptionSnapshot],
+        target_strike: float,
+        same_expiry_as: Optional[OptionSnapshot] = None,
+    ) -> Optional[OptionSnapshot]:
+        """Find nearest strike from pre-filtered candidates."""
+        if same_expiry_as and same_expiry_as.expiry:
+            target_expiry = same_expiry_as.expiry
+            candidates = [
+                c for c in candidates
+                if c.expiry and abs((c.expiry - target_expiry).total_seconds()) < 3600
+            ]
+        
+        if not candidates:
+            return None
+        
+        return min(candidates, key=lambda s: abs(float(s.strike) - target_strike))
 
     def _snapshot_to_leg(
         self,
@@ -621,105 +470,3 @@ class DeribitEntryEngine:
             open_interest=snap.open_interest,
             dte=snap.dte,
         )
-
-    def _latest_spot(self) -> Optional[float]:
-        """Get latest spot price from most recent snapshot."""
-        snap = (
-            OptionSnapshot.objects
-            .filter(exchange="deribit", spot_price__gt=0)
-            .order_by("-timestamp")
-            .values_list("spot_price", flat=True)
-            .first()
-        )
-        return float(snap) if snap else None
-
-    def _compute_iv_rank(self, option_type: str, lookback_days: int = 30) -> Optional[float]:
-        """
-        Compute IV rank: where current ATM IV sits relative to last N days.
-        Returns 0.0 (lowest) to 1.0 (highest).
-        """
-        cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
-        recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=6)
-
-        # Get current ATM IV (closest to 0.50 delta)
-        current = (
-            OptionSnapshot.objects
-            .filter(
-                exchange="deribit",
-                option_type=option_type,
-                timestamp__gte=recent_cutoff,
-                iv__isnull=False,
-            )
-            .order_by("-timestamp")
-            .first()
-        )
-        if not current or not current.iv:
-            return None
-
-        current_iv = float(current.iv)
-
-        # Get historical IV range
-        agg = (
-            OptionSnapshot.objects
-            .filter(
-                exchange="deribit",
-                option_type=option_type,
-                timestamp__gte=cutoff,
-                iv__isnull=False,
-                dte__gte=7,
-                dte__lte=30,
-            )
-            .aggregate(
-                iv_min=Min("iv"),
-                iv_max=Max("iv"),
-            )
-        )
-
-        iv_min = float(agg["iv_min"]) if agg["iv_min"] else None
-        iv_max = float(agg["iv_max"]) if agg["iv_max"] else None
-
-        if iv_min is None or iv_max is None or iv_max == iv_min:
-            return None
-
-        return (current_iv - iv_min) / (iv_max - iv_min)
-
-    def _resolve_tier(
-        self,
-        decision: str,
-        signal: DailySignal,
-        account_size_usd: float,
-    ) -> tuple[float, float, float]:
-        """
-        Resolve V7 tier sizing.
-
-        Returns (total_risk_usd, naked_pct, spread_pct).
-        """
-        # V7 tier map
-        tier_map = {
-            "PRIMARY_SHORT": 1,
-            "OPTION_CALL":   1,
-            "CALL":          1,
-            "PUT":           1,
-            "BULL_PROBE":    2,
-            "BEAR_PROBE":    2,
-            "TACTICAL_PUT":  2,
-            "OPTION_PUT":    2,
-            "MVRV_SHORT":    2,
-        }
-        tier_num = tier_map.get(decision, 2)
-
-        tier_configs = {
-            1: {"risk": 4000, "naked_pct": 0.20, "spread_pct": 0.80},
-            2: {"risk": 2400, "naked_pct": 0.25, "spread_pct": 0.75},
-        }
-        cfg = tier_configs.get(tier_num, tier_configs[2])
-
-        # Scale by signal's size_multiplier
-        size_mult = signal.effective_size or signal.size_multiplier or 1.0
-        risk = cfg["risk"] * size_mult
-
-        # Cap at 6% of account
-        max_risk = account_size_usd * 0.06
-        risk = min(risk, max_risk)
-
-        return risk, cfg["naked_pct"], cfg["spread_pct"]
