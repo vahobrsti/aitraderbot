@@ -192,6 +192,17 @@ class DeribitEntryEngineV2:
         num_legs = len(legs)
         exec_cost = self.policy.execution_costs.total_cost_multi_leg(num_legs, is_market=False)
 
+        # Allocation: if spread exists, use tier's spread allocation
+        # If spread failed to construct, fall back to naked allocation
+        if has_spread and len(legs) >= 2:
+            # Spread successfully constructed - use spread allocation
+            naked_pct = 0.0
+            spread_pct = tier.spread_pct + tier.naked_pct  # All risk in spread
+        else:
+            # Single leg (spread not enabled or failed to find short leg)
+            naked_pct = tier.naked_pct
+            spread_pct = 0.0
+
         rationale = (
             f"{decision} via {strike_guidance} {option_type} | "
             f"delta={primary_leg.delta:.2f}, IV={primary_leg.iv:.1%}, "
@@ -205,8 +216,8 @@ class DeribitEntryEngineV2:
             direction=direction,
             legs=legs,
             total_risk_usd=tier_risk,
-            naked_pct=tier.naked_pct if not has_spread else 0.0,
-            spread_pct=tier.spread_pct if has_spread else 0.0,
+            naked_pct=naked_pct,
+            spread_pct=spread_pct,
             rationale=rationale,
             spot_price=spot,
             iv_rank=iv_rank,
@@ -277,13 +288,17 @@ class DeribitEntryEngineV2:
         if long_call:
             legs.append(self._snapshot_to_leg(long_call, side="buy", leg_type=LegType.LONG_CALL))
         else:
-            warnings.append("No long call wing; condor is uncapped on upside")
+            # HARD FAIL: Uncapped condor is unlimited risk
+            logger.error("No long call wing found - condor would have unlimited upside risk")
+            return None
 
         legs.append(self._snapshot_to_leg(short_put, side="sell", leg_type=LegType.SHORT_PUT))
         if long_put:
             legs.append(self._snapshot_to_leg(long_put, side="buy", leg_type=LegType.LONG_PUT))
         else:
-            warnings.append("No long put wing; condor is uncapped on downside")
+            # HARD FAIL: Uncapped condor is unlimited risk
+            logger.error("No long put wing found - condor would have unlimited downside risk")
+            return None
 
         # Estimate credit
         credit = Decimal("0")

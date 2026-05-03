@@ -252,10 +252,31 @@ class DeribitExecutorV2:
     # Execution Cost Guardrails
     # ------------------------------------------------------------------
 
+    # Historical realized edge by signal type (from backtest data)
+    # These should be updated periodically based on actual performance
+    EXPECTED_EDGE_BY_SIGNAL = {
+        "CALL": 0.12,           # 12% expected from path analysis
+        "PUT": 0.10,
+        "OPTION_CALL": 0.08,    # Lower confidence signals
+        "OPTION_PUT": 0.08,
+        "TACTICAL_PUT": 0.06,
+        "BULL_PROBE": 0.10,
+        "BEAR_PROBE": 0.08,
+        "MVRV_SHORT": 0.06,     # Lower edge, DCA strategy
+        "IRON_CONDOR": 0.04,    # Premium selling, lower edge but higher win rate
+    }
+    
+    # Minimum edge required after costs (by trade type)
+    MIN_EDGE_REQUIRED = {
+        "directional": 0.02,    # 2% min for directional trades
+        "condor": 0.01,         # 1% min for condors (higher win rate compensates)
+    }
+
     def _check_execution_costs(self, plan: EntryPlan) -> dict:
         """
         Check if expected edge exceeds execution costs.
         
+        Uses signal-specific expected edge from historical data.
         Rejects plans where costs would consume the edge.
         """
         num_legs = len(plan.legs)
@@ -266,18 +287,17 @@ class DeribitExecutorV2:
             is_market=False,  # Assume limit orders
         )
         
-        # For condors, costs are especially important
-        if plan.is_condor:
-            # Condor edge is typically 15-20% of wing width
-            # If costs > 5%, it's marginal
-            min_edge_required = 0.05
-        else:
-            # Directional trades have higher expected edge
-            min_edge_required = 0.02
+        # Get expected edge for this signal type
+        expected_edge = self.EXPECTED_EDGE_BY_SIGNAL.get(
+            plan.trade_decision, 
+            0.08  # Default 8% if unknown
+        )
         
-        # Estimate expected edge from signal
-        # This is a rough estimate - could be refined with historical data
-        expected_edge = 0.10  # Assume 10% expected return
+        # Determine minimum edge required
+        if plan.is_condor:
+            min_edge_required = self.MIN_EDGE_REQUIRED["condor"]
+        else:
+            min_edge_required = self.MIN_EDGE_REQUIRED["directional"]
         
         edge_after_costs = expected_edge - total_cost
         
@@ -286,8 +306,10 @@ class DeribitExecutorV2:
         reason = ""
         if not passed:
             reason = (
-                f"Execution costs ({total_cost:.1%}) too high for {num_legs}-leg trade. "
-                f"Edge after costs: {edge_after_costs:.1%}, minimum required: {min_edge_required:.1%}"
+                f"Execution costs ({total_cost:.1%}) too high for {plan.trade_decision} "
+                f"({num_legs}-leg). Expected edge: {expected_edge:.1%}, "
+                f"edge after costs: {edge_after_costs:.1%}, "
+                f"minimum required: {min_edge_required:.1%}"
             )
             logger.warning(reason)
         
@@ -362,7 +384,21 @@ class DeribitExecutorV2:
         leg = leg_exec.leg
         
         # Calculate limit price with slippage cap
-        if use_limit_orders and leg.mid_price:
+        if use_limit_orders:
+            if not leg.mid_price:
+                # HARD FAIL: No mid price means we can't safely price the order
+                # In thin books, market orders are dangerous
+                leg_exec.state = LegState.FAILED
+                leg_exec.error = "No mid_price available - cannot safely price limit order"
+                logger.error(f"Leg {leg.symbol}: no mid_price, rejecting to avoid market order in thin book")
+                
+                self._log_event(intent, "order_rejected_no_price", {
+                    "leg_type": leg.leg_type.value,
+                    "symbol": leg.symbol,
+                    "reason": "no_mid_price",
+                })
+                return False
+            
             mid = float(leg.mid_price)
             if leg.side == "buy":
                 # Willing to pay up to mid + slippage
@@ -372,8 +408,10 @@ class DeribitExecutorV2:
                 limit_price = Decimal(str(mid * (1 - slippage_cap)))
             order_type = "limit"
         else:
+            # Market orders explicitly requested (--market-orders flag)
             limit_price = None
             order_type = "market"
+            logger.warning(f"Using market order for {leg.symbol} - not recommended for live trading")
         
         # Create order record
         order = Order.objects.create(

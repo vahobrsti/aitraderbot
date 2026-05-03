@@ -5,6 +5,13 @@ This is the Deribit-specific replacement for execute_signal. It uses
 OptionSnapshot data from Postgres to find optimal contracts based on
 delta, IV, liquidity, and path-informed DTE targets.
 
+Features:
+- Policy-driven configuration (versioned, auditable)
+- IV-aware scoring (buy legs favor low IV, sell legs favor high IV)
+- Execution cost guardrails (reject if edge < costs)
+- Limit orders with slippage caps (safer than market orders)
+- Multi-leg atomicity with rollback/hedge on partial fills
+
 Usage:
     # Plan only (show what would be traded)
     python manage.py execute_deribit --latest --account deribit-main --plan
@@ -20,6 +27,9 @@ Usage:
 
     # Override spot price (useful for testing)
     python manage.py execute_deribit --latest --account deribit-main --spot 95000
+    
+    # Use market orders instead of limit (not recommended)
+    python manage.py execute_deribit --latest --account deribit-main --market-orders
 """
 import logging
 from datetime import date
@@ -29,8 +39,10 @@ from django.core.management.base import BaseCommand, CommandError
 
 from signals.models import DailySignal
 from execution.models import ExchangeAccount, ExecutionIntent
-from execution.services.deribit_entry import DeribitEntryEngine, EntryPlan
-from execution.services.deribit_executor import DeribitExecutor
+from execution.services.deribit_entry import DeribitEntryEngine
+from execution.services.deribit_executor import DeribitExecutor, LegState
+from execution.services.policy import get_policy
+from execution.services.deribit_entry import EntryPlan
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +62,20 @@ class Command(BaseCommand):
             "--account-size", type=float, default=100_000,
             help="Account size in USD for tier sizing (default: 100000)"
         )
+        parser.add_argument(
+            "--market-orders", action="store_true",
+            help="Use market orders instead of limit (not recommended for live)"
+        )
+        parser.add_argument(
+            "--max-slippage", type=float, default=None,
+            help="Max slippage %% for limit orders (default: from policy)"
+        )
 
     def handle(self, *args, **options):
+        # Load policy
+        policy = get_policy()
+        self.stdout.write(f"Policy: {policy.version}")
+        
         # 1. Load signal
         signal = self._load_signal(options)
         self.stdout.write(
@@ -84,7 +108,7 @@ class Command(BaseCommand):
                 return
 
         # 4. Build entry plan
-        engine = DeribitEntryEngine()
+        engine = DeribitEntryEngine(policy=policy)
         plan = engine.plan_entry(
             signal,
             account_size_usd=options["account_size"],
@@ -102,13 +126,23 @@ class Command(BaseCommand):
             return
 
         # 6. Execute
-        executor = DeribitExecutor(account)
+        executor = DeribitExecutor(account, policy=policy)
         dry_run = options.get("dry_run", False)
+        use_limit = not options.get("market_orders", False)
 
         if dry_run:
             self.stdout.write(self.style.WARNING("\nDRY RUN — intent created, no orders placed"))
+        
+        if not use_limit:
+            self.stdout.write(self.style.WARNING("⚠ Using MARKET orders (not recommended for live)"))
 
-        result = executor.execute(plan, signal, dry_run=dry_run)
+        result = executor.execute(
+            plan, 
+            signal, 
+            dry_run=dry_run,
+            use_limit_orders=use_limit,
+            max_slippage_pct=options.get("max_slippage"),
+        )
 
         # 7. Report
         self._print_result(result)
@@ -201,12 +235,34 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING("Mode: DRY RUN"))
 
         if result.success:
-            self.stdout.write(self.style.SUCCESS(f"Status: SUCCESS"))
+            self.stdout.write(self.style.SUCCESS("Status: SUCCESS"))
         else:
-            self.stdout.write(self.style.ERROR(f"Status: FAILED"))
+            self.stdout.write(self.style.ERROR("Status: FAILED"))
 
         if result.intent:
             self.stdout.write(f"Intent: {result.intent.id} ({result.intent.status})")
+        
+        # Show edge and cost analysis
+        if result.edge_after_costs is not None:
+            edge_style = self.style.SUCCESS if result.edge_after_costs > 0.02 else self.style.WARNING
+            self.stdout.write(f"Edge after costs: {edge_style(f'{result.edge_after_costs:.1%}')}")
+        if result.total_execution_cost is not None:
+            self.stdout.write(f"Execution cost: {result.total_execution_cost:.1%}")
+
+        # Show leg execution states
+        if hasattr(result, 'leg_executions') and result.leg_executions:
+            self.stdout.write(f"\nLeg Executions ({len(result.leg_executions)}):")
+            for le in result.leg_executions:
+                state_style = self.style.SUCCESS if le.state == LegState.FILLED else (
+                    self.style.WARNING if le.state in (LegState.SUBMITTED, LegState.PARTIALLY_FILLED) 
+                    else self.style.ERROR
+                )
+                self.stdout.write(
+                    f"  {le.leg.leg_type.value:12s} | {le.leg.symbol:30s} | "
+                    f"state={state_style(le.state.value)}"
+                )
+                if le.error:
+                    self.stdout.write(self.style.ERROR(f"    error: {le.error}"))
 
         if result.orders:
             self.stdout.write(f"\nOrders ({len(result.orders)}):")
@@ -221,11 +277,11 @@ class Command(BaseCommand):
                     self.stdout.write(f"    fill_price={order.avg_fill_price}")
 
         if result.errors:
-            self.stdout.write(self.style.ERROR(f"\nErrors:"))
+            self.stdout.write(self.style.ERROR("\nErrors:"))
             for e in result.errors:
                 self.stdout.write(self.style.ERROR(f"  • {e}"))
 
         if result.warnings:
-            self.stdout.write(self.style.WARNING(f"\nWarnings:"))
+            self.stdout.write(self.style.WARNING("\nWarnings:"))
             for w in result.warnings:
                 self.stdout.write(self.style.WARNING(f"  • {w}"))
