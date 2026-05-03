@@ -84,10 +84,16 @@ DailySignal → ExecutionIntent → Risk Check → Instrument Selection → Orde
 
 | File | Purpose |
 |------|---------|
-| `execution/management/commands/execute_signal.py` | CLI entry point |
-| `execution/services/orchestrator.py` | Main execution flow (including current instrument selection) |
+| `execution/management/commands/execute_signal.py` | CLI entry point (generic, V1) |
+| `execution/management/commands/execute_deribit.py` | **Deribit-specific CLI** — greeks-aware entry engine |
+| `execution/management/commands/scan_entries.py` | Diagnostic: scan OptionSnapshot data, show candidates |
+| `execution/services/orchestrator.py` | Generic execution flow (V1, single-leg) |
+| `execution/services/deribit_entry.py` | **Deribit entry engine** — greeks/IV/liquidity-aware instrument selection |
+| `execution/services/deribit_executor.py` | **Deribit executor** — multi-leg order placement + intent lifecycle |
 | `execution/services/risk.py` | Risk checks (limits, duplicates) |
-| `execution/services/instrument_selector.py` | Reusable selector utilities (currently not wired into orchestrator path) |
+| `execution/services/instrument_selector.py` | Reusable selector utilities |
+| `execution/services/order_builder.py` | Order plan construction |
+| `execution/services/position_manager.py` | Polling-based exit management |
 | `execution/exchanges/bybit.py` | Bybit V5 API adapter |
 | `execution/exchanges/deribit.py` | Deribit API adapter |
 | `execution/models.py` | ExecutionIntent, Order, Position |
@@ -138,6 +144,34 @@ These Bybit params are not yet implemented:
 - **Single-leg only**: No spreads
 - **Market orders only**: No limit entry
 - **Polling exits**: Options don't support native SL/TP
+
+## V2: Deribit Greeks-Aware Engine
+
+The `execute_deribit` command replaces the generic `execute_signal` for Deribit:
+
+```bash
+# Scan what the engine would pick
+python manage.py scan_entries --latest
+python manage.py scan_entries --status
+python manage.py scan_entries --type call --dte-min 10 --dte-max 21
+
+# Plan only (no orders)
+python manage.py execute_deribit --latest --account deribit-main --plan
+
+# Dry run (creates intent, no orders)
+python manage.py execute_deribit --latest --account deribit-main --dry-run
+
+# Live execution
+python manage.py execute_deribit --latest --account deribit-main
+```
+
+### What V2 adds:
+- **Greeks-aware selection**: Targets delta (0.60 for slight_itm), ranks by delta/DTE/liquidity/IV
+- **Spread execution**: Builds vertical spreads (bull call, bear put) per V7 policy
+- **Iron condor 4-leg**: Maps MVRV drift strikes to real exchange contracts
+- **Liquidity filtering**: Min OI, max spread %, min bid
+- **IV rank**: Computes where current IV sits vs 30-day range
+- **Path-informed DTE**: Uses TTH distribution per signal type
 
 ## Example Execution
 
