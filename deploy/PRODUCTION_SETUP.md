@@ -273,3 +273,243 @@ ExchangeAccount.objects.create(
     max_daily_loss_usd=500,
 )
 ```
+
+
+---
+
+## 🚀 Deploying New Changes (develop → main)
+
+### Standard Deployment Workflow
+
+```bash
+# 1. On your local machine - merge develop to main
+git checkout main
+git pull origin main
+git merge develop
+git push origin main
+
+# 2. SSH to VPS
+ssh deploy@your-server
+
+# 3. Pull latest changes
+cd /var/www/app
+git pull origin main
+
+# 4. Activate virtual environment
+source venv/bin/activate
+
+# 5. Install any new dependencies
+pip install -r requirements.txt
+
+# 6. Run database migrations (if any)
+python manage.py migrate
+
+# 7. Collect static files (if any frontend changes)
+python manage.py collectstatic --noinput
+
+# 8. Run tests to verify
+python manage.py test --verbosity=1
+
+# 9. Restart Gunicorn
+sudo systemctl restart gunicorn
+
+# 10. Verify health
+curl https://options.somimobile.com/api/v1/health/
+```
+
+### Quick Deploy Script
+
+Create `/var/www/app/deploy.sh`:
+
+```bash
+#!/bin/bash
+set -e
+
+echo "🚀 Starting deployment..."
+
+cd /var/www/app
+source venv/bin/activate
+
+echo "📥 Pulling latest code..."
+git pull origin main
+
+echo "📦 Installing dependencies..."
+pip install -r requirements.txt
+
+echo "🗄️ Running migrations..."
+python manage.py migrate
+
+echo "📁 Collecting static files..."
+python manage.py collectstatic --noinput
+
+echo "🧪 Running tests..."
+python manage.py test --verbosity=1
+
+echo "🔄 Restarting Gunicorn..."
+sudo systemctl restart gunicorn
+
+echo "✅ Deployment complete!"
+curl -s https://options.somimobile.com/api/v1/health/
+```
+
+Usage:
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+
+---
+
+## 📋 New API Endpoints (v2026-05-03)
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `/api/v1/signals/<date>/setup/` | Yes | Get complete trade setup for a signal date |
+| `/api/v1/signals/latest/setup/` | Yes | Get trade setup for latest tradeable signal |
+
+### Example API Response
+
+```bash
+curl -H "Authorization: Token YOUR_TOKEN" \
+  https://options.somimobile.com/api/v1/signals/2026-05-02/setup/
+```
+
+```json
+{
+  "signal_date": "2026-05-02",
+  "signal_type": "MVRV_SHORT",
+  "direction": "SHORT",
+  "spot_price": 78652.94,
+  "expiry": "2026-05-15",
+  "dte": 12,
+  "legs": {
+    "long": {
+      "symbol": "BTC-15MAY26-80000-P",
+      "action": "BUY",
+      "strike": 80000.0,
+      "delta": -0.5814,
+      "iv": 0.3531,
+      "price": 2757.48,
+      "open_interest": 257
+    },
+    "short": {
+      "symbol": "BTC-15MAY26-76000-P",
+      "action": "SELL",
+      "strike": 76000.0,
+      "delta": -0.2917,
+      "iv": 0.3789,
+      "price": 1024.21,
+      "open_interest": 541
+    }
+  },
+  "metrics": {
+    "spread_width": 4000.0,
+    "net_debit": 1733.27,
+    "max_profit": 2266.73,
+    "max_loss": 1733.27,
+    "risk_reward": 1.31,
+    "breakeven": 78266.73,
+    "net_edge_pct": 0.72
+  },
+  "exit_rules": {
+    "stop_loss_spot": 83474.36,
+    "stop_loss_value": 693.31,
+    "take_profit_pct": 0.6,
+    "take_profit_value": 1360.04,
+    "max_hold_days": 11,
+    "scale_down_day": 5,
+    "scale_down_action": "close_full_position"
+  },
+  "validation": {
+    "passed": true,
+    "warnings": ["..."],
+    "blocking": []
+  },
+  "policy_version": "2026-05-03.3"
+}
+```
+
+---
+
+## 🔔 Telegram Trade Setup Notifications
+
+The `generate_signal` command now includes trade setup details in Telegram notifications by default.
+
+```bash
+# Include trade setup (default)
+python manage.py generate_signal --notify
+
+# Exclude trade setup
+python manage.py generate_signal --notify --no-setup
+```
+
+Update cron job if you want to exclude setup:
+```cron
+# Without trade setup
+16 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py generate_signal --notify --no-setup >> /var/www/app/logs/cron.log 2>&1
+```
+
+---
+
+## 🧪 Running Tests
+
+```bash
+# Run all tests
+python manage.py test
+
+# Run specific test modules
+python manage.py test execution.tests_trade_setup
+python manage.py test execution.tests
+python manage.py test signals.tests
+
+# Run with verbosity
+python manage.py test --verbosity=2
+```
+
+---
+
+## 📊 New Management Commands
+
+| Command | Purpose | Usage |
+|---------|---------|-------|
+| `calibrate_policy` | Generate policy calibration from path stats | `python manage.py calibrate_policy` |
+
+---
+
+## 🔧 Troubleshooting
+
+### Trade Setup Returns 404
+
+```bash
+# Check if signal exists
+python manage.py shell -c "from signals.models import DailySignal; print(DailySignal.objects.filter(date='2026-05-02').first())"
+
+# Check if option data exists
+python manage.py shell -c "from datafeed.models import OptionSnapshot; print(OptionSnapshot.objects.filter(timestamp__date='2026-05-02').count())"
+```
+
+### Validation Blocking Trade
+
+Check the validation result:
+```python
+from execution.services.trade_setup import TradeSetupBuilder
+from datetime import date
+
+builder = TradeSetupBuilder()
+setup = builder.build_setup(signal_date=date(2026, 5, 2))
+
+if setup:
+    print(f"Passed: {setup.validation_passed}")
+    print(f"Blocking: {setup.validation_blocking}")
+    print(f"Warnings: {setup.validation_warnings}")
+```
+
+### Policy Not Loading Calibration
+
+```bash
+# Check calibration file exists
+cat execution/data/policy_calibration.json
+
+# Regenerate calibration
+python manage.py calibrate_policy
+```

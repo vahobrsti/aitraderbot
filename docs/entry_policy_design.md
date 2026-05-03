@@ -441,3 +441,138 @@ Must exceed execution costs (~1.5% for 2-leg spread).
 - [ ] Update `deribit_entry.py` to use delta targets from policy
 - [ ] Run `calibrate_policy` to generate JSON overlay
 - [ ] Verify executor uses calibrated values
+
+
+---
+
+## Trade Setup Builder Integration (NEW)
+
+### Overview
+
+The `TradeSetupBuilder` service automatically constructs complete trade setups from signals and option data. It integrates:
+- Signal data (direction, type)
+- Policy parameters (DTE, delta, spread width, exits)
+- Option snapshots (prices, greeks, liquidity)
+- Validation (risk checks, liquidity stress)
+
+### Usage
+
+```python
+from execution.services.trade_setup import TradeSetupBuilder
+from datetime import date
+
+builder = TradeSetupBuilder()
+setup = builder.build_setup(signal_date=date(2026, 5, 2))
+
+# For Telegram notification
+message = setup.to_telegram_message()
+
+# For API response
+data = setup.to_dict()
+```
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/signals/<date>/setup/` | GET | Get trade setup for specific date |
+| `/api/v1/signals/latest/setup/` | GET | Get trade setup for latest tradeable signal |
+
+### Short Leg Selection Algorithm
+
+The builder uses a weighted scoring algorithm to select the optimal short leg:
+
+| Factor | Weight | Description |
+|--------|--------|-------------|
+| R:R Score | 40% | Prefer R:R >= 1:1, penalize < 0.8 |
+| Width Score | 30% | Prefer closer to policy target width |
+| Budget Fit | 20% | Prefer spreads that fit budget with 1+ contracts |
+| Liquidity | 10% | Prefer higher OI on short leg |
+
+### Validation Checks (11 Rules)
+
+| Code | Threshold | Severity | Action |
+|------|-----------|----------|--------|
+| SCALE_DOWN_NOT_EXECUTABLE | contracts=1 & scale_down set | WARNING | Fallback: close full |
+| TAKE_PROFIT_TOO_CONSERVATIVE | TP<30% & R:R>1 | WARNING | Suggest 50-70% TP |
+| STOP_LOSS_BASIS_MISMATCH | Always (info) | INFO | Add option-value stop |
+| WIDTH_DEVIATION_FROM_POLICY | >30% deviation | WARNING | Flag as budget override |
+| HIGH_EXECUTION_COST_IMPACT | costs >10% of max profit | WARNING | Suggest limit orders |
+| WIDE_BID_ASK_* | spread > max_spread_pct | WARNING | Review liquidity |
+| LOW_OPEN_INTEREST_* | OI < min_open_interest | WARNING | Review liquidity |
+| POOR_RISK_REWARD | R:R < 0.5:1 | BLOCKING | Reject trade |
+| SUBOPTIMAL_RISK_REWARD | R:R < 1:1 | WARNING | Flag for review |
+| POSITION_EXCEEDS_BUDGET | risk > budget * 1.1 | BLOCKING | Reject trade |
+| POSITION_UNDERUTILIZED | risk < budget * 0.5 | INFO | Suggest tighter spread |
+| INSUFFICIENT_NET_EDGE | net_edge < 5% | BLOCKING | Reject trade |
+| LIQUIDITY_INSUFFICIENT_SIZE | OI < contracts × 10 | WARNING | Reduce size or split |
+| SPREAD_IMPACT_AT_SIZE | impact > 2% at size | WARNING | Use limit orders |
+
+### Example Output
+
+```
+🔴 *MVRV_SHORT TRADE SETUP*
+📅 2026-05-02
+
+*Market:* BTC @ `$78,653`
+*Expiry:* 2026-05-15 (12 DTE)
+
+━━━━━━━━━━━━━━━━━━━━━━
+*TRADE: Bear Put Spread*
+━━━━━━━━━━━━━━━━━━━━━━
+
+*BUY:* `BTC-15MAY26-80000-P`
+  Strike: `$80,000` | Δ: `-0.581` | IV: `35.3%`
+  Ask: `$2,757.48`
+
+*SELL:* `BTC-15MAY26-76000-P`
+  Strike: `$76,000` | Δ: `-0.292` | IV: `37.9%`
+  Bid: `$1,024.21`
+
+━━━━━━━━━━━━━━━━━━━━━━
+*METRICS*
+━━━━━━━━━━━━━━━━━━━━━━
+Width: `$4,000` (5.1%)
+Net Debit: `$1,733.27`
+Max Profit: `$2,266.73`
+Max Loss: `$1,733.27`
+R:R: `1:1.31`
+Breakeven: `$78,267`
+Net Edge: `72.3%`
+
+━━━━━━━━━━━━━━━━━━━━━━
+*EXIT RULES*
+━━━━━━━━━━━━━━━━━━━━━━
+🛑 Stop (Spot): BTC > `$83,474` (+6.1%)
+🛑 Stop (Value): Spread < `$693` (60% lost)
+✅ Take Profit: `60%` = `$1,360`/contract
+⏰ Max Hold: 11d (until 2026-05-13)
+📉 Scale Down: Day 5 → CLOSE FULL
+```
+
+### Telegram Integration
+
+The `generate_signal` command now supports trade setup notifications:
+
+```bash
+# Include trade setup (default)
+python manage.py generate_signal --notify
+
+# Exclude trade setup
+python manage.py generate_signal --notify --no-setup
+```
+
+### Implementation Checklist (Updated)
+
+- [x] Update `policy.py` with calibrated DTE targets
+- [x] Update `policy.py` with calibrated spread widths
+- [x] Update `policy.py` with calibrated stop losses
+- [x] Update `policy.py` with calibrated expected edge
+- [x] Add delta targets to policy (new field)
+- [x] Create `trade_validator.py` with 11 validation rules
+- [x] Create `trade_setup.py` with TradeSetupBuilder
+- [x] Add API endpoints for trade setup
+- [x] Integrate trade setup into Telegram notifications
+- [x] Add unit tests for trade setup components
+- [ ] Run `calibrate_policy` to generate JSON overlay
+- [ ] Verify executor uses calibrated values
