@@ -65,3 +65,4 @@ models/*.joblib
 
 # Report CSVs (research artifacts, regenerated on demand)
 reports/**/*.csv
+data/
