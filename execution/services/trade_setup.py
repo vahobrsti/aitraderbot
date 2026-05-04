@@ -65,6 +65,19 @@ class ExitRules:
 
 
 @dataclass
+class PathProfile:
+    """Path characteristics for the signal type."""
+    shakeout_pct: float         # % of winners with shakeout path
+    invalidation_pct: float     # % of winners invalidated before hit
+    mae_p75: float              # 75th percentile MAE for winners
+    clean_win_pct: float        # % of winners with clean paths
+    is_shakeout_heavy: bool     # True if shakeout_pct >= 40%
+    is_invalidation_heavy: bool # True if invalidation_pct >= 35%
+    entry_strategy: str         # "single", "dca", or "scaled"
+    entry_note: str             # Human-readable entry guidance
+
+
+@dataclass
 class TradeSetup:
     """Complete trade setup with all execution details."""
     # Signal info
@@ -108,6 +121,9 @@ class TradeSetup:
     validation_passed: bool
     validation_warnings: list[str] = field(default_factory=list)
     validation_blocking: list[str] = field(default_factory=list)
+    
+    # Path profile (from historical analysis) - optional
+    path_profile: Optional[PathProfile] = None
     
     # Policy version
     policy_version: str = ""
@@ -172,6 +188,16 @@ class TradeSetup:
                 "scale_down_date": self.exit_rules.scale_down_date.isoformat() if self.exit_rules.scale_down_date else None,
                 "scale_down_action": self.exit_rules.scale_down_action,
             },
+            "path_profile": {
+                "shakeout_pct": self.path_profile.shakeout_pct,
+                "invalidation_pct": self.path_profile.invalidation_pct,
+                "mae_p75": self.path_profile.mae_p75,
+                "clean_win_pct": self.path_profile.clean_win_pct,
+                "is_shakeout_heavy": self.path_profile.is_shakeout_heavy,
+                "is_invalidation_heavy": self.path_profile.is_invalidation_heavy,
+                "entry_strategy": self.path_profile.entry_strategy,
+                "entry_note": self.path_profile.entry_note,
+            } if self.path_profile else None,
             "validation": {
                 "passed": self.validation_passed,
                 "warnings": self.validation_warnings,
@@ -256,6 +282,23 @@ class TradeSetup:
             ])
             for msg in self.validation_warnings[:3]:  # Limit to 3
                 lines.append(f"  ⚠️ {msg[:60]}...")
+        
+        # Path profile warning for shakeout-heavy signals
+        if self.path_profile and (self.path_profile.is_shakeout_heavy or self.path_profile.is_invalidation_heavy):
+            lines.extend([
+                "",
+                "━━━━━━━━━━━━━━━━━━━━━━",
+                "⚡ *PATH PROFILE*",
+                "━━━━━━━━━━━━━━━━━━━━━━",
+            ])
+            if self.path_profile.is_shakeout_heavy:
+                lines.append(f"🔄 Shakeout Rate: `{self.path_profile.shakeout_pct*100:.0f}%` of winners")
+            if self.path_profile.is_invalidation_heavy:
+                lines.append(f"⚠️ Invalidation: `{self.path_profile.invalidation_pct*100:.0f}%` before hit")
+            lines.append(f"📊 MAE p75: `{self.path_profile.mae_p75*100:.1f}%`")
+            lines.append(f"💡 Entry: *{self.path_profile.entry_strategy.upper()}*")
+            if self.path_profile.entry_note:
+                lines.append(f"   {self.path_profile.entry_note}")
         
         lines.extend([
             "",
@@ -470,6 +513,34 @@ class TradeSetupBuilder:
         
         expiry_date = long_opt.expiry.date() if hasattr(long_opt.expiry, 'date') else long_opt.expiry
         
+        # Build path profile
+        path_data = self.policy.get_path_profile(signal_type)
+        is_shakeout = self.policy.is_shakeout_heavy(signal_type)
+        is_invalidation = self.policy.is_invalidation_heavy(signal_type)
+        
+        # Determine entry strategy based on path profile
+        if is_shakeout:
+            entry_strategy = "dca"
+            # Use stop loss as DCA trigger (price moves against by stop_loss_pct)
+            entry_note = f"33% initial, 67% DCA at +{exit_cfg.stop_loss_pct*100:.0f}% (shakeout-heavy)"
+        elif is_invalidation:
+            entry_strategy = "scaled"
+            entry_note = "50% initial, 50% on confirmation (high invalidation)"
+        else:
+            entry_strategy = "single"
+            entry_note = "Full position at entry"
+        
+        path_profile = PathProfile(
+            shakeout_pct=path_data.get("shakeout_pct", 0),
+            invalidation_pct=path_data.get("invalidation_pct", 0),
+            mae_p75=path_data.get("mae_p75", 0),
+            clean_win_pct=path_data.get("clean_win_pct", 1.0),
+            is_shakeout_heavy=is_shakeout,
+            is_invalidation_heavy=is_invalidation,
+            entry_strategy=entry_strategy,
+            entry_note=entry_note,
+        )
+        
         return TradeSetup(
             signal_date=signal_date,
             signal_type=signal_type,
@@ -494,6 +565,7 @@ class TradeSetupBuilder:
             total_risk=total_risk,
             total_max_profit=total_max_profit,
             exit_rules=exit_rules,
+            path_profile=path_profile,
             validation_passed=validation_result.is_valid,
             validation_warnings=warnings,
             validation_blocking=blocking,

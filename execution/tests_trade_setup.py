@@ -911,3 +911,648 @@ class NotifierTradeSetupTests(TestCase):
         
         # This will fail because we can't easily mock async, but we can test the method exists
         self.assertTrue(hasattr(notifier, 'send_trade_setup'))
+
+
+# =============================================================================
+# PATH PROFILE TESTS
+# =============================================================================
+
+class PathProfilePolicyTests(TestCase):
+    """Tests for path profile methods in PolicyVersion."""
+    
+    def test_get_path_profile_returns_dict(self):
+        """Test get_path_profile returns a dict with expected keys."""
+        policy = get_policy()
+        
+        profile = policy.get_path_profile("MVRV_SHORT")
+        
+        self.assertIsInstance(profile, dict)
+        self.assertIn("shakeout_pct", profile)
+        self.assertIn("invalidation_pct", profile)
+        self.assertIn("mae_p75", profile)
+        self.assertIn("clean_win_pct", profile)
+    
+    def test_get_path_profile_mvrv_short_values(self):
+        """Test MVRV_SHORT has expected path profile values."""
+        policy = get_policy()
+        
+        profile = policy.get_path_profile("MVRV_SHORT")
+        
+        # MVRV_SHORT should have high shakeout rate (57%)
+        self.assertGreaterEqual(profile["shakeout_pct"], 0.50)
+        self.assertLessEqual(profile["shakeout_pct"], 0.65)
+        
+        # Should have high invalidation rate (43%)
+        self.assertGreaterEqual(profile["invalidation_pct"], 0.40)
+    
+    def test_get_path_profile_unknown_signal_returns_defaults(self):
+        """Test unknown signal returns default path profile."""
+        policy = get_policy()
+        
+        profile = policy.get_path_profile("UNKNOWN_SIGNAL")
+        
+        # Should return defaults
+        self.assertEqual(profile["shakeout_pct"], 0.20)
+        self.assertEqual(profile["invalidation_pct"], 0.25)
+        self.assertEqual(profile["mae_p75"], 0.05)
+        self.assertEqual(profile["clean_win_pct"], 0.75)
+    
+    def test_is_shakeout_heavy_mvrv_short(self):
+        """Test MVRV_SHORT is identified as shakeout-heavy."""
+        policy = get_policy()
+        
+        self.assertTrue(policy.is_shakeout_heavy("MVRV_SHORT"))
+    
+    def test_is_shakeout_heavy_bear_probe(self):
+        """Test BEAR_PROBE is identified as shakeout-heavy (40% threshold)."""
+        policy = get_policy()
+        
+        self.assertTrue(policy.is_shakeout_heavy("BEAR_PROBE"))
+    
+    def test_is_shakeout_heavy_call_is_false(self):
+        """Test CALL is NOT shakeout-heavy."""
+        policy = get_policy()
+        
+        self.assertFalse(policy.is_shakeout_heavy("CALL"))
+    
+    def test_is_invalidation_heavy_option_call(self):
+        """Test OPTION_CALL is identified as invalidation-heavy."""
+        policy = get_policy()
+        
+        # OPTION_CALL has 54% invalidation rate
+        self.assertTrue(policy.is_invalidation_heavy("OPTION_CALL"))
+    
+    def test_is_invalidation_heavy_option_put(self):
+        """Test OPTION_PUT is identified as invalidation-heavy."""
+        policy = get_policy()
+        
+        # OPTION_PUT has 44% invalidation rate
+        self.assertTrue(policy.is_invalidation_heavy("OPTION_PUT"))
+    
+    def test_is_invalidation_heavy_call_is_false(self):
+        """Test CALL is NOT invalidation-heavy."""
+        policy = get_policy()
+        
+        # CALL has 27% invalidation rate (below 35% threshold)
+        self.assertFalse(policy.is_invalidation_heavy("CALL"))
+    
+    def test_is_invalidation_heavy_mvrv_short(self):
+        """Test MVRV_SHORT is invalidation-heavy."""
+        policy = get_policy()
+        
+        # MVRV_SHORT has 43% invalidation rate
+        self.assertTrue(policy.is_invalidation_heavy("MVRV_SHORT"))
+    
+    def test_path_profiles_in_to_dict(self):
+        """Test path_profiles is included in to_dict() serialization."""
+        policy = get_policy()
+        
+        data = policy.to_dict()
+        
+        self.assertIn("path_profiles", data)
+        self.assertIsInstance(data["path_profiles"], dict)
+        self.assertIn("MVRV_SHORT", data["path_profiles"])
+        self.assertIn("shakeout_pct", data["path_profiles"]["MVRV_SHORT"])
+    
+    def test_all_signals_have_path_profiles(self):
+        """Test all configured signals have path profiles."""
+        policy = get_policy()
+        
+        expected_signals = [
+            "CALL", "PUT", "OPTION_CALL", "OPTION_PUT",
+            "TACTICAL_PUT", "BULL_PROBE", "BEAR_PROBE",
+            "MVRV_SHORT", "IRON_CONDOR"
+        ]
+        
+        for signal in expected_signals:
+            profile = policy.get_path_profile(signal)
+            self.assertIn("shakeout_pct", profile, f"Missing shakeout_pct for {signal}")
+            self.assertIn("invalidation_pct", profile, f"Missing invalidation_pct for {signal}")
+
+
+class PathProfileDataclassTests(TestCase):
+    """Tests for PathProfile dataclass in trade_setup.py."""
+    
+    def test_path_profile_creation(self):
+        """Test creating a PathProfile dataclass."""
+        from execution.services.trade_setup import PathProfile
+        
+        profile = PathProfile(
+            shakeout_pct=0.57,
+            invalidation_pct=0.43,
+            mae_p75=0.0719,
+            clean_win_pct=0.571,
+            is_shakeout_heavy=True,
+            is_invalidation_heavy=True,
+            entry_strategy="dca",
+            entry_note="33% initial, 67% DCA at +7% (shakeout-heavy)",
+        )
+        
+        self.assertEqual(profile.shakeout_pct, 0.57)
+        self.assertEqual(profile.entry_strategy, "dca")
+        self.assertTrue(profile.is_shakeout_heavy)
+    
+    def test_path_profile_entry_strategies(self):
+        """Test all valid entry strategies."""
+        from execution.services.trade_setup import PathProfile
+        
+        # DCA strategy
+        dca_profile = PathProfile(
+            shakeout_pct=0.57,
+            invalidation_pct=0.43,
+            mae_p75=0.07,
+            clean_win_pct=0.57,
+            is_shakeout_heavy=True,
+            is_invalidation_heavy=True,
+            entry_strategy="dca",
+            entry_note="DCA entry",
+        )
+        self.assertEqual(dca_profile.entry_strategy, "dca")
+        
+        # Scaled strategy
+        scaled_profile = PathProfile(
+            shakeout_pct=0.35,
+            invalidation_pct=0.54,
+            mae_p75=0.08,
+            clean_win_pct=0.46,
+            is_shakeout_heavy=False,
+            is_invalidation_heavy=True,
+            entry_strategy="scaled",
+            entry_note="Scaled entry",
+        )
+        self.assertEqual(scaled_profile.entry_strategy, "scaled")
+        
+        # Single strategy
+        single_profile = PathProfile(
+            shakeout_pct=0.21,
+            invalidation_pct=0.27,
+            mae_p75=0.05,
+            clean_win_pct=0.73,
+            is_shakeout_heavy=False,
+            is_invalidation_heavy=False,
+            entry_strategy="single",
+            entry_note="Full position at entry",
+        )
+        self.assertEqual(single_profile.entry_strategy, "single")
+
+
+class TradeSetupPathProfileTests(TestCase):
+    """Tests for PathProfile integration in TradeSetup."""
+    
+    def test_trade_setup_with_path_profile_to_dict(self):
+        """Test TradeSetup.to_dict() includes path_profile when present."""
+        from execution.services.trade_setup import TradeSetup, LegSetup, ExitRules, PathProfile
+        
+        setup = TradeSetup(
+            signal_date=date(2026, 5, 2),
+            signal_type="MVRV_SHORT",
+            direction="SHORT",
+            spot_price=78653.0,
+            expiry=date(2026, 5, 15),
+            dte=12,
+            long_leg=LegSetup(
+                symbol="BTC-15MAY26-80000-P",
+                action="BUY",
+                strike=80000.0,
+                delta=-0.58,
+                iv=0.35,
+                price=2757.48,
+                open_interest=257,
+                bid_ask_spread_pct=0.03,
+            ),
+            short_leg=LegSetup(
+                symbol="BTC-15MAY26-76000-P",
+                action="SELL",
+                strike=76000.0,
+                delta=-0.29,
+                iv=0.38,
+                price=1024.21,
+                open_interest=541,
+                bid_ask_spread_pct=0.04,
+            ),
+            spread_width=4000.0,
+            spread_width_pct=0.051,
+            net_debit=1733.27,
+            max_profit=2266.73,
+            max_loss=1733.27,
+            risk_reward=1.31,
+            breakeven=78267.0,
+            execution_cost=107.46,
+            adjusted_max_profit=2159.27,
+            net_edge_pct=0.72,
+            risk_budget=1800.0,
+            contracts=1,
+            total_risk=1733.27,
+            total_max_profit=2266.73,
+            exit_rules=ExitRules(
+                stop_loss_spot=83474.0,
+                stop_loss_spot_pct=0.061,
+                stop_loss_value=693.0,
+                stop_loss_value_pct=0.6,
+                take_profit_pct=0.6,
+                take_profit_value=1360.0,
+                max_hold_days=11,
+                max_hold_date=date(2026, 5, 13),
+                scale_down_day=5,
+                scale_down_date=date(2026, 5, 7),
+                scale_down_action="close_full_position",
+            ),
+            path_profile=PathProfile(
+                shakeout_pct=0.57,
+                invalidation_pct=0.43,
+                mae_p75=0.0719,
+                clean_win_pct=0.571,
+                is_shakeout_heavy=True,
+                is_invalidation_heavy=True,
+                entry_strategy="dca",
+                entry_note="33% initial, 67% DCA at +7% (shakeout-heavy)",
+            ),
+            validation_passed=True,
+            validation_warnings=[],
+            validation_blocking=[],
+            policy_version="2026-05-03.3",
+        )
+        
+        data = setup.to_dict()
+        
+        # Check path_profile is in output
+        self.assertIn("path_profile", data)
+        self.assertIsNotNone(data["path_profile"])
+        
+        # Check all fields are serialized
+        pp = data["path_profile"]
+        self.assertEqual(pp["shakeout_pct"], 0.57)
+        self.assertEqual(pp["invalidation_pct"], 0.43)
+        self.assertEqual(pp["mae_p75"], 0.0719)
+        self.assertEqual(pp["clean_win_pct"], 0.571)
+        self.assertTrue(pp["is_shakeout_heavy"])
+        self.assertTrue(pp["is_invalidation_heavy"])
+        self.assertEqual(pp["entry_strategy"], "dca")
+        self.assertIn("33%", pp["entry_note"])
+    
+    def test_trade_setup_without_path_profile_to_dict(self):
+        """Test TradeSetup.to_dict() handles None path_profile."""
+        from execution.services.trade_setup import TradeSetup, LegSetup, ExitRules
+        
+        setup = TradeSetup(
+            signal_date=date(2026, 5, 2),
+            signal_type="CALL",
+            direction="LONG",
+            spot_price=78653.0,
+            expiry=date(2026, 5, 15),
+            dte=12,
+            long_leg=LegSetup(
+                symbol="BTC-15MAY26-80000-C",
+                action="BUY",
+                strike=80000.0,
+                delta=0.58,
+                iv=0.35,
+                price=2757.48,
+                open_interest=257,
+                bid_ask_spread_pct=0.03,
+            ),
+            short_leg=None,
+            spread_width=4000.0,
+            spread_width_pct=0.051,
+            net_debit=1733.27,
+            max_profit=2266.73,
+            max_loss=1733.27,
+            risk_reward=1.31,
+            breakeven=78267.0,
+            execution_cost=107.46,
+            adjusted_max_profit=2159.27,
+            net_edge_pct=0.72,
+            risk_budget=1800.0,
+            contracts=1,
+            total_risk=1733.27,
+            total_max_profit=2266.73,
+            exit_rules=ExitRules(
+                stop_loss_spot=74720.0,
+                stop_loss_spot_pct=0.05,
+                stop_loss_value=693.0,
+                stop_loss_value_pct=0.6,
+                take_profit_pct=0.7,
+                take_profit_value=1586.0,
+                max_hold_days=9,
+                max_hold_date=date(2026, 5, 11),
+                scale_down_day=6,
+                scale_down_date=date(2026, 5, 8),
+                scale_down_action="reduce_50pct",
+            ),
+            path_profile=None,  # No path profile
+            validation_passed=True,
+            validation_warnings=[],
+            validation_blocking=[],
+            policy_version="2026-05-03.3",
+        )
+        
+        data = setup.to_dict()
+        
+        # path_profile should be None in output
+        self.assertIn("path_profile", data)
+        self.assertIsNone(data["path_profile"])
+
+
+class TradeSetupTelegramPathProfileTests(TestCase):
+    """Tests for path profile rendering in Telegram messages."""
+    
+    def test_telegram_shows_path_profile_for_shakeout_heavy(self):
+        """Test Telegram message shows PATH PROFILE section for shakeout-heavy signals."""
+        from execution.services.trade_setup import TradeSetup, LegSetup, ExitRules, PathProfile
+        
+        setup = TradeSetup(
+            signal_date=date(2026, 5, 2),
+            signal_type="MVRV_SHORT",
+            direction="SHORT",
+            spot_price=78653.0,
+            expiry=date(2026, 5, 15),
+            dte=12,
+            long_leg=LegSetup(
+                symbol="BTC-15MAY26-80000-P",
+                action="BUY",
+                strike=80000.0,
+                delta=-0.58,
+                iv=0.35,
+                price=2757.48,
+                open_interest=257,
+                bid_ask_spread_pct=0.03,
+            ),
+            short_leg=LegSetup(
+                symbol="BTC-15MAY26-76000-P",
+                action="SELL",
+                strike=76000.0,
+                delta=-0.29,
+                iv=0.38,
+                price=1024.21,
+                open_interest=541,
+                bid_ask_spread_pct=0.04,
+            ),
+            spread_width=4000.0,
+            spread_width_pct=0.051,
+            net_debit=1733.27,
+            max_profit=2266.73,
+            max_loss=1733.27,
+            risk_reward=1.31,
+            breakeven=78267.0,
+            execution_cost=107.46,
+            adjusted_max_profit=2159.27,
+            net_edge_pct=0.72,
+            risk_budget=1800.0,
+            contracts=1,
+            total_risk=1733.27,
+            total_max_profit=2266.73,
+            exit_rules=ExitRules(
+                stop_loss_spot=83474.0,
+                stop_loss_spot_pct=0.061,
+                stop_loss_value=693.0,
+                stop_loss_value_pct=0.6,
+                take_profit_pct=0.6,
+                take_profit_value=1360.0,
+                max_hold_days=11,
+                max_hold_date=date(2026, 5, 13),
+                scale_down_day=5,
+                scale_down_date=date(2026, 5, 7),
+                scale_down_action="close_full_position",
+            ),
+            path_profile=PathProfile(
+                shakeout_pct=0.57,
+                invalidation_pct=0.43,
+                mae_p75=0.0719,
+                clean_win_pct=0.571,
+                is_shakeout_heavy=True,
+                is_invalidation_heavy=True,
+                entry_strategy="dca",
+                entry_note="33% initial, 67% DCA at +7% (shakeout-heavy)",
+            ),
+            validation_passed=True,
+            validation_warnings=[],
+            validation_blocking=[],
+            policy_version="2026-05-03.3",
+        )
+        
+        message = setup.to_telegram_message()
+        
+        # Should contain PATH PROFILE section
+        self.assertIn("PATH PROFILE", message)
+        self.assertIn("Shakeout Rate", message)
+        self.assertIn("57%", message)
+        self.assertIn("DCA", message)
+        self.assertIn("MAE p75", message)
+    
+    def test_telegram_shows_invalidation_for_invalidation_heavy(self):
+        """Test Telegram message shows invalidation info for invalidation-heavy signals."""
+        from execution.services.trade_setup import TradeSetup, LegSetup, ExitRules, PathProfile
+        
+        setup = TradeSetup(
+            signal_date=date(2026, 5, 2),
+            signal_type="OPTION_CALL",
+            direction="LONG",
+            spot_price=78653.0,
+            expiry=date(2026, 5, 15),
+            dte=9,
+            long_leg=LegSetup(
+                symbol="BTC-15MAY26-78000-C",
+                action="BUY",
+                strike=78000.0,
+                delta=0.65,
+                iv=0.35,
+                price=3500.0,
+                open_interest=300,
+                bid_ask_spread_pct=0.03,
+            ),
+            short_leg=LegSetup(
+                symbol="BTC-15MAY26-86000-C",
+                action="SELL",
+                strike=86000.0,
+                delta=0.25,
+                iv=0.38,
+                price=1000.0,
+                open_interest=400,
+                bid_ask_spread_pct=0.04,
+            ),
+            spread_width=8000.0,
+            spread_width_pct=0.10,
+            net_debit=2500.0,
+            max_profit=5500.0,
+            max_loss=2500.0,
+            risk_reward=2.2,
+            breakeven=80500.0,
+            execution_cost=150.0,
+            adjusted_max_profit=5350.0,
+            net_edge_pct=0.85,
+            risk_budget=3200.0,
+            contracts=1,
+            total_risk=2500.0,
+            total_max_profit=5500.0,
+            exit_rules=ExitRules(
+                stop_loss_spot=71940.0,
+                stop_loss_spot_pct=0.085,
+                stop_loss_value=1000.0,
+                stop_loss_value_pct=0.6,
+                take_profit_pct=0.7,
+                take_profit_value=3850.0,
+                max_hold_days=7,
+                max_hold_date=date(2026, 5, 9),
+                scale_down_day=4,
+                scale_down_date=date(2026, 5, 6),
+                scale_down_action="reduce_50pct",
+            ),
+            path_profile=PathProfile(
+                shakeout_pct=0.35,
+                invalidation_pct=0.54,
+                mae_p75=0.0848,
+                clean_win_pct=0.458,
+                is_shakeout_heavy=False,
+                is_invalidation_heavy=True,
+                entry_strategy="scaled",
+                entry_note="50% initial, 50% on confirmation (high invalidation)",
+            ),
+            validation_passed=True,
+            validation_warnings=[],
+            validation_blocking=[],
+            policy_version="2026-05-03.3",
+        )
+        
+        message = setup.to_telegram_message()
+        
+        # Should contain PATH PROFILE section with invalidation info
+        self.assertIn("PATH PROFILE", message)
+        self.assertIn("Invalidation", message)
+        self.assertIn("54%", message)
+        self.assertIn("SCALED", message)
+    
+    def test_telegram_no_path_profile_for_clean_signals(self):
+        """Test Telegram message does NOT show PATH PROFILE for clean signals."""
+        from execution.services.trade_setup import TradeSetup, LegSetup, ExitRules, PathProfile
+        
+        setup = TradeSetup(
+            signal_date=date(2026, 5, 2),
+            signal_type="CALL",
+            direction="LONG",
+            spot_price=78653.0,
+            expiry=date(2026, 5, 15),
+            dte=11,
+            long_leg=LegSetup(
+                symbol="BTC-15MAY26-78000-C",
+                action="BUY",
+                strike=78000.0,
+                delta=0.60,
+                iv=0.35,
+                price=3000.0,
+                open_interest=300,
+                bid_ask_spread_pct=0.03,
+            ),
+            short_leg=LegSetup(
+                symbol="BTC-15MAY26-86000-C",
+                action="SELL",
+                strike=86000.0,
+                delta=0.25,
+                iv=0.38,
+                price=1000.0,
+                open_interest=400,
+                bid_ask_spread_pct=0.04,
+            ),
+            spread_width=8000.0,
+            spread_width_pct=0.10,
+            net_debit=2000.0,
+            max_profit=6000.0,
+            max_loss=2000.0,
+            risk_reward=3.0,
+            breakeven=80000.0,
+            execution_cost=120.0,
+            adjusted_max_profit=5880.0,
+            net_edge_pct=0.90,
+            risk_budget=3200.0,
+            contracts=1,
+            total_risk=2000.0,
+            total_max_profit=6000.0,
+            exit_rules=ExitRules(
+                stop_loss_spot=75120.0,
+                stop_loss_spot_pct=0.045,
+                stop_loss_value=800.0,
+                stop_loss_value_pct=0.6,
+                take_profit_pct=0.7,
+                take_profit_value=4200.0,
+                max_hold_days=9,
+                max_hold_date=date(2026, 5, 11),
+                scale_down_day=6,
+                scale_down_date=date(2026, 5, 8),
+                scale_down_action="reduce_50pct",
+            ),
+            path_profile=PathProfile(
+                shakeout_pct=0.21,
+                invalidation_pct=0.27,
+                mae_p75=0.0471,
+                clean_win_pct=0.729,
+                is_shakeout_heavy=False,
+                is_invalidation_heavy=False,
+                entry_strategy="single",
+                entry_note="Full position at entry",
+            ),
+            validation_passed=True,
+            validation_warnings=[],
+            validation_blocking=[],
+            policy_version="2026-05-03.3",
+        )
+        
+        message = setup.to_telegram_message()
+        
+        # Should NOT contain PATH PROFILE section for clean signals
+        self.assertNotIn("PATH PROFILE", message)
+        self.assertNotIn("Shakeout Rate", message)
+
+
+class EntryStrategyLogicTests(TestCase):
+    """Tests for entry strategy determination logic."""
+    
+    def test_dca_strategy_for_shakeout_heavy(self):
+        """Test DCA strategy is selected for shakeout-heavy signals."""
+        policy = get_policy()
+        
+        # MVRV_SHORT has 57% shakeout rate
+        self.assertTrue(policy.is_shakeout_heavy("MVRV_SHORT"))
+        
+        # BEAR_PROBE has 40% shakeout rate (exactly at threshold)
+        self.assertTrue(policy.is_shakeout_heavy("BEAR_PROBE"))
+    
+    def test_scaled_strategy_for_invalidation_heavy(self):
+        """Test scaled strategy is appropriate for invalidation-heavy signals."""
+        policy = get_policy()
+        
+        # OPTION_CALL has 54% invalidation rate
+        self.assertTrue(policy.is_invalidation_heavy("OPTION_CALL"))
+        self.assertFalse(policy.is_shakeout_heavy("OPTION_CALL"))
+        
+        # OPTION_PUT has 44% invalidation rate
+        self.assertTrue(policy.is_invalidation_heavy("OPTION_PUT"))
+    
+    def test_single_strategy_for_clean_signals(self):
+        """Test single strategy is appropriate for clean signals."""
+        policy = get_policy()
+        
+        # CALL has 21% shakeout, 27% invalidation - both below thresholds
+        self.assertFalse(policy.is_shakeout_heavy("CALL"))
+        self.assertFalse(policy.is_invalidation_heavy("CALL"))
+        
+        # BULL_PROBE has 19% shakeout, 22% invalidation - both below thresholds
+        self.assertFalse(policy.is_shakeout_heavy("BULL_PROBE"))
+        self.assertFalse(policy.is_invalidation_heavy("BULL_PROBE"))
+    
+    def test_threshold_boundaries(self):
+        """Test threshold boundary conditions."""
+        policy = get_policy()
+        
+        # Shakeout threshold is 40%
+        # BEAR_PROBE has exactly 40% - should be shakeout-heavy
+        profile = policy.get_path_profile("BEAR_PROBE")
+        self.assertEqual(profile["shakeout_pct"], 0.40)
+        self.assertTrue(policy.is_shakeout_heavy("BEAR_PROBE"))
+        
+        # OPTION_CALL has 35% shakeout - should NOT be shakeout-heavy
+        profile = policy.get_path_profile("OPTION_CALL")
+        self.assertEqual(profile["shakeout_pct"], 0.35)
+        self.assertFalse(policy.is_shakeout_heavy("OPTION_CALL"))
+        
+        # Invalidation threshold is 35%
+        # BEAR_PROBE has 40% invalidation - should be invalidation-heavy
+        self.assertTrue(policy.is_invalidation_heavy("BEAR_PROBE"))
