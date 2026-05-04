@@ -118,6 +118,11 @@ class PolicyVersion:
     # Per-signal delta targets (calibrated from MAE analysis)
     signal_delta_targets: dict[str, float] = field(default_factory=dict)
     
+    # Path profile data (from analyze_path_stats)
+    # shakeout_pct: % of winners that experience shakeout before hitting target
+    # invalidation_pct: % of winners invalidated before hit
+    path_profiles: dict[str, dict] = field(default_factory=dict)
+    
     # Liquidity and execution
     liquidity: LiquidityConfig = field(default_factory=LiquidityConfig)
     execution_costs: ExecutionCostConfig = field(default_factory=ExecutionCostConfig)
@@ -178,6 +183,47 @@ class PolicyVersion:
         """Get expected edge for cost checks."""
         return self.expected_edge_by_signal.get(signal_type, default)
     
+    def get_path_profile(self, signal_type: str) -> dict:
+        """
+        Get path profile for a signal type.
+        
+        Returns dict with:
+        - shakeout_pct: % of winners with shakeout path
+        - invalidation_pct: % of winners invalidated before hit
+        - mae_p75: 75th percentile MAE for winners
+        - clean_win_pct: % of winners with clean paths
+        """
+        return self.path_profiles.get(signal_type, {
+            "shakeout_pct": 0.20,
+            "invalidation_pct": 0.25,
+            "mae_p75": 0.05,
+            "clean_win_pct": 0.75,
+        })
+    
+    def is_shakeout_heavy(self, signal_type: str) -> bool:
+        """
+        Check if signal type has shakeout-heavy paths (>40% shakeout).
+        
+        Shakeout-heavy signals need:
+        - DCA entry strategy
+        - Wider stops
+        - ITM strikes for cushion
+        """
+        profile = self.get_path_profile(signal_type)
+        return profile.get("shakeout_pct", 0) >= 0.40
+    
+    def is_invalidation_heavy(self, signal_type: str) -> bool:
+        """
+        Check if signal type has high invalidation rate (>35%).
+        
+        High invalidation signals need:
+        - ITM strikes
+        - Wider stops
+        - Smaller position size
+        """
+        profile = self.get_path_profile(signal_type)
+        return profile.get("invalidation_pct", 0) >= 0.35
+    
     def estimate_edge_after_costs(
         self, 
         expected_return_pct: float,
@@ -206,6 +252,7 @@ class PolicyVersion:
             "spread_width_pct": self.spread_width_pct,
             "exit_params": {k: vars(v) for k, v in self.exit_params.items()},
             "expected_edge_by_signal": self.expected_edge_by_signal,
+            "path_profiles": self.path_profiles,
             "liquidity": vars(self.liquidity),
             "execution_costs": vars(self.execution_costs),
             "condor": vars(self.condor),
@@ -276,6 +323,23 @@ POLICY_V1 = PolicyVersion(
         "BEAR_PROBE": -0.55,   # MAE(W) p75=6.53%, need cushion
         "IRON_CONDOR": 0.20,   # OTM wings for premium selling
         "MVRV_SHORT": -0.60,   # MAE(W) p75=7.19%, shakeout-heavy
+    },
+    
+    # Path profile data from analyze_path_stats (14d horizon, 5% target)
+    # shakeout_pct: % of winners with "shakeout then expansion" path shape
+    # invalidation_pct: % of winners invalidated before hitting target
+    # mae_p75: 75th percentile MAE for winners
+    # clean_win_pct: % of winners with clean paths (no invalidation)
+    path_profiles={
+        "CALL": {"shakeout_pct": 0.21, "invalidation_pct": 0.27, "mae_p75": 0.0471, "clean_win_pct": 0.729},
+        "PUT": {"shakeout_pct": 0.18, "invalidation_pct": 0.29, "mae_p75": 0.0441, "clean_win_pct": 0.714},
+        "OPTION_CALL": {"shakeout_pct": 0.35, "invalidation_pct": 0.54, "mae_p75": 0.0848, "clean_win_pct": 0.458},
+        "OPTION_PUT": {"shakeout_pct": 0.31, "invalidation_pct": 0.44, "mae_p75": 0.0682, "clean_win_pct": 0.562},
+        "TACTICAL_PUT": {"shakeout_pct": 0.15, "invalidation_pct": 0.25, "mae_p75": 0.0308, "clean_win_pct": 0.750},
+        "BULL_PROBE": {"shakeout_pct": 0.19, "invalidation_pct": 0.22, "mae_p75": 0.0384, "clean_win_pct": 0.781},
+        "BEAR_PROBE": {"shakeout_pct": 0.40, "invalidation_pct": 0.40, "mae_p75": 0.0653, "clean_win_pct": 0.600},
+        "MVRV_SHORT": {"shakeout_pct": 0.57, "invalidation_pct": 0.43, "mae_p75": 0.0719, "clean_win_pct": 0.571},
+        "IRON_CONDOR": {"shakeout_pct": 0.0, "invalidation_pct": 0.0, "mae_p75": 0.0676, "clean_win_pct": 1.0},
     },
     
     # Enable spreads for ALL signals including MVRV_SHORT

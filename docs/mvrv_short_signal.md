@@ -105,9 +105,29 @@ Telegram Notification + API
 
 1. **Bear-only signal**: Only fires during cycle days 540-900 post-halving
 2. **DCA is essential**: The 33%/67% split exploits the asymmetric payoff
-3. **Shakeout-heavy**: 57% of winners have "shakeout then expansion" path shape
-4. **Patience required**: TTH p75 is 10 days (slowest of all signals)
-5. **Wide stops needed**: MAE(W) p75 is 7.19% (second highest after OPTION_CALL)
+3. **Shakeout-heavy (57%)**: Most winners experience price going against before hitting target
+4. **High invalidation (43%)**: Many winners get invalidated before hit - need wide stops
+5. **Patience required**: TTH p75 is 10 days (slowest of all signals)
+6. **Wide stops needed**: MAE(W) p75 is 7.19% (second highest after OPTION_CALL)
+
+## Path Profile
+
+The Trade Setup Builder automatically detects MVRV_SHORT as a shakeout-heavy signal and recommends DCA entry:
+
+```json
+{
+  "path_profile": {
+    "shakeout_pct": 0.57,
+    "invalidation_pct": 0.43,
+    "mae_p75": 0.0719,
+    "clean_win_pct": 0.571,
+    "is_shakeout_heavy": true,
+    "is_invalidation_heavy": true,
+    "entry_strategy": "dca",
+    "entry_note": "33% initial, 67% DCA at +7% (shakeout-heavy)"
+  }
+}
+```
 
 ## Related Documentation
 

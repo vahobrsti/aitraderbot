@@ -151,22 +151,40 @@ data = setup.to_dict()
 
 Data-driven policy calibrated from path analysis (`analyze_path_stats`):
 
-| Signal | Win% | Trades | DTE | Spread Width | Stop Loss | Delta |
-|--------|------|--------|-----|--------------|-----------|-------|
-| OPTION_CALL | 91.7% | 24 | 7-12d | 10% | 8.5% | 0.65 |
-| OPTION_PUT | 77.8% | 18 | 5-10d | 12% | 7.0% | -0.65 |
-| PRIMARY_SHORT | 75.7% | 37 | 8-12d | 9% | 4.5% | -0.60 |
-| BULL_PROBE | 71.4% | 42 | 7-11d | 12% | 4.0% | 0.55 |
-| LONG | 70.9% | 79 | 9-14d | 10% | 4.5% | 0.60 |
-| MVRV_SHORT | 68.2% | 22 | 12-18d | 9% | 7.0% | -0.60 |
-| IRON_CONDOR | 63.1% | 84 | 9-13d | 10% | 6.8% | 0.20 |
-| BEAR_PROBE | 53.3% | 15 | 11-16d | 8% | 6.5% | -0.55 |
-| TACTICAL_PUT | 50.0% | 24 | 8-12d | 7% | 3.5% | -0.40 |
+| Signal | Win% | Trades | DTE | Spread Width | Stop Loss | Delta | Shakeout% |
+|--------|------|--------|-----|--------------|-----------|-------|-----------|
+| OPTION_CALL | 91.7% | 24 | 7-12d | 10% | 8.5% | 0.65 | 35% |
+| OPTION_PUT | 77.8% | 18 | 5-10d | 12% | 7.0% | -0.65 | 31% |
+| PRIMARY_SHORT | 75.7% | 37 | 8-12d | 9% | 4.5% | -0.60 | 18% |
+| BULL_PROBE | 71.4% | 42 | 7-11d | 12% | 4.0% | 0.55 | 19% |
+| LONG | 70.9% | 79 | 9-14d | 10% | 4.5% | 0.60 | 21% |
+| MVRV_SHORT | 68.2% | 22 | 12-18d | 9% | 7.0% | -0.60 | **57%** |
+| IRON_CONDOR | 63.1% | 84 | 9-13d | 10% | 6.8% | 0.20 | 0% |
+| BEAR_PROBE | 53.3% | 15 | 11-16d | 8% | 6.5% | -0.55 | **40%** |
+| TACTICAL_PUT | 50.0% | 24 | 8-12d | 7% | 3.5% | -0.40 | 15% |
 
 **Key calibration formulas:**
 - **DTE** = TTH p75 + 2 days buffer
 - **Spread Width** = MFE p75 × 0.65-0.70
 - **Stop Loss** = MAE(winners) p75 + buffer
+
+### Path-Aware Entry Strategy
+
+Signals with high shakeout rates (≥40%) use DCA entry:
+
+| Signal | Shakeout% | Invalidation% | Entry Strategy |
+|--------|-----------|---------------|----------------|
+| MVRV_SHORT | 57% | 43% | **DCA**: 33% initial, 67% on +7% rise |
+| BEAR_PROBE | 40% | 40% | **DCA**: 33% initial, 67% on +6.5% rise |
+| OPTION_CALL | 35% | 54% | **Scaled**: 50% initial, 50% on confirmation |
+| OPTION_PUT | 31% | 44% | **Scaled**: 50% initial, 50% on confirmation |
+| Others | <30% | <35% | **Single**: Full position at entry |
+
+**Why DCA for shakeout-heavy signals:**
+- 57% of MVRV_SHORT winners experience price going against before hitting target
+- Initial small position survives the shakeout
+- DCA entry catches the move at better price
+- Reduces average entry cost and improves R:R
 
 ### Trade Validator (11 Checks)
 
