@@ -1683,12 +1683,14 @@ class TestMvrvShortStrategyMap(SimpleTestCase):
         self.assertIn("take_profit_pct", strategy)
     
     def test_mvrv_short_execution_params(self):
-        """MVRV_SHORT has correct execution parameters."""
+        """MVRV_SHORT has correct execution parameters for put spread."""
         from signals.options import DECISION_STRATEGY_MAP
         strategy = DECISION_STRATEGY_MAP["MVRV_SHORT"]
-        self.assertEqual(strategy["stop_loss_pct"], 0.04)  # DCA trigger
-        self.assertEqual(strategy["max_hold_days"], 5)
-        self.assertEqual(strategy["take_profit_pct"], 0.04)  # 4% target
+        self.assertEqual(strategy["stop_loss_pct"], 0.07)  # 7% spot move stop
+        self.assertEqual(strategy["max_hold_days"], 12)
+        self.assertEqual(strategy["take_profit_pct"], 0.70)  # 70% of max profit
+        self.assertEqual(strategy["spread_width_pct"], 0.09)  # 9% spread width
+        self.assertEqual(strategy["scale_down_day"], 7)  # Scale down on day 7
     
     def test_mvrv_short_rationale_mentions_bear_mode(self):
         """MVRV_SHORT rationale mentions bear mode and MVRV thresholds."""
