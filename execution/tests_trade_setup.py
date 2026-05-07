@@ -1556,3 +1556,607 @@ class EntryStrategyLogicTests(TestCase):
         # Invalidation threshold is 35%
         # BEAR_PROBE has 40% invalidation - should be invalidation-heavy
         self.assertTrue(policy.is_invalidation_heavy("BEAR_PROBE"))
+
+
+# =============================================================================
+# PATH-AWARE EXIT POLICY TESTS
+# =============================================================================
+
+class PathAwareExitConfigTests(TestCase):
+    """Tests for path-aware exit configuration in ExitConfig."""
+    
+    def test_exit_config_has_path_aware_fields(self):
+        """Test ExitConfig has all path-aware exit fields."""
+        exit_cfg = ExitConfig(
+            stop_loss_pct=0.07,
+            take_profit_pct=0.60,
+            max_hold_days=12,
+            scale_down_day=7,
+            profit_lock_threshold=0.25,
+            trailing_stop_pct=0.04,
+            stop_tighten_day=9,
+            stop_tighten_factor=0.7,
+        )
+        
+        self.assertEqual(exit_cfg.profit_lock_threshold, 0.25)
+        self.assertEqual(exit_cfg.trailing_stop_pct, 0.04)
+        self.assertEqual(exit_cfg.stop_tighten_day, 9)
+        self.assertEqual(exit_cfg.stop_tighten_factor, 0.7)
+    
+    def test_exit_config_defaults(self):
+        """Test ExitConfig has sensible defaults for path-aware fields."""
+        exit_cfg = ExitConfig(
+            stop_loss_pct=0.05,
+            take_profit_pct=0.70,
+            max_hold_days=10,
+        )
+        
+        # Check defaults
+        self.assertEqual(exit_cfg.profit_lock_threshold, 0.30)  # Default 30%
+        self.assertEqual(exit_cfg.trailing_stop_pct, 0.0)       # Default disabled
+        self.assertIsNone(exit_cfg.stop_tighten_day)            # Default None
+        self.assertEqual(exit_cfg.stop_tighten_factor, 0.5)     # Default 50%
+
+
+class PathAwareExitPolicyTests(TestCase):
+    """Tests for path-aware exit parameters in policy."""
+    
+    def test_mvrv_short_has_trailing_stop(self):
+        """Test MVRV_SHORT has trailing stop configured (shakeout-heavy)."""
+        policy = get_policy()
+        exit_cfg = policy.get_exit_params("MVRV_SHORT")
+        
+        # MVRV_SHORT should have trailing stop (shakeout-heavy signal)
+        self.assertGreater(exit_cfg.trailing_stop_pct, 0)
+        self.assertEqual(exit_cfg.trailing_stop_pct, 0.04)  # 4% trailing
+    
+    def test_bear_probe_has_trailing_stop(self):
+        """Test BEAR_PROBE has trailing stop configured (shakeout-heavy)."""
+        policy = get_policy()
+        exit_cfg = policy.get_exit_params("BEAR_PROBE")
+        
+        # BEAR_PROBE should have trailing stop (shakeout-heavy signal)
+        self.assertGreater(exit_cfg.trailing_stop_pct, 0)
+        self.assertEqual(exit_cfg.trailing_stop_pct, 0.03)  # 3% trailing
+    
+    def test_option_call_has_early_tightening(self):
+        """Test OPTION_CALL has early stop tightening (invalidation-heavy)."""
+        policy = get_policy()
+        exit_cfg = policy.get_exit_params("OPTION_CALL")
+        
+        # OPTION_CALL should have early tightening (invalidation-heavy)
+        self.assertIsNotNone(exit_cfg.stop_tighten_day)
+        self.assertEqual(exit_cfg.stop_tighten_day, 3)  # Tighten on day 3
+        self.assertEqual(exit_cfg.stop_tighten_factor, 0.5)  # 50% tighter
+    
+    def test_option_put_has_early_tightening(self):
+        """Test OPTION_PUT has early stop tightening (invalidation-heavy)."""
+        policy = get_policy()
+        exit_cfg = policy.get_exit_params("OPTION_PUT")
+        
+        # OPTION_PUT should have early tightening (invalidation-heavy)
+        self.assertIsNotNone(exit_cfg.stop_tighten_day)
+        self.assertEqual(exit_cfg.stop_tighten_day, 2)  # Tighten on day 2
+    
+    def test_clean_signals_no_trailing_stop(self):
+        """Test clean signals (CALL, PUT) have no trailing stop."""
+        policy = get_policy()
+        
+        call_exit = policy.get_exit_params("CALL")
+        put_exit = policy.get_exit_params("PUT")
+        
+        # Clean signals should NOT have trailing stop
+        self.assertEqual(call_exit.trailing_stop_pct, 0.0)
+        self.assertEqual(put_exit.trailing_stop_pct, 0.0)
+    
+    def test_shakeout_heavy_has_delayed_tightening(self):
+        """Test shakeout-heavy signals have delayed stop tightening."""
+        policy = get_policy()
+        
+        mvrv_exit = policy.get_exit_params("MVRV_SHORT")
+        bear_exit = policy.get_exit_params("BEAR_PROBE")
+        
+        # Shakeout-heavy signals should have delayed tightening
+        self.assertGreaterEqual(mvrv_exit.stop_tighten_day, 8)  # Day 9
+        self.assertGreaterEqual(bear_exit.stop_tighten_day, 7)  # Day 8
+        
+        # And less aggressive tightening factor
+        self.assertGreaterEqual(mvrv_exit.stop_tighten_factor, 0.6)  # 70%
+        self.assertGreaterEqual(bear_exit.stop_tighten_factor, 0.6)  # 70%
+    
+    def test_invalidation_heavy_has_lower_take_profit(self):
+        """Test invalidation-heavy signals have lower take-profit."""
+        policy = get_policy()
+        
+        option_call_exit = policy.get_exit_params("OPTION_CALL")
+        option_put_exit = policy.get_exit_params("OPTION_PUT")
+        call_exit = policy.get_exit_params("CALL")
+        
+        # Invalidation-heavy should have 50% take-profit
+        self.assertEqual(option_call_exit.take_profit_pct, 0.50)
+        self.assertEqual(option_put_exit.take_profit_pct, 0.50)
+        
+        # Clean signals should have take-profit >= invalidation-heavy
+        # (calibration may adjust this, but should be >= 50%)
+        self.assertGreaterEqual(call_exit.take_profit_pct, option_call_exit.take_profit_pct)
+
+
+class ExitRulesPathAwareFieldsTests(TestCase):
+    """Tests for path-aware fields in ExitRules dataclass."""
+    
+    def test_exit_rules_has_path_aware_fields(self):
+        """Test ExitRules dataclass has all path-aware fields."""
+        from execution.services.trade_setup import ExitRules
+        
+        rules = ExitRules(
+            stop_loss_spot=83474.0,
+            stop_loss_spot_pct=0.07,
+            stop_loss_value=693.0,
+            stop_loss_value_pct=0.6,
+            take_profit_pct=0.6,
+            take_profit_value=1360.0,
+            max_hold_days=12,
+            max_hold_date=date(2026, 5, 14),
+            scale_down_day=7,
+            scale_down_date=date(2026, 5, 9),
+            scale_down_action="close_full_position",
+            # Path-aware fields
+            profit_lock_threshold=0.25,
+            profit_lock_stop=78653.0,
+            trailing_stop_pct=0.04,
+            stop_tighten_day=9,
+            stop_tighten_date=date(2026, 5, 11),
+            tightened_stop_pct=0.049,
+        )
+        
+        self.assertEqual(rules.profit_lock_threshold, 0.25)
+        self.assertEqual(rules.profit_lock_stop, 78653.0)
+        self.assertEqual(rules.trailing_stop_pct, 0.04)
+        self.assertEqual(rules.stop_tighten_day, 9)
+        self.assertEqual(rules.stop_tighten_date, date(2026, 5, 11))
+        self.assertEqual(rules.tightened_stop_pct, 0.049)
+    
+    def test_exit_rules_defaults(self):
+        """Test ExitRules has sensible defaults for path-aware fields."""
+        from execution.services.trade_setup import ExitRules
+        
+        rules = ExitRules(
+            stop_loss_spot=83474.0,
+            stop_loss_spot_pct=0.07,
+            stop_loss_value=693.0,
+            stop_loss_value_pct=0.6,
+            take_profit_pct=0.6,
+            take_profit_value=1360.0,
+            max_hold_days=12,
+            max_hold_date=date(2026, 5, 14),
+            scale_down_day=7,
+            scale_down_date=date(2026, 5, 9),
+            scale_down_action="close_full_position",
+        )
+        
+        # Check defaults
+        self.assertEqual(rules.profit_lock_threshold, 0.30)
+        self.assertIsNone(rules.profit_lock_stop)
+        self.assertEqual(rules.trailing_stop_pct, 0.0)
+        self.assertIsNone(rules.stop_tighten_day)
+        self.assertIsNone(rules.stop_tighten_date)
+        self.assertIsNone(rules.tightened_stop_pct)
+
+
+class ExitRulesToDictTests(TestCase):
+    """Tests for path-aware exit rules serialization in to_dict()."""
+    
+    def test_to_dict_includes_path_aware_exit_fields(self):
+        """Test to_dict() includes all path-aware exit fields."""
+        from execution.services.trade_setup import TradeSetup, LegSetup, ExitRules, PathProfile
+        
+        setup = TradeSetup(
+            signal_date=date(2026, 5, 2),
+            signal_type="MVRV_SHORT",
+            direction="SHORT",
+            spot_price=78653.0,
+            expiry=date(2026, 5, 15),
+            dte=12,
+            long_leg=LegSetup(
+                symbol="BTC-15MAY26-80000-P",
+                action="BUY",
+                strike=80000.0,
+                delta=-0.58,
+                iv=0.35,
+                price=2757.48,
+                open_interest=257,
+                bid_ask_spread_pct=0.03,
+            ),
+            short_leg=LegSetup(
+                symbol="BTC-15MAY26-76000-P",
+                action="SELL",
+                strike=76000.0,
+                delta=-0.29,
+                iv=0.38,
+                price=1024.21,
+                open_interest=541,
+                bid_ask_spread_pct=0.04,
+            ),
+            spread_width=4000.0,
+            spread_width_pct=0.051,
+            net_debit=1733.27,
+            max_profit=2266.73,
+            max_loss=1733.27,
+            risk_reward=1.31,
+            breakeven=78267.0,
+            execution_cost=107.46,
+            adjusted_max_profit=2159.27,
+            net_edge_pct=0.72,
+            risk_budget=1800.0,
+            contracts=1,
+            total_risk=1733.27,
+            total_max_profit=2266.73,
+            exit_rules=ExitRules(
+                stop_loss_spot=84159.0,
+                stop_loss_spot_pct=0.07,
+                stop_loss_value=693.0,
+                stop_loss_value_pct=0.6,
+                take_profit_pct=0.6,
+                take_profit_value=1360.0,
+                max_hold_days=12,
+                max_hold_date=date(2026, 5, 14),
+                scale_down_day=7,
+                scale_down_date=date(2026, 5, 9),
+                scale_down_action="close_full_position",
+                # Path-aware fields
+                profit_lock_threshold=0.25,
+                profit_lock_stop=78653.0,
+                trailing_stop_pct=0.04,
+                stop_tighten_day=9,
+                stop_tighten_date=date(2026, 5, 11),
+                tightened_stop_pct=0.049,
+            ),
+            path_profile=PathProfile(
+                shakeout_pct=0.57,
+                invalidation_pct=0.43,
+                mae_p75=0.0719,
+                clean_win_pct=0.571,
+                is_shakeout_heavy=True,
+                is_invalidation_heavy=True,
+                entry_strategy="dca",
+                entry_note="33% initial, 67% DCA at +7% (shakeout-heavy)",
+            ),
+            validation_passed=True,
+            validation_warnings=[],
+            validation_blocking=[],
+            policy_version="2026-05-03.3",
+        )
+        
+        data = setup.to_dict()
+        exit_rules = data["exit_rules"]
+        
+        # Check path-aware fields are serialized
+        self.assertIn("profit_lock_threshold", exit_rules)
+        self.assertIn("profit_lock_stop", exit_rules)
+        self.assertIn("trailing_stop_pct", exit_rules)
+        self.assertIn("stop_tighten_day", exit_rules)
+        self.assertIn("stop_tighten_date", exit_rules)
+        self.assertIn("tightened_stop_pct", exit_rules)
+        
+        # Check values
+        self.assertEqual(exit_rules["profit_lock_threshold"], 0.25)
+        self.assertEqual(exit_rules["profit_lock_stop"], 78653.0)
+        self.assertEqual(exit_rules["trailing_stop_pct"], 0.04)
+        self.assertEqual(exit_rules["stop_tighten_day"], 9)
+        self.assertEqual(exit_rules["stop_tighten_date"], "2026-05-11")
+        self.assertEqual(exit_rules["tightened_stop_pct"], 0.049)
+
+
+class TelegramPathAwareExitTests(TestCase):
+    """Tests for path-aware exit rules in Telegram messages."""
+    
+    def test_telegram_shows_trailing_stop_for_shakeout_heavy(self):
+        """Test Telegram message shows trailing stop for shakeout-heavy signals."""
+        from execution.services.trade_setup import TradeSetup, LegSetup, ExitRules, PathProfile
+        
+        setup = TradeSetup(
+            signal_date=date(2026, 5, 2),
+            signal_type="MVRV_SHORT",
+            direction="SHORT",
+            spot_price=78653.0,
+            expiry=date(2026, 5, 15),
+            dte=12,
+            long_leg=LegSetup(
+                symbol="BTC-15MAY26-80000-P",
+                action="BUY",
+                strike=80000.0,
+                delta=-0.58,
+                iv=0.35,
+                price=2757.48,
+                open_interest=257,
+                bid_ask_spread_pct=0.03,
+            ),
+            short_leg=LegSetup(
+                symbol="BTC-15MAY26-76000-P",
+                action="SELL",
+                strike=76000.0,
+                delta=-0.29,
+                iv=0.38,
+                price=1024.21,
+                open_interest=541,
+                bid_ask_spread_pct=0.04,
+            ),
+            spread_width=4000.0,
+            spread_width_pct=0.051,
+            net_debit=1733.27,
+            max_profit=2266.73,
+            max_loss=1733.27,
+            risk_reward=1.31,
+            breakeven=78267.0,
+            execution_cost=107.46,
+            adjusted_max_profit=2159.27,
+            net_edge_pct=0.72,
+            risk_budget=1800.0,
+            contracts=1,
+            total_risk=1733.27,
+            total_max_profit=2266.73,
+            exit_rules=ExitRules(
+                stop_loss_spot=84159.0,
+                stop_loss_spot_pct=0.07,
+                stop_loss_value=693.0,
+                stop_loss_value_pct=0.6,
+                take_profit_pct=0.6,
+                take_profit_value=1360.0,
+                max_hold_days=12,
+                max_hold_date=date(2026, 5, 14),
+                scale_down_day=7,
+                scale_down_date=date(2026, 5, 9),
+                scale_down_action="close_full_position",
+                profit_lock_threshold=0.25,
+                profit_lock_stop=78653.0,
+                trailing_stop_pct=0.04,  # 4% trailing stop
+                stop_tighten_day=9,
+                stop_tighten_date=date(2026, 5, 11),
+                tightened_stop_pct=0.049,
+            ),
+            path_profile=PathProfile(
+                shakeout_pct=0.57,
+                invalidation_pct=0.43,
+                mae_p75=0.0719,
+                clean_win_pct=0.571,
+                is_shakeout_heavy=True,
+                is_invalidation_heavy=True,
+                entry_strategy="dca",
+                entry_note="33% initial, 67% DCA at +7% (shakeout-heavy)",
+            ),
+            validation_passed=True,
+            validation_warnings=[],
+            validation_blocking=[],
+            policy_version="2026-05-03.3",
+        )
+        
+        message = setup.to_telegram_message()
+        
+        # Should show Dynamic Exits section
+        self.assertIn("Dynamic Exits", message)
+        self.assertIn("Trailing Stop", message)
+        self.assertIn("4%", message)
+        self.assertIn("Profit Lock", message)
+        self.assertIn("25%", message)
+        self.assertIn("Stop Tighten", message)
+        self.assertIn("Day 9", message)
+    
+    def test_telegram_no_dynamic_exits_for_clean_signals(self):
+        """Test Telegram message does NOT show Dynamic Exits for clean signals without trailing."""
+        from execution.services.trade_setup import TradeSetup, LegSetup, ExitRules, PathProfile
+        
+        setup = TradeSetup(
+            signal_date=date(2026, 5, 2),
+            signal_type="CALL",
+            direction="LONG",
+            spot_price=78653.0,
+            expiry=date(2026, 5, 15),
+            dte=11,
+            long_leg=LegSetup(
+                symbol="BTC-15MAY26-78000-C",
+                action="BUY",
+                strike=78000.0,
+                delta=0.60,
+                iv=0.35,
+                price=3000.0,
+                open_interest=300,
+                bid_ask_spread_pct=0.03,
+            ),
+            short_leg=LegSetup(
+                symbol="BTC-15MAY26-86000-C",
+                action="SELL",
+                strike=86000.0,
+                delta=0.25,
+                iv=0.38,
+                price=1000.0,
+                open_interest=400,
+                bid_ask_spread_pct=0.04,
+            ),
+            spread_width=8000.0,
+            spread_width_pct=0.10,
+            net_debit=2000.0,
+            max_profit=6000.0,
+            max_loss=2000.0,
+            risk_reward=3.0,
+            breakeven=80000.0,
+            execution_cost=120.0,
+            adjusted_max_profit=5880.0,
+            net_edge_pct=0.90,
+            risk_budget=3200.0,
+            contracts=1,
+            total_risk=2000.0,
+            total_max_profit=6000.0,
+            exit_rules=ExitRules(
+                stop_loss_spot=75120.0,
+                stop_loss_spot_pct=0.045,
+                stop_loss_value=800.0,
+                stop_loss_value_pct=0.6,
+                take_profit_pct=0.7,
+                take_profit_value=4200.0,
+                max_hold_days=9,
+                max_hold_date=date(2026, 5, 11),
+                scale_down_day=6,
+                scale_down_date=date(2026, 5, 8),
+                scale_down_action="reduce_50pct",
+                profit_lock_threshold=0.0,  # Disabled
+                trailing_stop_pct=0.0,      # No trailing
+                stop_tighten_day=None,      # No tightening
+            ),
+            path_profile=PathProfile(
+                shakeout_pct=0.21,
+                invalidation_pct=0.27,
+                mae_p75=0.0471,
+                clean_win_pct=0.729,
+                is_shakeout_heavy=False,
+                is_invalidation_heavy=False,
+                entry_strategy="single",
+                entry_note="Full position at entry",
+            ),
+            validation_passed=True,
+            validation_warnings=[],
+            validation_blocking=[],
+            policy_version="2026-05-03.3",
+        )
+        
+        message = setup.to_telegram_message()
+        
+        # Should NOT show Dynamic Exits section (no trailing, no profit lock, no tightening)
+        self.assertNotIn("Dynamic Exits", message)
+        self.assertNotIn("Trailing Stop", message)
+    
+    def test_telegram_shows_profit_lock_only(self):
+        """Test Telegram shows profit lock when only that is configured."""
+        from execution.services.trade_setup import TradeSetup, LegSetup, ExitRules
+        
+        setup = TradeSetup(
+            signal_date=date(2026, 5, 2),
+            signal_type="CALL",
+            direction="LONG",
+            spot_price=78653.0,
+            expiry=date(2026, 5, 15),
+            dte=11,
+            long_leg=LegSetup(
+                symbol="BTC-15MAY26-78000-C",
+                action="BUY",
+                strike=78000.0,
+                delta=0.60,
+                iv=0.35,
+                price=3000.0,
+                open_interest=300,
+                bid_ask_spread_pct=0.03,
+            ),
+            short_leg=None,
+            spread_width=8000.0,
+            spread_width_pct=0.10,
+            net_debit=2000.0,
+            max_profit=6000.0,
+            max_loss=2000.0,
+            risk_reward=3.0,
+            breakeven=80000.0,
+            execution_cost=120.0,
+            adjusted_max_profit=5880.0,
+            net_edge_pct=0.90,
+            risk_budget=3200.0,
+            contracts=1,
+            total_risk=2000.0,
+            total_max_profit=6000.0,
+            exit_rules=ExitRules(
+                stop_loss_spot=75120.0,
+                stop_loss_spot_pct=0.045,
+                stop_loss_value=800.0,
+                stop_loss_value_pct=0.6,
+                take_profit_pct=0.7,
+                take_profit_value=4200.0,
+                max_hold_days=9,
+                max_hold_date=date(2026, 5, 11),
+                scale_down_day=6,
+                scale_down_date=date(2026, 5, 8),
+                scale_down_action="reduce_50pct",
+                profit_lock_threshold=0.30,  # Enabled
+                trailing_stop_pct=0.0,       # No trailing
+                stop_tighten_day=None,       # No tightening
+            ),
+            path_profile=None,
+            validation_passed=True,
+            validation_warnings=[],
+            validation_blocking=[],
+            policy_version="2026-05-03.3",
+        )
+        
+        message = setup.to_telegram_message()
+        
+        # Should show Dynamic Exits with only profit lock
+        self.assertIn("Dynamic Exits", message)
+        self.assertIn("Profit Lock", message)
+        self.assertIn("30%", message)
+        self.assertNotIn("Trailing Stop", message)
+    
+    def test_telegram_shows_stop_tighten_only(self):
+        """Test Telegram shows stop tighten when only that is configured."""
+        from execution.services.trade_setup import TradeSetup, LegSetup, ExitRules
+        
+        setup = TradeSetup(
+            signal_date=date(2026, 5, 2),
+            signal_type="OPTION_CALL",
+            direction="LONG",
+            spot_price=78653.0,
+            expiry=date(2026, 5, 15),
+            dte=9,
+            long_leg=LegSetup(
+                symbol="BTC-15MAY26-78000-C",
+                action="BUY",
+                strike=78000.0,
+                delta=0.65,
+                iv=0.35,
+                price=3500.0,
+                open_interest=300,
+                bid_ask_spread_pct=0.03,
+            ),
+            short_leg=None,
+            spread_width=8000.0,
+            spread_width_pct=0.10,
+            net_debit=2500.0,
+            max_profit=5500.0,
+            max_loss=2500.0,
+            risk_reward=2.2,
+            breakeven=80500.0,
+            execution_cost=150.0,
+            adjusted_max_profit=5350.0,
+            net_edge_pct=0.85,
+            risk_budget=3200.0,
+            contracts=1,
+            total_risk=2500.0,
+            total_max_profit=5500.0,
+            exit_rules=ExitRules(
+                stop_loss_spot=71940.0,
+                stop_loss_spot_pct=0.085,
+                stop_loss_value=1000.0,
+                stop_loss_value_pct=0.6,
+                take_profit_pct=0.5,
+                take_profit_value=2750.0,
+                max_hold_days=7,
+                max_hold_date=date(2026, 5, 9),
+                scale_down_day=4,
+                scale_down_date=date(2026, 5, 6),
+                scale_down_action="reduce_50pct",
+                profit_lock_threshold=0.0,   # Disabled
+                trailing_stop_pct=0.0,       # No trailing
+                stop_tighten_day=3,          # Tighten on day 3
+                stop_tighten_date=date(2026, 5, 5),
+                tightened_stop_pct=0.0425,   # Tightened to 4.25%
+            ),
+            path_profile=None,
+            validation_passed=True,
+            validation_warnings=[],
+            validation_blocking=[],
+            policy_version="2026-05-03.3",
+        )
+        
+        message = setup.to_telegram_message()
+        
+        # Should show Dynamic Exits with only stop tighten
+        self.assertIn("Dynamic Exits", message)
+        self.assertIn("Stop Tighten", message)
+        self.assertIn("Day 3", message)
+        self.assertNotIn("Trailing Stop", message)
+        self.assertNotIn("Profit Lock", message)

@@ -42,11 +42,23 @@ class DTEConfig:
 
 @dataclass
 class ExitConfig:
-    """Exit policy parameters per signal type."""
+    """
+    Exit policy parameters per signal type.
+    
+    Path-aware exit features:
+    - Trailing stop: Activates after profit_lock_threshold, trails at trailing_stop_pct
+    - Time-based tightening: Stop tightens by stop_tighten_factor at stop_tighten_day
+    - Profit lock: Move stop to breakeven after profit_lock_threshold reached
+    """
     stop_loss_pct: float
     take_profit_pct: float
     max_hold_days: int
     scale_down_day: Optional[int] = None
+    # Path-aware exit parameters
+    profit_lock_threshold: float = 0.30      # Lock profits after 30% of max profit
+    trailing_stop_pct: float = 0.0           # 0 = no trailing, >0 = trail at this % below high
+    stop_tighten_day: Optional[int] = None   # Day to tighten stop (None = no tightening)
+    stop_tighten_factor: float = 0.5         # Multiply stop by this factor on tighten day
 
 
 @dataclass
@@ -369,16 +381,62 @@ POLICY_V1 = PolicyVersion(
     },
     
     # Exit params calibrated from MAE(W) p75 for stop loss
+    # Path-aware enhancements:
+    # - Shakeout-heavy (MVRV_SHORT, BEAR_PROBE): trailing stop + delayed tightening
+    # - Invalidation-heavy (OPTION_CALL, OPTION_PUT): lower take-profit + early tightening
+    # - Clean signals (CALL, PUT, BULL_PROBE): standard exits
     exit_params={
-        "CALL": ExitConfig(stop_loss_pct=0.045, take_profit_pct=0.70, max_hold_days=9, scale_down_day=6),
-        "PUT": ExitConfig(stop_loss_pct=0.045, take_profit_pct=0.70, max_hold_days=8, scale_down_day=5),
-        "OPTION_CALL": ExitConfig(stop_loss_pct=0.085, take_profit_pct=0.70, max_hold_days=7, scale_down_day=4),  # Wide MAE
-        "OPTION_PUT": ExitConfig(stop_loss_pct=0.070, take_profit_pct=0.70, max_hold_days=5, scale_down_day=3),   # Wide MAE
-        "TACTICAL_PUT": ExitConfig(stop_loss_pct=0.035, take_profit_pct=0.70, max_hold_days=8, scale_down_day=5), # Tight MAE
-        "BULL_PROBE": ExitConfig(stop_loss_pct=0.040, take_profit_pct=0.70, max_hold_days=7, scale_down_day=5),
-        "BEAR_PROBE": ExitConfig(stop_loss_pct=0.065, take_profit_pct=0.70, max_hold_days=11, scale_down_day=7),  # Wide MAE, slow
-        "MVRV_SHORT": ExitConfig(stop_loss_pct=0.070, take_profit_pct=0.70, max_hold_days=12, scale_down_day=7),  # Shakeout-heavy
-        "IRON_CONDOR": ExitConfig(stop_loss_pct=0.068, take_profit_pct=0.50, max_hold_days=9, scale_down_day=8),
+        # Clean signals - standard exits
+        "CALL": ExitConfig(
+            stop_loss_pct=0.045, take_profit_pct=0.70, max_hold_days=9, scale_down_day=6,
+            profit_lock_threshold=0.30, trailing_stop_pct=0.0,
+            stop_tighten_day=6, stop_tighten_factor=0.6,
+        ),
+        "PUT": ExitConfig(
+            stop_loss_pct=0.045, take_profit_pct=0.70, max_hold_days=8, scale_down_day=5,
+            profit_lock_threshold=0.30, trailing_stop_pct=0.0,
+            stop_tighten_day=5, stop_tighten_factor=0.6,
+        ),
+        # Invalidation-heavy signals - lower take-profit, early tightening
+        "OPTION_CALL": ExitConfig(
+            stop_loss_pct=0.085, take_profit_pct=0.50, max_hold_days=7, scale_down_day=4,
+            profit_lock_threshold=0.25, trailing_stop_pct=0.0,
+            stop_tighten_day=3, stop_tighten_factor=0.5,  # Tighten early due to 54% invalidation
+        ),
+        "OPTION_PUT": ExitConfig(
+            stop_loss_pct=0.070, take_profit_pct=0.50, max_hold_days=5, scale_down_day=3,
+            profit_lock_threshold=0.25, trailing_stop_pct=0.0,
+            stop_tighten_day=2, stop_tighten_factor=0.5,  # Tighten early due to 44% invalidation
+        ),
+        # Clean hedge signal
+        "TACTICAL_PUT": ExitConfig(
+            stop_loss_pct=0.035, take_profit_pct=0.70, max_hold_days=8, scale_down_day=5,
+            profit_lock_threshold=0.30, trailing_stop_pct=0.0,
+            stop_tighten_day=5, stop_tighten_factor=0.6,
+        ),
+        # Clean probe signal
+        "BULL_PROBE": ExitConfig(
+            stop_loss_pct=0.040, take_profit_pct=0.70, max_hold_days=7, scale_down_day=5,
+            profit_lock_threshold=0.30, trailing_stop_pct=0.0,
+            stop_tighten_day=4, stop_tighten_factor=0.6,
+        ),
+        # Shakeout-heavy signals - trailing stop, delayed tightening, wider initial stop
+        "BEAR_PROBE": ExitConfig(
+            stop_loss_pct=0.065, take_profit_pct=0.60, max_hold_days=11, scale_down_day=7,
+            profit_lock_threshold=0.25, trailing_stop_pct=0.03,  # 3% trailing after profit lock
+            stop_tighten_day=8, stop_tighten_factor=0.7,  # Delayed tightening for 40% shakeout
+        ),
+        "MVRV_SHORT": ExitConfig(
+            stop_loss_pct=0.070, take_profit_pct=0.60, max_hold_days=12, scale_down_day=7,
+            profit_lock_threshold=0.25, trailing_stop_pct=0.04,  # 4% trailing after profit lock
+            stop_tighten_day=9, stop_tighten_factor=0.7,  # Delayed tightening for 57% shakeout
+        ),
+        # Range-bound strategy - tighter take-profit, no trailing
+        "IRON_CONDOR": ExitConfig(
+            stop_loss_pct=0.068, take_profit_pct=0.50, max_hold_days=9, scale_down_day=8,
+            profit_lock_threshold=0.30, trailing_stop_pct=0.0,
+            stop_tighten_day=7, stop_tighten_factor=0.5,
+        ),
     },
     
     # Expected edge = win_rate × spread_width (from path analysis)
@@ -447,12 +505,24 @@ def _coerce_dte_config(payload: dict) -> DTEConfig:
     )
 
 
-def _coerce_exit_config(payload: dict) -> ExitConfig:
+def _coerce_exit_config(payload: dict, base_config: Optional[ExitConfig] = None) -> ExitConfig:
+    """
+    Create ExitConfig from calibration payload, preserving path-aware fields from base.
+    
+    The calibration file only contains basic exit params (stop_loss_pct, take_profit_pct,
+    max_hold_days, scale_down_day). Path-aware fields (trailing_stop_pct, profit_lock_threshold,
+    stop_tighten_day, stop_tighten_factor) are preserved from the base policy.
+    """
     return ExitConfig(
         stop_loss_pct=float(payload["stop_loss_pct"]),
         take_profit_pct=float(payload["take_profit_pct"]),
         max_hold_days=int(payload["max_hold_days"]),
         scale_down_day=(None if payload.get("scale_down_day") is None else int(payload["scale_down_day"])),
+        # Preserve path-aware fields from base config if available
+        profit_lock_threshold=base_config.profit_lock_threshold if base_config else 0.30,
+        trailing_stop_pct=base_config.trailing_stop_pct if base_config else 0.0,
+        stop_tighten_day=base_config.stop_tighten_day if base_config else None,
+        stop_tighten_factor=base_config.stop_tighten_factor if base_config else 0.5,
     )
 
 
@@ -474,7 +544,9 @@ def _apply_calibration(policy: PolicyVersion) -> PolicyVersion:
     for signal_type, width in payload.get("spread_width_pct", {}).items():
         calibrated.spread_width_pct[signal_type] = float(width)
     for signal_type, exit_cfg in payload.get("exit_params", {}).items():
-        calibrated.exit_params[signal_type] = _coerce_exit_config(exit_cfg)
+        # Pass the base config to preserve path-aware fields
+        base_config = policy.exit_params.get(signal_type)
+        calibrated.exit_params[signal_type] = _coerce_exit_config(exit_cfg, base_config)
     for signal_type, edge in payload.get("expected_edge_by_signal", {}).items():
         calibrated.expected_edge_by_signal[signal_type] = float(edge)
     return calibrated
