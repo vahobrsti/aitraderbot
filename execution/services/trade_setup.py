@@ -50,7 +50,22 @@ class LegSetup:
 
 @dataclass
 class ExitRules:
-    """Exit rule configuration."""
+    """
+    Exit rule configuration with path-aware enhancements.
+    
+    Standard exits:
+    - stop_loss_spot: BTC price trigger
+    - stop_loss_value: Spread value trigger
+    - take_profit: % of max profit
+    - max_hold: Days until forced exit
+    - scale_down: Day to reduce position
+    
+    Path-aware exits:
+    - profit_lock: Move stop to breakeven after threshold
+    - trailing_stop: Trail stop at % below high water mark
+    - stop_tighten: Tighten stop on specific day
+    """
+    # Standard exits
     stop_loss_spot: float       # BTC price trigger
     stop_loss_spot_pct: float   # % move from entry
     stop_loss_value: float      # Spread value trigger
@@ -62,6 +77,13 @@ class ExitRules:
     scale_down_day: Optional[int]
     scale_down_date: Optional[date]
     scale_down_action: str      # "reduce_50pct" or "close_full"
+    # Path-aware exits
+    profit_lock_threshold: float = 0.30      # Lock profits after this % of max profit
+    profit_lock_stop: Optional[float] = None # Stop price after profit lock (breakeven)
+    trailing_stop_pct: float = 0.0           # Trail at this % below high (0 = disabled)
+    stop_tighten_day: Optional[int] = None   # Day to tighten stop
+    stop_tighten_date: Optional[date] = None # Date to tighten stop
+    tightened_stop_pct: Optional[float] = None  # Tightened stop loss %
 
 
 @dataclass
@@ -187,6 +209,13 @@ class TradeSetup:
                 "scale_down_day": self.exit_rules.scale_down_day,
                 "scale_down_date": self.exit_rules.scale_down_date.isoformat() if self.exit_rules.scale_down_date else None,
                 "scale_down_action": self.exit_rules.scale_down_action,
+                # Path-aware exit rules
+                "profit_lock_threshold": self.exit_rules.profit_lock_threshold,
+                "profit_lock_stop": self.exit_rules.profit_lock_stop,
+                "trailing_stop_pct": self.exit_rules.trailing_stop_pct,
+                "stop_tighten_day": self.exit_rules.stop_tighten_day,
+                "stop_tighten_date": self.exit_rules.stop_tighten_date.isoformat() if self.exit_rules.stop_tighten_date else None,
+                "tightened_stop_pct": self.exit_rules.tightened_stop_pct,
             },
             "path_profile": {
                 "shakeout_pct": self.path_profile.shakeout_pct,
@@ -266,6 +295,20 @@ class TradeSetup:
         if self.exit_rules.scale_down_day:
             action = "CLOSE FULL" if self.exit_rules.scale_down_action == "close_full_position" else "Reduce 50%"
             lines.append(f"📉 Scale Down: Day {self.exit_rules.scale_down_day} → {action}")
+        
+        # Path-aware exit rules (only show if configured)
+        path_aware_exits = []
+        if self.exit_rules.profit_lock_threshold and self.exit_rules.profit_lock_threshold > 0:
+            path_aware_exits.append(f"🔒 Profit Lock: Move stop to breakeven after `{self.exit_rules.profit_lock_threshold*100:.0f}%` profit")
+        if self.exit_rules.trailing_stop_pct and self.exit_rules.trailing_stop_pct > 0:
+            path_aware_exits.append(f"📈 Trailing Stop: `{self.exit_rules.trailing_stop_pct*100:.0f}%` below high water mark")
+        if self.exit_rules.stop_tighten_day and self.exit_rules.tightened_stop_pct:
+            path_aware_exits.append(f"⚡ Stop Tighten: Day {self.exit_rules.stop_tighten_day} → `{self.exit_rules.tightened_stop_pct*100:.1f}%`")
+        
+        if path_aware_exits:
+            lines.append("")
+            lines.append("*Dynamic Exits:*")
+            lines.extend(path_aware_exits)
         
         # Validation status
         if not self.validation_passed:
@@ -482,6 +525,13 @@ class TradeSetupBuilder:
             scale_down_day=exit_cfg.scale_down_day,
             scale_down_date=signal_date + timedelta(days=exit_cfg.scale_down_day) if exit_cfg.scale_down_day else None,
             scale_down_action=scale_action,
+            # Path-aware exit parameters
+            profit_lock_threshold=exit_cfg.profit_lock_threshold,
+            profit_lock_stop=spot_price,  # Breakeven = entry spot price
+            trailing_stop_pct=exit_cfg.trailing_stop_pct,
+            stop_tighten_day=exit_cfg.stop_tighten_day,
+            stop_tighten_date=signal_date + timedelta(days=exit_cfg.stop_tighten_day) if exit_cfg.stop_tighten_day else None,
+            tightened_stop_pct=exit_cfg.stop_loss_pct * exit_cfg.stop_tighten_factor if exit_cfg.stop_tighten_day else None,
         )
         
         # Build leg setups

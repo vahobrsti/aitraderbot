@@ -630,16 +630,7 @@ class SignalService:
             decision_trace.append("option_put=fired but cooldown_active -> skip")
         
         # MVRV Short fallback (bear market tactical short)
-        # if mvrv_short_ok and mvrv_short_signal is not None and mvrv_short_signal.active:
-        #     # Check EFB veto for MVRV short (same logic as OPTION_PUT)
-        #     efb_veto, efb_reason = compute_efb_veto(row)
-        #     if efb_veto >= 1:
-        #         decision_trace.append(
-        #             f"mvrv_short=active(7d={mvrv_short_signal.mvrv_7d:.3f}, 60d={mvrv_short_signal.mvrv_60d:.3f}) "
-        #             f"but {efb_reason} -> NO_TRADE"
-        #         )
-        #         no_trade_reasons.append("EFB_VETO_MVRV_SHORT")
-        #         return "NO_TRADE", f"MVRV short fired but EFB vetoed ({efb_reason})", no_trade_reasons, decision_trace
+        if mvrv_short_ok and mvrv_short_signal is not None and mvrv_short_signal.active:
             decision_trace.append(
                 f"mvrv_short=active(7d={mvrv_short_signal.mvrv_7d:.3f}, 60d={mvrv_short_signal.mvrv_60d:.3f}) "
                 f"-> MVRV_SHORT (size={MVRV_SHORT_SIZE_MULT}, target={mvrv_short_signal.target_pct}%)"
