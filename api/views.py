@@ -307,10 +307,10 @@ class OptionPricePredict(APIView):
         btc_change_pct = (target_spot - current_spot) / current_spot
         target_moneyness = (strike - target_spot) / target_spot
         
-        # Get model prediction
+        # Get model prediction - use TARGET moneyness for the scenario
         prediction = predictor.predict(
             dte=dte,
-            moneyness=(strike - current_spot) / current_spot,  # Entry moneyness
+            moneyness=target_moneyness,  # Use target moneyness, not entry
             option_type=option_type,
             btc_change_pct=btc_change_pct,
             iv=iv,
@@ -318,29 +318,33 @@ class OptionPricePredict(APIView):
         )
         
         # Calculate estimated premiums from prediction
+        # Use 6 decimal places for BTC-denominated premiums (Deribit standard)
         estimated_premiums = {}
         if current_premium:
             estimated_premiums = {
-                "conservative": round(current_premium * (1 + prediction.p10), 2),
-                "base": round(current_premium * (1 + prediction.p50), 2),
-                "optimistic": round(current_premium * (1 + prediction.p90), 2),
+                "conservative": round(current_premium * (1 + prediction.p10), 6),
+                "base": round(current_premium * (1 + prediction.p50), 6),
+                "optimistic": round(current_premium * (1 + prediction.p90), 6),
             }
         
-        # Black-Scholes reference prices
+        # Black-Scholes reference prices (in BTC)
         T = max(dte - 1, 1) / 365  # Assume 1 day passes
         bs_prices = {}
         for test_iv in [0.40, 0.50, 0.60, 0.70]:
             if option_type == 'put':
-                bs_price = BlackScholes.put_price(target_spot, strike, T, 0.05, test_iv)
+                bs_price_usd = BlackScholes.put_price(target_spot, strike, T, 0.05, test_iv)
             else:
-                bs_price = BlackScholes.call_price(target_spot, strike, T, 0.05, test_iv)
-            bs_prices[f"iv_{int(test_iv*100)}"] = round(bs_price, 2)
+                bs_price_usd = BlackScholes.call_price(target_spot, strike, T, 0.05, test_iv)
+            # Convert to BTC
+            bs_price_btc = bs_price_usd / target_spot if target_spot > 0 else 0
+            bs_prices[f"iv_{int(test_iv*100)}"] = round(bs_price_btc, 6)
         
-        # Intrinsic value
+        # Intrinsic value in BTC (Deribit denomination)
         if option_type == 'put':
-            intrinsic = max(strike - target_spot, 0)
+            intrinsic_usd = max(strike - target_spot, 0)
         else:
-            intrinsic = max(target_spot - strike, 0)
+            intrinsic_usd = max(target_spot - strike, 0)
+        intrinsic_btc = intrinsic_usd / target_spot if target_spot > 0 else 0
         
         return {
             "btc_price": round(target_spot, 2),
@@ -361,7 +365,8 @@ class OptionPricePredict(APIView):
                 "n_samples": prediction.n_samples,
             },
             "estimated_premium": estimated_premiums,
-            "intrinsic_value": round(intrinsic, 2),
+            "intrinsic_value_usd": round(intrinsic_usd, 2),
+            "intrinsic_value_btc": round(intrinsic_btc, 6),
             "black_scholes": bs_prices,
         }
     
