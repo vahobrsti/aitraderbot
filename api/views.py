@@ -159,3 +159,221 @@ class HealthCheckView(APIView):
     
     def get(self, request):
         return Response({"status": "ok"})
+
+
+class OptionPricePredict(APIView):
+    """
+    POST /api/v1/options/predict/
+    
+    Predict option price under different BTC scenarios.
+    Uses the trained LeveragePredictor model to estimate option returns.
+    
+    Request body:
+    {
+        "current_spot": 80000,           # Current BTC price
+        "strike": 79000,                 # Option strike price
+        "option_type": "put",            # "call" or "put"
+        "dte": 8,                        # Days to expiry
+        "entry_premium": 2000,           # Premium paid at entry (per BTC)
+        "current_premium": 720,          # Current option value (optional, for existing position)
+        "scenarios": [77000, 75000, 73000],  # BTC prices to simulate
+        "iv": 0.45                       # Current IV estimate (optional, default 0.50)
+    }
+    
+    Response:
+    {
+        "current": { ... },
+        "scenarios": [
+            {
+                "btc_price": 77000,
+                "btc_change_pct": -3.75,
+                "moneyness": "itm",
+                "predicted_return": { "p10": ..., "p50": ..., "p90": ... },
+                "estimated_premium": { "conservative": ..., "base": ..., "optimistic": ... },
+                "intrinsic_value": 2000,
+                "black_scholes": { "iv_40": ..., "iv_50": ..., "iv_60": ... }
+            },
+            ...
+        ]
+    }
+    """
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        from pathlib import Path
+        from execution.services.option_pricer import LeveragePredictor, BlackScholes
+        
+        # Parse request
+        data = request.data
+        
+        # Required fields
+        current_spot = data.get('current_spot')
+        strike = data.get('strike')
+        option_type = data.get('option_type', 'put').lower()
+        dte = data.get('dte')
+        
+        if not all([current_spot, strike, dte]):
+            return Response(
+                {"error": "Missing required fields: current_spot, strike, dte"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Optional fields
+        entry_premium = data.get('entry_premium')
+        current_premium = data.get('current_premium', entry_premium)
+        scenarios = data.get('scenarios', [])
+        iv = data.get('iv', 0.50)
+        
+        if not scenarios:
+            # Default: simulate ±3%, ±5%, ±8% moves
+            scenarios = [
+                current_spot * 0.92,
+                current_spot * 0.95,
+                current_spot * 0.97,
+                current_spot * 1.03,
+                current_spot * 1.05,
+                current_spot * 1.08,
+            ]
+        
+        # Load predictor
+        model_path = Path('models/option_response_predictor_v2.json')
+        if model_path.exists():
+            predictor = LeveragePredictor(model_path=model_path)
+        else:
+            predictor = LeveragePredictor()  # Will use synthetic fallback
+        
+        # Current position info
+        current_moneyness = (strike - current_spot) / current_spot
+        current_moneyness_label = self._moneyness_label(current_moneyness, option_type)
+        
+        result = {
+            "current": {
+                "spot": current_spot,
+                "strike": strike,
+                "option_type": option_type,
+                "dte": dte,
+                "moneyness_pct": round(current_moneyness * 100, 2),
+                "moneyness_label": current_moneyness_label,
+                "iv": iv,
+                "entry_premium": entry_premium,
+                "current_premium": current_premium,
+                "intrinsic": max(strike - current_spot, 0) if option_type == 'put' else max(current_spot - strike, 0),
+            },
+            "scenarios": [],
+            "model_info": {
+                "model_loaded": model_path.exists(),
+                "model_path": str(model_path),
+                "buckets_available": len(predictor.bucket_stats) if predictor.is_fitted else 0,
+            }
+        }
+        
+        # Process each scenario
+        for target_spot in sorted(scenarios):
+            scenario = self._predict_scenario(
+                predictor=predictor,
+                current_spot=current_spot,
+                target_spot=target_spot,
+                strike=strike,
+                option_type=option_type,
+                dte=dte,
+                iv=iv,
+                current_premium=current_premium,
+            )
+            result["scenarios"].append(scenario)
+        
+        return Response(result)
+    
+    def _predict_scenario(
+        self,
+        predictor,
+        current_spot: float,
+        target_spot: float,
+        strike: float,
+        option_type: str,
+        dte: int,
+        iv: float,
+        current_premium: float,
+    ) -> dict:
+        from execution.services.option_pricer import BlackScholes
+        
+        btc_change_pct = (target_spot - current_spot) / current_spot
+        target_moneyness = (strike - target_spot) / target_spot
+        
+        # Get model prediction
+        prediction = predictor.predict(
+            dte=dte,
+            moneyness=(strike - current_spot) / current_spot,  # Entry moneyness
+            option_type=option_type,
+            btc_change_pct=btc_change_pct,
+            iv=iv,
+            days_held=1,  # Assume 1-day horizon
+        )
+        
+        # Calculate estimated premiums from prediction
+        estimated_premiums = {}
+        if current_premium:
+            estimated_premiums = {
+                "conservative": round(current_premium * (1 + prediction.p10), 2),
+                "base": round(current_premium * (1 + prediction.p50), 2),
+                "optimistic": round(current_premium * (1 + prediction.p90), 2),
+            }
+        
+        # Black-Scholes reference prices
+        T = max(dte - 1, 1) / 365  # Assume 1 day passes
+        bs_prices = {}
+        for test_iv in [0.40, 0.50, 0.60, 0.70]:
+            if option_type == 'put':
+                bs_price = BlackScholes.put_price(target_spot, strike, T, 0.05, test_iv)
+            else:
+                bs_price = BlackScholes.call_price(target_spot, strike, T, 0.05, test_iv)
+            bs_prices[f"iv_{int(test_iv*100)}"] = round(bs_price, 2)
+        
+        # Intrinsic value
+        if option_type == 'put':
+            intrinsic = max(strike - target_spot, 0)
+        else:
+            intrinsic = max(target_spot - strike, 0)
+        
+        return {
+            "btc_price": round(target_spot, 2),
+            "btc_change_pct": round(btc_change_pct * 100, 2),
+            "moneyness_pct": round(target_moneyness * 100, 2),
+            "moneyness_label": self._moneyness_label(target_moneyness, option_type),
+            "predicted_return": {
+                "p10": round(prediction.p10 * 100, 1),
+                "p25": round(prediction.p25 * 100, 1),
+                "p50": round(prediction.p50 * 100, 1),
+                "p75": round(prediction.p75 * 100, 1),
+                "p90": round(prediction.p90 * 100, 1),
+            },
+            "prediction_meta": {
+                "dte_bucket": prediction.dte_bucket,
+                "moneyness_bucket": prediction.moneyness_bucket,
+                "regime": prediction.regime,
+                "n_samples": prediction.n_samples,
+            },
+            "estimated_premium": estimated_premiums,
+            "intrinsic_value": round(intrinsic, 2),
+            "black_scholes": bs_prices,
+        }
+    
+    def _moneyness_label(self, moneyness: float, option_type: str) -> str:
+        """Convert moneyness to human-readable label."""
+        # For puts: positive moneyness = OTM, negative = ITM
+        # For calls: positive moneyness = OTM, negative = ITM
+        abs_m = abs(moneyness)
+        
+        if option_type == 'put':
+            is_itm = moneyness > 0  # strike > spot
+        else:
+            is_itm = moneyness < 0  # strike < spot
+        
+        if abs_m < 0.02:
+            return "ATM"
+        elif abs_m < 0.05:
+            return "slightly ITM" if is_itm else "slightly OTM"
+        elif abs_m < 0.10:
+            return "ITM" if is_itm else "OTM"
+        else:
+            return "deep ITM" if is_itm else "deep OTM"

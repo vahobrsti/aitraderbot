@@ -19,6 +19,9 @@ urlpatterns = [
     path('v1/signals/<str:date>/', views.DailySignalDetailView.as_view(), name='signal-detail'),
     path('v1/signals/<str:date>/setup/', views.TradeSetupView.as_view(), name='signal-setup'),
     
+    # Option pricing endpoints (auth required)
+    path('v1/options/predict/', views.OptionPricePredict.as_view(), name='option-predict'),
+    
     # Research endpoints (auth required)
     path('v1/fusion/explain/', research_views.FusionExplainView.as_view(), name='fusion-explain'),
     path('v1/fusion/analysis/metric-stats/', research_views.MetricStatsView.as_view(), name='fusion-metric-stats'),

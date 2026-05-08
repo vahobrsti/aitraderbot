@@ -48,7 +48,8 @@ Think of it as: **MDIA = ignition, Whales = fuel, MVRV-LS = terrain**
 │                         ML LAYER                                 │
 │  ml/training.py → Model training with walk-forward validation   │
 │  ml/predict.py → Inference for daily scoring                    │
-│  models/ → Probabilities (future use: automated sizing/risk)    │
+│  models/ → Trained models for signal scoring and option pricing │
+│  execution/services/option_pricer.py → Learned leverage model   │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
@@ -314,6 +315,7 @@ Hit rates from 5% target, 14-day horizon, 345 trades (with overlays and cooldown
 | `/api/v1/signals/<date>/` | GET | ✅ | Signal by date |
 | `/api/v1/signals/<date>/setup/` | GET | ✅ | **Trade setup for date** |
 | `/api/v1/signals/latest/setup/` | GET | ✅ | **Trade setup for latest tradeable signal** |
+| `/api/v1/options/predict/` | POST | ✅ | **Predict option price under BTC scenarios** |
 | `/api/v1/fusion/explain/` | GET | ✅ | Explain fusion logic |
 
 ### Authentication
@@ -333,6 +335,12 @@ curl -H "Authorization: Token YOUR_TOKEN" \
 # Get trade setup for specific date
 curl -H "Authorization: Token YOUR_TOKEN" \
      http://localhost:8000/api/v1/signals/2026-05-02/setup/
+
+# Predict option price under different BTC scenarios
+curl -X POST -H "Authorization: Token YOUR_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"current_spot": 80800, "strike": 79000, "option_type": "put", "dte": 8, "current_premium": 720, "scenarios": [77000, 75000, 83000]}' \
+     http://localhost:8000/api/v1/options/predict/
 ```
 
 ### Trade Setup Response
@@ -389,6 +397,70 @@ curl -H "Authorization: Token YOUR_TOKEN" \
   "policy_version": "2026-05-03.3"
 }
 ```
+
+### Option Price Prediction
+
+Predict how option prices will move under different BTC scenarios using a learned model trained on 85k+ historical option snapshots.
+
+**Request:**
+```bash
+curl -X POST -H "Authorization: Token YOUR_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "current_spot": 80800,
+       "strike": 79000,
+       "option_type": "put",
+       "dte": 8,
+       "current_premium": 720,
+       "scenarios": [77000, 75000, 73000, 83000, 85000],
+       "iv": 0.45
+     }' \
+     http://localhost:8000/api/v1/options/predict/
+```
+
+**Response:**
+```json
+{
+  "current": {
+    "spot": 80800,
+    "strike": 79000,
+    "option_type": "put",
+    "dte": 8,
+    "moneyness_pct": -2.23,
+    "moneyness_label": "slightly OTM",
+    "intrinsic": 0
+  },
+  "scenarios": [
+    {
+      "btc_price": 77000,
+      "btc_change_pct": -4.7,
+      "moneyness_label": "ITM",
+      "predicted_return": {
+        "p10": -41.0,
+        "p50": -4.4,
+        "p90": 35.8
+      },
+      "estimated_premium": {
+        "conservative": 425,
+        "base": 689,
+        "optimistic": 978
+      },
+      "intrinsic_value": 2000,
+      "black_scholes": {
+        "iv_40": 2853,
+        "iv_50": 3251,
+        "iv_60": 3659
+      }
+    }
+  ],
+  "model_info": {
+    "model_loaded": true,
+    "buckets_available": 847
+  }
+}
+```
+
+**Use case:** Paper trading entry optimization. Before entering a position, simulate adverse scenarios to understand downside risk and find better entry points.
 
 ---
 
@@ -452,6 +524,9 @@ python manage.py collect_options --exchange deribit --dte-min 7 --dte-max 21
 
 # Export collected data for analysis
 python manage.py export_options --format csv
+
+# Train option response model from snapshots
+python manage.py train_option_response --horizon-days 1 --walk-forward-splits 5
 ```
 
 ### Training
@@ -580,6 +655,7 @@ BYBIT_API_SECRET=your_api_secret
 | `execution/services/policy.py` | Data-driven policy engine |
 | `execution/services/trade_setup.py` | Automated trade construction |
 | `execution/services/trade_validator.py` | 11 pre-flight validation checks |
+| `execution/services/option_pricer.py` | **Learned option pricing model (85k+ snapshots)** |
 | `execution/exchanges/deribit.py` | Deribit API adapter |
 | `notifications/notifier.py` | Telegram notifications with trade setups |
 | `api/views.py` | REST API endpoints |

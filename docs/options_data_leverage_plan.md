@@ -68,6 +68,36 @@ Outputs:
 - tail-loss probabilities per bucket
 - path-damage statistics (early adverse move risk)
 
+### Train Learned Response Mapping
+
+Build a snapshot-pair dataset and train quantile response buckets:
+
+```bash
+python manage.py train_option_response --horizon-days 1 --underlying BTC
+python manage.py train_option_response --horizon-days 3 --walk-forward-splits 5
+python manage.py train_option_response \
+  --start 2026-01-01 --end 2026-05-01 \
+  --out-model models/option_response_predictor.json \
+  --out-rows data/option_response_rows.csv
+```
+
+The command creates rows with:
+
+- DTE
+- moneyness
+- IV level and IV change
+- time elapsed
+- spread/liquidity regime
+- call/put direction
+- inferred structure tag (naked/spread/condor)
+- BTC change % and option return %
+
+And reports walk-forward diagnostics:
+
+- MAE of p50 prediction
+- pinball loss for p10/p90
+- interval coverage (actual inside predicted 10-90% band)
+
 ## Phase 4: Integrate Into Execution Design
 
 After enough sample size:
