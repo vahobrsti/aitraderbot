@@ -1,28 +1,51 @@
 """
-V7 Execution Policy Simulator
+V8 Execution Policy Simulator
 
-Simulates the V7 options execution design across historical trades using
+Simulates options execution design across historical trades using
 actual forward price paths from RawDailyData.
 
-Assumptions:
-- Dynamic leverage based on DTE bucket, moneyness, and structure
-- Theta decay varies by DTE bucket
-- No IV expansion/contraction modeled (conservative)
-- No slippage or fees
-- Spot BTC: bought at entry, never sold
+Pricing Modes:
+- linear: Legacy fixed leverage model (backward compatible)
+- payoff_only: Path-exact payoff geometry (bounded P&L from structure)
+- synthetic_iv: Black-Scholes with regime-mapped synthetic IV
+- learned: ML-based leverage prediction from OptionSnapshot data
+
+Same-Bar Ambiguity Handling:
+- stop_first: Assume stop hit first (conservative, default)
+- tp_first: Assume TP hit first (optimistic)
+- probabilistic: Weight by distance to each level
+- close_only: Only use close price, ignore intrabar
+
+Scenario Outputs:
+- base: Mid fills, stable IV
+- conservative: Worst spread, mild IV crush on winners
+- stressed: Adverse IV shift, worst fills + slippage
 
 Usage:
     python manage.py simulate
-    python manage.py simulate --years 2023 2024
-    python manage.py simulate --csv features_14d_5pct.csv --account 50000
+    python manage.py simulate --pricing-mode payoff_only
+    python manage.py simulate --pricing-mode learned --predictor-model models/option_response_predictor.json
+    python manage.py simulate --pricing-mode synthetic_iv --same-bar-policy stop_first
+    python manage.py simulate --years 2023 2024 --scenarios
 """
 import numpy as np
 import pandas as pd
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional, Dict, Any, Tuple
 
 from django.core.management.base import BaseCommand
 
 from datafeed.models import RawDailyData
+from execution.services.option_pricer import (
+    PricingMode,
+    OptionPricer,
+    LeveragePredictor,
+    ScenarioRunner,
+    SameBarPolicy,
+    resolve_same_bar_ambiguity,
+    BlackScholes,
+)
 
 
 # ── Dynamic Leverage Configuration ───────────────────────────────────────────
@@ -89,14 +112,19 @@ TIERS = {
 }
 
 TIER_MAP = {
-    "LONG": None,
+    # Tier 1: $4000 risk, 20% naked, 80% spread
     "PRIMARY_SHORT": 1,
-    "BULL_PROBE": 2,
     "OPTION_CALL": 1,
-    "OPTION_PUT": None,
-    "MVRV_SHORT": None,
+    "CALL": 1,
+    "PUT": 1,
+    # Tier 2: $2400 risk, 25% naked, 75% spread
+    "BULL_PROBE": 2,
     "BEAR_PROBE": 2,
-    "TACTICAL_PUT": None,
+    "TACTICAL_PUT": 2,
+    "OPTION_PUT": 2,
+    "MVRV_SHORT": 2,
+    # IRON_CONDOR excluded - different structure, handled separately
+    # LONG excluded - not in policy
 }
 
 UNDERLYING_TARGET = 0.05
@@ -115,6 +143,71 @@ NAKED_TIME_STOP = 7
 SPREAD_STOP_PCT = 0.07
 SPREAD_TP_PCT = 0.60
 SPREAD_TIME_STOP = 10
+
+# Default realized volatility for synthetic IV (annualized)
+DEFAULT_REALIZED_VOL = 0.60
+
+
+@dataclass
+class SimulationConfig:
+    """Configuration for simulation run."""
+    pricing_mode: PricingMode = PricingMode.PAYOFF_ONLY
+    same_bar_policy: SameBarPolicy = SameBarPolicy.STOP_FIRST
+    stress_mode: bool = False
+    run_scenarios: bool = False
+    predictor_model_path: Optional[Path] = None
+    realized_vol: float = DEFAULT_REALIZED_VOL
+    
+    # Spread structure parameters
+    spread_width_pct: float = 0.10  # 10% spread width
+
+
+@dataclass
+class ScenarioResult:
+    """Results for a single scenario."""
+    pnl: float
+    pnl_pct: float
+    label: str
+    iv_assumption: str
+
+
+@dataclass
+class TradeResult:
+    """Complete trade result with optional scenario breakdown."""
+    date: pd.Timestamp
+    trade_type: str
+    direction: str
+    tier: int
+    dte_bucket: str
+    moneyness: str
+    entry_price: float
+    total_risk: float
+    
+    # P&L by component
+    naked_pnl: float
+    spread_pnl: float
+    option_pnl: float
+    spot_btc: float
+    spot_unrealized: float
+    
+    # Leverage used
+    naked_leverage: float
+    spread_leverage: float
+    theta_decay: float
+    
+    # Exit info
+    naked_closed_day: Optional[int]
+    spread_closed_day: Optional[int]
+    exit_reason: str  # 'tp', 'stop', 'time_stop', 'same_bar_ambiguity'
+    
+    # Win/loss
+    win: int
+    
+    # Scenario results (if run_scenarios=True)
+    scenarios: Optional[Dict[str, ScenarioResult]] = None
+    
+    # Pricing mode used
+    pricing_mode: str = "linear"
 
 
 def get_leverage_params(signal_type, stress_mode=False):
@@ -182,10 +275,38 @@ def load_prices():
 
 
 def simulate_trade(trade, price_df, horizon=14, stress_mode=False):
-    """Simulate V7 execution policy on a single trade.
+    """Simulate execution policy on a single trade (legacy linear mode).
     
-    V7: Added stress_mode for worst-case leverage simulation.
+    Added stress_mode for worst-case leverage simulation.
     """
+    return simulate_trade_v8(
+        trade, price_df, horizon=horizon,
+        config=SimulationConfig(
+            pricing_mode=PricingMode.LINEAR,
+            stress_mode=stress_mode,
+        )
+    )
+
+
+def simulate_trade_v8(
+    trade,
+    price_df: pd.DataFrame,
+    horizon: int = 14,
+    config: Optional[SimulationConfig] = None,
+    pricer: Optional[OptionPricer] = None,
+    predictor: Optional[LeveragePredictor] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Simulate trade with configurable pricing mode.
+    
+    Supports:
+    - linear: Legacy fixed leverage model
+    - payoff_only: Path-exact payoff geometry
+    - synthetic_iv: Black-Scholes with regime-mapped IV
+    - learned: ML-based leverage prediction
+    """
+    config = config or SimulationConfig()
+    
     dt = pd.Timestamp(trade["date"])
     direction = trade["direction"]
     trade_type = trade["type"]
@@ -205,14 +326,41 @@ def simulate_trade(trade, price_df, horizon=14, stress_mode=False):
     if len(path) < horizon:
         return None
 
-    naked_leverage, spread_leverage, theta_decay, dte_bucket, moneyness = get_leverage_params(trade_type, stress_mode)
-
+    # Get base leverage params
+    naked_leverage, spread_leverage, theta_decay, dte_bucket, moneyness = get_leverage_params(
+        trade_type, config.stress_mode
+    )
+    
+    is_long = direction == "LONG"
+    option_type = "call" if is_long else "put"
+    
+    # Calculate strike based on moneyness bucket
+    moneyness_pct = {"atm": 0.0, "slightly_itm": -0.03, "slightly_otm": 0.03, 
+                    "deep_itm": -0.08, "deep_otm": 0.08}.get(moneyness, 0.0)
+    strike = entry_price * (1 + moneyness_pct)
+    dte = {"7_10": 8, "11_14": 12, "15_21": 18}.get(dte_bucket, 12)
+    
+    # Initialize pricer if needed
+    if config.pricing_mode != PricingMode.LINEAR and pricer is None:
+        pricer = OptionPricer(mode=config.pricing_mode)
+    
+    # Calculate entry option price for non-linear modes
+    entry_option_price = None
+    entry_iv = config.realized_vol
+    
+    if config.pricing_mode in (PricingMode.SYNTHETIC_IV, PricingMode.PAYOFF_ONLY):
+        entry_result = pricer.price_at_entry(
+            spot=entry_price, strike=strike, dte=dte,
+            option_type=option_type, realized_vol=config.realized_vol, regime="neutral",
+        )
+        entry_option_price = entry_result.get("ask") or entry_result.get("mid")
+        entry_iv = entry_result.get("iv", config.realized_vol)
+    
     total_risk = tier["risk"]
     spot_amount = total_risk * tier["spot_pct"]
     option_budget = total_risk * tier["option_pct"]
     naked_amount = option_budget * tier["naked_pct"]
     spread_amount = option_budget * tier["spread_pct"]
-
     btc_bought = spot_amount / entry_price
 
     naked_alive = naked_amount > 0
@@ -221,13 +369,11 @@ def simulate_trade(trade, price_df, horizon=14, stress_mode=False):
     naked_closed_day = None
     naked_pnl = 0.0
     naked_remaining = naked_amount
+    exit_reason = "time_stop"
 
     spread_alive = spread_amount > 0
-    spread_value = spread_amount
     spread_closed_day = None
     spread_pnl = 0.0
-
-    is_long = direction == "LONG"
     best_favorable_close = 0.0
 
     for day_idx in range(len(path)):
@@ -235,6 +381,7 @@ def simulate_trade(trade, price_df, horizon=14, stress_mode=False):
         high = float(path.iloc[day_idx]["btc_high"])
         low = float(path.iloc[day_idx]["btc_low"])
         close = float(path.iloc[day_idx]["btc_close"])
+        current_dte = max(dte - day_num, 0)
 
         if is_long:
             best_move = (high / entry_price) - 1.0
@@ -246,6 +393,47 @@ def simulate_trade(trade, price_df, horizon=14, stress_mode=False):
             close_move = 1.0 - (close / entry_price)
 
         best_favorable_close = max(best_favorable_close, close_move)
+        
+        # Calculate option P&L based on pricing mode
+        if config.pricing_mode == PricingMode.LINEAR:
+            option_pnl_pct = close_move * naked_leverage - (theta_decay * day_num)
+            best_option_gain_pct = best_move * naked_leverage - (theta_decay * day_num)
+        elif config.pricing_mode == PricingMode.PAYOFF_ONLY:
+            option_pnl_pct = _payoff_pnl(entry_price, close, strike, option_type, theta_decay, day_num)
+            best_option_gain_pct = _payoff_pnl(entry_price, high if is_long else low, strike, option_type, theta_decay, day_num)
+        elif config.pricing_mode == PricingMode.SYNTHETIC_IV and pricer:
+            exit_result = pricer.price_at_exit(
+                spot=close, strike=strike, dte=current_dte, option_type=option_type,
+                entry_price=entry_option_price, realized_vol=config.realized_vol, regime="neutral",
+            )
+            option_pnl_pct = exit_result.get("pnl_pct", 0) or 0
+            best_result = pricer.price_at_exit(
+                spot=high if is_long else low, strike=strike, dte=current_dte, option_type=option_type,
+                entry_price=entry_option_price, realized_vol=config.realized_vol, regime="neutral",
+            )
+            best_option_gain_pct = best_result.get("pnl_pct", 0) or 0
+        elif config.pricing_mode == PricingMode.LEARNED and predictor:
+            prediction = predictor.predict(
+                dte=dte, moneyness=moneyness_pct, option_type=option_type,
+                btc_change_pct=close_move if is_long else -close_move, iv=entry_iv, days_held=day_num,
+            )
+            option_pnl_pct = prediction.p50
+            best_prediction = predictor.predict(
+                dte=dte, moneyness=moneyness_pct, option_type=option_type,
+                btc_change_pct=best_move if is_long else -best_move, iv=entry_iv, days_held=day_num,
+            )
+            best_option_gain_pct = best_prediction.p50
+        else:
+            option_pnl_pct = close_move * naked_leverage - (theta_decay * day_num)
+            best_option_gain_pct = best_move * naked_leverage - (theta_decay * day_num)
+        
+        # Same-bar ambiguity check
+        tp_level = entry_price * (1 + NAKED_TP_PARTIAL / naked_leverage) if is_long else entry_price * (1 - NAKED_TP_PARTIAL / naked_leverage)
+        sl_level = entry_price * (1 - NAKED_STOP_PCT) if is_long else entry_price * (1 + NAKED_STOP_PCT)
+        exit_type, _ = resolve_same_bar_ambiguity(
+            high=high, low=low, close=close, entry_price=entry_price,
+            tp_level=tp_level, sl_level=sl_level, is_long=is_long, policy=config.same_bar_policy,
+        )
 
         if naked_alive:
             if worst_move >= NAKED_STOP_PCT:
@@ -253,77 +441,72 @@ def simulate_trade(trade, price_df, horizon=14, stress_mode=False):
                 naked_pnl += -naked_remaining * loss_pct
                 naked_alive = False
                 naked_closed_day = day_num
+                exit_reason = "stop"
             else:
-                best_option_gain_pct = best_move * naked_leverage - (theta_decay * day_num)
-                close_option_pnl_pct = close_move * naked_leverage - (theta_decay * day_num)
-                current_naked_value = naked_remaining * max(1.0 + close_option_pnl_pct, 0)
-
+                current_naked_value = naked_remaining * max(1.0 + option_pnl_pct, 0)
                 if not naked_partial_taken and best_option_gain_pct >= NAKED_TP_PARTIAL:
                     partial_size = naked_remaining * 0.60
                     naked_pnl += partial_size * NAKED_TP_PARTIAL
                     naked_remaining *= 0.40
                     naked_partial_taken = True
-                    current_naked_value = naked_remaining * max(1.0 + close_option_pnl_pct, 0)
-
+                    current_naked_value = naked_remaining * max(1.0 + option_pnl_pct, 0)
+                    exit_reason = "tp_partial"
                 if naked_alive and best_option_gain_pct >= NAKED_TP_FULL:
                     naked_pnl += naked_remaining * NAKED_TP_FULL
                     naked_remaining = 0
                     naked_alive = False
                     naked_closed_day = day_num
-
+                    exit_reason = "tp"
                 if naked_alive and day_num in (3, 4):
-                    if close_option_pnl_pct < NAKED_DAY34_THRESHOLD and best_favorable_close < 0.01:
+                    if option_pnl_pct < NAKED_DAY34_THRESHOLD and best_favorable_close < 0.01:
                         naked_pnl += current_naked_value - naked_remaining
                         naked_remaining = 0
                         naked_alive = False
                         naked_closed_day = day_num
-
+                        exit_reason = "day34_cut"
                 if naked_alive and day_num >= NAKED_TIME_STOP:
                     naked_pnl += current_naked_value - naked_remaining
                     naked_remaining = 0
                     naked_alive = False
                     naked_closed_day = day_num
+                    exit_reason = "time_stop"
 
         if spread_alive:
+            spread_pnl_pct = option_pnl_pct * 0.6 if config.pricing_mode != PricingMode.LINEAR else close_move * spread_leverage - (theta_decay * 0.3 * day_num)
+            best_spread_pnl_pct = best_option_gain_pct * 0.6 if config.pricing_mode != PricingMode.LINEAR else best_move * spread_leverage - (theta_decay * 0.3 * day_num)
+            
             if worst_move >= SPREAD_STOP_PCT:
                 loss_pct = min(SPREAD_STOP_PCT * spread_leverage, 1.0)
                 spread_pnl = -spread_amount * loss_pct
                 spread_alive = False
                 spread_closed_day = day_num
+                if exit_reason == "time_stop":
+                    exit_reason = "stop"
             else:
-                best_spread_pnl_pct = best_move * spread_leverage - (theta_decay * 0.3 * day_num)
-                close_spread_pnl_pct = close_move * spread_leverage - (theta_decay * 0.3 * day_num)
-                current_spread_value = spread_amount * (1.0 + close_spread_pnl_pct)
-                current_spread_value = max(current_spread_value, 0)
-                current_spread_value = min(current_spread_value, spread_amount * 2.0)
-
-                spread_tp = SPREAD_TP_FAST if (naked_closed_day is not None and naked_closed_day <= 3) else SPREAD_TP_SLOW
+                current_spread_value = spread_amount * (1.0 + spread_pnl_pct)
+                current_spread_value = max(min(current_spread_value, spread_amount * 2.0), 0)
+                spread_tp = SPREAD_TP_FAST if (naked_closed_day and naked_closed_day <= 3) else SPREAD_TP_SLOW
                 if best_spread_pnl_pct >= spread_tp:
                     spread_pnl = spread_amount * spread_tp
                     spread_alive = False
                     spread_closed_day = day_num
-
+                    if exit_reason == "time_stop":
+                        exit_reason = "tp"
                 if spread_alive and day_num >= SPREAD_TIME_STOP:
                     spread_pnl = current_spread_value - spread_amount
                     spread_alive = False
                     spread_closed_day = day_num
 
+    # Handle positions still open at horizon end
     if naked_alive:
         final_close = float(path.iloc[-1]["btc_close"])
-        if is_long:
-            final_move = (final_close / entry_price) - 1.0
-        else:
-            final_move = 1.0 - (final_close / entry_price)
+        final_move = (final_close / entry_price) - 1.0 if is_long else 1.0 - (final_close / entry_price)
         final_pnl_pct = final_move * naked_leverage - (theta_decay * horizon)
         naked_pnl += naked_remaining * max(final_pnl_pct, -1.0)
-        naked_remaining = 0
 
     if spread_alive:
         final_close = float(path.iloc[-1]["btc_close"])
-        if is_long:
-            final_move = (final_close / entry_price) - 1.0
-        else:
-            final_move = 1.0 - (final_close / entry_price)
+        final_move = (final_close / entry_price) - 1.0 if is_long else 1.0 - (final_close / entry_price)
         final_pnl_pct = final_move * spread_leverage - (theta_decay * 0.3 * horizon)
         spread_pnl = spread_amount * max(min(final_pnl_pct, 1.0), -1.0)
 
@@ -337,34 +520,54 @@ def simulate_trade(trade, price_df, horizon=14, stress_mode=False):
     else:
         total_option_pnl *= LOSER_HAIRCUT
 
-    return {
-        "date": dt,
-        "type": trade_type,
-        "direction": direction,
-        "tier": tier_num,
-        "dte_bucket": dte_bucket,
-        "moneyness": moneyness,
-        "naked_leverage": naked_leverage,
-        "spread_leverage": spread_leverage,
-        "theta_decay": theta_decay,
-        "entry_price": entry_price,
-        "total_risk": total_risk,
-        "naked_amount": naked_initial,
-        "spread_amount": spread_amount,
-        "spot_amount": spot_amount,
-        "naked_pnl": round(naked_pnl, 2),
-        "spread_pnl": round(spread_pnl, 2),
-        "option_pnl": round(total_option_pnl, 2),
-        "spot_btc": btc_bought,
-        "spot_unrealized": round(spot_unrealized_pnl, 2),
-        "naked_closed_day": naked_closed_day,
-        "spread_closed_day": spread_closed_day,
-        "win": 1 if total_option_pnl > 0 else 0,
+    result = {
+        "date": dt, "type": trade_type, "direction": direction, "tier": tier_num,
+        "dte_bucket": dte_bucket, "moneyness": moneyness,
+        "naked_leverage": naked_leverage, "spread_leverage": spread_leverage, "theta_decay": theta_decay,
+        "entry_price": entry_price, "total_risk": total_risk,
+        "naked_amount": naked_initial, "spread_amount": spread_amount, "spot_amount": spot_amount,
+        "naked_pnl": round(naked_pnl, 2), "spread_pnl": round(spread_pnl, 2), "option_pnl": round(total_option_pnl, 2),
+        "spot_btc": btc_bought, "spot_unrealized": round(spot_unrealized_pnl, 2),
+        "naked_closed_day": naked_closed_day, "spread_closed_day": spread_closed_day,
+        "exit_reason": exit_reason, "win": 1 if total_option_pnl > 0 else 0,
+        "pricing_mode": config.pricing_mode.value,
     }
+    
+    # Run scenarios if requested
+    if config.run_scenarios and pricer:
+        runner = ScenarioRunner(pricer)
+        scenarios = runner.run_scenarios(
+            spot_entry=entry_price, spot_exit=final_close, strike=strike,
+            dte_entry=dte, dte_exit=max(dte - (naked_closed_day or spread_closed_day or horizon), 0),
+            option_type=option_type, entry_iv=entry_iv, realized_vol=config.realized_vol,
+        )
+        result["scenarios"] = {
+            k: {"pnl": round((naked_initial + spread_amount) * (v.get("pnl_pct") or 0), 2),
+                "pnl_pct": round((v.get("pnl_pct") or 0) * 100, 2),
+                "iv_assumption": v.get("iv_assumption", "")}
+            for k, v in scenarios.items()
+        }
+    
+    return result
+
+
+def _payoff_pnl(entry_spot, current_spot, strike, option_type, theta_decay, day_num):
+    """Calculate P&L using payoff-only mode."""
+    if option_type == "call":
+        intrinsic = max(current_spot - strike, 0)
+        entry_intrinsic = max(entry_spot - strike, 0)
+    else:
+        intrinsic = max(strike - current_spot, 0)
+        entry_intrinsic = max(strike - entry_spot, 0)
+    time_value_entry = entry_spot * 0.03
+    entry_premium = entry_intrinsic + time_value_entry
+    time_value_current = time_value_entry * max(1 - theta_decay * day_num, 0)
+    current_value = intrinsic + time_value_current
+    return (current_value - entry_premium) / entry_premium if entry_premium > 0 else 0.0
 
 
 class Command(BaseCommand):
-    help = "Simulate V7 execution policy across historical trades"
+    help = "Simulate execution policy across historical trades with configurable pricing modes"
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -390,24 +593,104 @@ class Command(BaseCommand):
             action="store_true",
             help="Run stress test with upper-bound leverage (simulates gamma spikes)",
         )
+        parser.add_argument(
+            "--pricing-mode",
+            choices=["linear", "payoff_only", "synthetic_iv", "learned"],
+            default="linear",
+            help="Pricing mode: linear (legacy), payoff_only (bounded), synthetic_iv (Black-Scholes), learned (ML)",
+        )
+        parser.add_argument(
+            "--same-bar-policy",
+            choices=["stop_first", "tp_first", "probabilistic", "close_only"],
+            default="stop_first",
+            help="Policy for same-bar TP/SL ambiguity",
+        )
+        parser.add_argument(
+            "--scenarios",
+            action="store_true",
+            help="Run base/conservative/stressed scenarios for each trade",
+        )
+        parser.add_argument(
+            "--predictor-model",
+            default="models/option_response_predictor.json",
+            help="Path to trained LeveragePredictor model (for learned mode)",
+        )
+        parser.add_argument(
+            "--realized-vol",
+            type=float,
+            default=0.60,
+            help="Realized volatility for synthetic IV (annualized, e.g., 0.60 = 60%%)",
+        )
 
     def handle(self, *args, **options):
         csv_path = options["csv"]
         years = options["years"]
         initial_account = options["account"]
         stress_mode = options.get("stress", False)
+        
+        # Parse pricing mode
+        pricing_mode_str = options.get("pricing_mode", "linear")
+        pricing_mode = {
+            "linear": PricingMode.LINEAR,
+            "payoff_only": PricingMode.PAYOFF_ONLY,
+            "synthetic_iv": PricingMode.SYNTHETIC_IV,
+            "learned": PricingMode.LEARNED,
+        }[pricing_mode_str]
+        
+        # Parse same-bar policy
+        same_bar_str = options.get("same_bar_policy", "stop_first")
+        same_bar_policy = {
+            "stop_first": SameBarPolicy.STOP_FIRST,
+            "tp_first": SameBarPolicy.TP_FIRST,
+            "probabilistic": SameBarPolicy.PROBABILISTIC,
+            "close_only": SameBarPolicy.CLOSE_ONLY,
+        }[same_bar_str]
+        
+        run_scenarios = options.get("scenarios", False)
+        predictor_model_path = Path(options.get("predictor_model", "models/option_response_predictor.json"))
+        realized_vol = options.get("realized_vol", 0.60)
+        
+        # Build config
+        config = SimulationConfig(
+            pricing_mode=pricing_mode,
+            same_bar_policy=same_bar_policy,
+            stress_mode=stress_mode,
+            run_scenarios=run_scenarios,
+            predictor_model_path=predictor_model_path,
+            realized_vol=realized_vol,
+        )
+        
+        # Load predictor if using learned mode
+        predictor = None
+        if pricing_mode == PricingMode.LEARNED:
+            if predictor_model_path.exists():
+                predictor = LeveragePredictor(model_path=predictor_model_path)
+                self.stdout.write(f"Loaded predictor from {predictor_model_path}")
+            else:
+                self.stdout.write(self.style.WARNING(
+                    f"Predictor model not found at {predictor_model_path}, falling back to synthetic estimates"
+                ))
+                predictor = LeveragePredictor()
+        
+        # Initialize pricer for non-linear modes
+        pricer = None
+        if pricing_mode != PricingMode.LINEAR:
+            pricer = OptionPricer(mode=pricing_mode)
 
-        mode_label = "STRESS TEST (upper-bound leverage)" if stress_mode else "BASE CASE"
+        mode_label = f"{pricing_mode_str.upper()}"
+        if stress_mode:
+            mode_label += " + STRESS"
+        if run_scenarios:
+            mode_label += " + SCENARIOS"
+            
         self.stdout.write(f"\n{'=' * 90}")
-        self.stdout.write(f"V7 EXECUTION POLICY SIMULATION — {mode_label}")
+        self.stdout.write(f"EXECUTION POLICY SIMULATION — {mode_label}")
         self.stdout.write(f"{'=' * 90}")
         self.stdout.write(f"Account: ${initial_account:,} | Years: {years} | Target: {UNDERLYING_TARGET*100:.0f}%")
-        self.stdout.write(f"\nV7 Changes:")
-        self.stdout.write(f"  • Naked exposure: 20-25% (was 33-37%)")
-        self.stdout.write(f"  • Spread width: 8-12% (was ~6%)")
-        self.stdout.write(f"  • DTE shifted: 14-21 primary (was 7-14)")
-        self.stdout.write(f"  • Leverage: realistic ranges (base 6-10x, stress 12-18x)")
-        self.stdout.write(f"\nDynamic Leverage Grid (V7):")
+        self.stdout.write(f"Pricing mode: {pricing_mode_str} | Same-bar policy: {same_bar_str}")
+        if pricing_mode == PricingMode.SYNTHETIC_IV:
+            self.stdout.write(f"Realized vol: {realized_vol:.0%}")
+        self.stdout.write(f"\nDynamic Leverage Grid:")
         self.stdout.write(f"  Naked: 11-14 DTE ITM: 8-12x | 15-21 DTE ITM: 6-10x")
         self.stdout.write(f"  Spread: 11-14 DTE: 4-6x | 15-21 DTE: 3-5x")
         self.stdout.write(f"  Theta: 11-14 DTE: 2%/day | 15-21 DTE: 1.5%/day")
@@ -450,7 +733,7 @@ class Command(BaseCommand):
             if capital_at_risk + trade_risk > max_capital_at_risk:
                 continue
 
-            r = simulate_trade(trade, price_df, stress_mode=stress_mode)
+            r = simulate_trade_v8(trade, price_df, config=config, pricer=pricer, predictor=predictor)
             if r:
                 hold_days = r.get("spread_closed_day") or SPREAD_TIME_STOP
                 open_trades.append((trade_date, hold_days, r["total_risk"]))
@@ -461,20 +744,27 @@ class Command(BaseCommand):
             return
 
         res_df = pd.DataFrame(results)
-        self._print_results(res_df, price_df, initial_account, years)
+        self._print_results(res_df, price_df, initial_account, years, config)
 
-    def _print_results(self, res_df, price_df, initial_account, years):
+    def _print_results(self, res_df, price_df, initial_account, years, config: SimulationConfig):
         self.stdout.write(f"\n{'=' * 90}")
         self.stdout.write("TRADE-BY-TRADE RESULTS")
         self.stdout.write(f"{'=' * 90}")
-        self.stdout.write(f"{'Date':12s} | {'Type':16s} | {'Dir':5s} | {'DTE':5s} | {'NkLev':5s} | {'Naked P&L':>10s} | {'Spread P&L':>10s} | {'Option P&L':>10s} | {'Win':3s}")
-        self.stdout.write("-" * 105)
+        
+        if config.run_scenarios:
+            self.stdout.write(f"{'Date':12s} | {'Type':16s} | {'Dir':5s} | {'Exit':10s} | {'Option P&L':>10s} | {'Base':>8s} | {'Cons':>8s} | {'Stress':>8s} | {'Win':3s}")
+        else:
+            self.stdout.write(f"{'Date':12s} | {'Type':16s} | {'Dir':5s} | {'DTE':5s} | {'NkLev':5s} | {'Naked P&L':>10s} | {'Spread P&L':>10s} | {'Option P&L':>10s} | {'Win':3s}")
+        self.stdout.write("-" * 115)
 
         cumulative_btc = 0
         equity = initial_account
         peak_equity = equity
         max_drawdown = 0
         equity_curve = []
+        
+        # Scenario tracking
+        scenario_equity = {"base": initial_account, "conservative": initial_account, "stressed": initial_account}
 
         for _, r in res_df.iterrows():
             cumulative_btc += r["spot_btc"]
@@ -491,10 +781,27 @@ class Command(BaseCommand):
             })
 
             win_str = "✅" if r["win"] else "❌"
-            self.stdout.write(
-                f"{r['date'].strftime('%Y-%m-%d'):12s} | {r['type']:16s} | {r['direction']:5s} | {r['dte_bucket']:5s} | "
-                f"{r['naked_leverage']:5.1f} | ${r['naked_pnl']:>+9.2f} | ${r['spread_pnl']:>+9.2f} | ${r['option_pnl']:>+9.2f} | {win_str}"
-            )
+            
+            if config.run_scenarios and "scenarios" in r and r["scenarios"]:
+                scenarios = r["scenarios"]
+                base_pnl = scenarios.get("base", {}).get("pnl", 0)
+                cons_pnl = scenarios.get("conservative", {}).get("pnl", 0)
+                stress_pnl = scenarios.get("stressed", {}).get("pnl", 0)
+                
+                scenario_equity["base"] += base_pnl
+                scenario_equity["conservative"] += cons_pnl
+                scenario_equity["stressed"] += stress_pnl
+                
+                exit_reason = r.get("exit_reason", "")[:10]
+                self.stdout.write(
+                    f"{r['date'].strftime('%Y-%m-%d'):12s} | {r['type']:16s} | {r['direction']:5s} | {exit_reason:10s} | "
+                    f"${r['option_pnl']:>+9.2f} | ${base_pnl:>+7.0f} | ${cons_pnl:>+7.0f} | ${stress_pnl:>+7.0f} | {win_str}"
+                )
+            else:
+                self.stdout.write(
+                    f"{r['date'].strftime('%Y-%m-%d'):12s} | {r['type']:16s} | {r['direction']:5s} | {r['dte_bucket']:5s} | "
+                    f"{r['naked_leverage']:5.1f} | ${r['naked_pnl']:>+9.2f} | ${r['spread_pnl']:>+9.2f} | ${r['option_pnl']:>+9.2f} | {win_str}"
+                )
 
         self.stdout.write(f"\n{'=' * 90}")
         self.stdout.write("EQUITY CURVE")
@@ -507,9 +814,9 @@ class Command(BaseCommand):
                 f"{e['cumulative_btc']:.5f}"
             )
 
-        self._print_summary(res_df, price_df, initial_account, equity, max_drawdown, years)
+        self._print_summary(res_df, price_df, initial_account, equity, max_drawdown, years, config, scenario_equity)
 
-    def _print_summary(self, res_df, price_df, initial_account, equity, max_drawdown, years):
+    def _print_summary(self, res_df, price_df, initial_account, equity, max_drawdown, years, config: SimulationConfig, scenario_equity: Dict[str, float]):
         self.stdout.write(f"\n{'=' * 90}")
         self.stdout.write("SUMMARY")
         self.stdout.write(f"{'=' * 90}")
@@ -538,6 +845,24 @@ class Command(BaseCommand):
         self.stdout.write(f"Option return: {(equity - initial_account) / initial_account * 100:>+.2f}%")
         self.stdout.write(f"Max drawdown: ${max_drawdown:>,.2f} ({max_drawdown/initial_account*100:.2f}%)")
         self.stdout.write("")
+        
+        # Scenario comparison
+        if config.run_scenarios:
+            self.stdout.write(f"\n{'=' * 90}")
+            self.stdout.write("SCENARIO COMPARISON")
+            self.stdout.write(f"{'=' * 90}")
+            self.stdout.write(f"{'Scenario':<15s} | {'Final Equity':>14s} | {'Return':>10s} | {'vs Base':>10s}")
+            self.stdout.write("-" * 60)
+            
+            base_eq = scenario_equity.get("base", initial_account)
+            for scenario_name in ["base", "conservative", "stressed"]:
+                eq = scenario_equity.get(scenario_name, initial_account)
+                ret = (eq - initial_account) / initial_account * 100
+                vs_base = (eq - base_eq) / initial_account * 100 if scenario_name != "base" else 0
+                self.stdout.write(
+                    f"{scenario_name.capitalize():<15s} | ${eq:>13,.2f} | {ret:>+9.2f}% | {vs_base:>+9.2f}%"
+                )
+            self.stdout.write("")
 
         latest_btc = float(price_df.iloc[-1]["btc_close"])
         btc_value = total_btc_accumulated * latest_btc
