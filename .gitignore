@@ -60,9 +60,8 @@ pytest_cache/
 .cache/
 features_14d_5pct.csv
 
-# ML Models - only track the trained GBM model
+# ML Models - train locally, don't commit
 models/*.joblib
-!models/option_response_gbm.joblib
 models/*.json
 models/training_rows*.csv
 
