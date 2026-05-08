@@ -7,11 +7,9 @@ Provides multiple pricing modes for backtesting option strategies:
 - synthetic_iv: Black-Scholes with regime-mapped synthetic IV
 - learned: ML-based leverage prediction from OptionSnapshot data
 
-The learned mode trains a quantile regression model on historical option
-snapshots to predict option return distributions given:
-- DTE, moneyness, IV level, spread/liquidity regime
-- Underlying price change (ΔBTC%)
-- Time elapsed, IV change
+The learned mode supports two model types:
+- bucket: Bucket-based quantile lookup (interpretable, robust with limited data)
+- gbm: Gradient Boosting quantile regression (better generalization)
 
 Usage:
     from execution.services.option_pricer import OptionPricer, PricingMode
@@ -31,17 +29,19 @@ Usage:
         entry_price=entry['mid']
     )
     
-    # Leverage prediction (learned mode)
+    # Leverage prediction (learned mode - bucket)
     from execution.services.option_pricer import LeveragePredictor
-    predictor = LeveragePredictor()
-    predictor.fit_from_snapshots()  # Train on OptionSnapshot data
+    predictor = LeveragePredictor(model_path='models/option_response_predictor.json')
     
-    quantiles = predictor.predict_option_return(
+    # Leverage prediction (learned mode - GBM)
+    from execution.services.option_pricer import GBMPredictor
+    predictor = GBMPredictor(model_path='models/option_response_gbm.joblib')
+    
+    quantiles = predictor.predict(
         dte=14, moneyness=-0.05, iv=0.65, spread_pct=0.02,
-        btc_change_pct=0.03, iv_change=0.0, days_held=3,
-        option_type='call', structure='spread'
+        btc_change_pct=0.03, option_type='call'
     )
-    # Returns: {'p10': -0.15, 'p50': 0.12, 'p90': 0.45}
+    # Returns: LeveragePrediction(p10=-0.15, p50=0.12, p90=0.45, ...)
 """
 import math
 import logging
@@ -683,6 +683,358 @@ class LeveragePredictor:
         self.global_stats = data.get("global_stats", {})
         self.is_fitted = data.get("is_fitted", False)
         logger.info(f"Loaded predictor from {path} with {len(self.bucket_stats)} buckets")
+
+
+# =============================================================================
+# GBM PREDICTOR - Gradient Boosting Quantile Regression
+# =============================================================================
+
+class GBMPredictor:
+    """
+    Gradient Boosting quantile regression predictor for option returns.
+    
+    Trains separate GBM models for each quantile (p10, p25, p50, p75, p90)
+    using sklearn's GradientBoostingRegressor with quantile loss.
+    
+    Features:
+    - dte: Days to expiry
+    - moneyness: (strike - spot) / spot
+    - iv: Implied volatility
+    - spread_pct: Bid-ask spread percentage
+    - is_call: 1 for call, 0 for put
+    - btc_change_pct: Underlying price change
+    - iv_change: IV change from entry
+    - days_held: Days position held
+    
+    Usage:
+        predictor = GBMPredictor()
+        predictor.fit(training_rows)
+        predictor.save('models/option_response_gbm.joblib')
+        
+        # Later:
+        predictor = GBMPredictor(model_path='models/option_response_gbm.joblib')
+        pred = predictor.predict(dte=14, moneyness=-0.05, ...)
+    """
+    
+    FEATURE_NAMES = [
+        'dte', 'moneyness', 'iv', 'spread_pct', 'is_call',
+        'btc_change_pct', 'iv_change', 'days_held'
+    ]
+    
+    QUANTILES = [0.10, 0.25, 0.50, 0.75, 0.90]
+    
+    def __init__(self, model_path: Optional[Path] = None):
+        """
+        Initialize GBM predictor.
+        
+        Args:
+            model_path: Path to saved .joblib model (optional)
+        """
+        self.model_path = model_path
+        self.models: Dict[float, Any] = {}  # quantile -> fitted model
+        self.is_fitted = False
+        self.n_samples = 0
+        self._training_data: List[TrainingRow] = []
+        
+        if model_path and Path(model_path).exists():
+            self.load(model_path)
+    
+    def add_training_row(self, row: TrainingRow) -> None:
+        """Add a training row."""
+        self._training_data.append(row)
+    
+    def _row_to_features(self, row: TrainingRow) -> List[float]:
+        """Convert TrainingRow to feature vector."""
+        return [
+            row.dte,
+            row.moneyness,
+            row.iv,
+            row.spread_pct,
+            1.0 if row.option_type == 'call' else 0.0,
+            row.btc_change_pct,
+            row.iv_change,
+            float(row.days_held),
+        ]
+    
+    def _make_features(
+        self,
+        dte: float,
+        moneyness: float,
+        option_type: str,
+        btc_change_pct: float,
+        iv: float = 0.50,
+        spread_pct: float = 0.03,
+        iv_change: float = 0.0,
+        days_held: int = 1,
+    ) -> np.ndarray:
+        """Create feature array for prediction."""
+        return np.array([[
+            dte,
+            moneyness,
+            iv,
+            spread_pct,
+            1.0 if option_type == 'call' else 0.0,
+            btc_change_pct,
+            iv_change,
+            float(days_held),
+        ]])
+    
+    def fit(
+        self,
+        n_estimators: int = 200,
+        max_depth: int = 5,
+        learning_rate: float = 0.05,
+        min_samples_leaf: int = 20,
+        subsample: float = 0.8,
+    ) -> Dict[str, float]:
+        """
+        Fit GBM models for each quantile.
+        
+        Args:
+            n_estimators: Number of boosting stages
+            max_depth: Maximum depth of trees
+            learning_rate: Learning rate shrinks contribution of each tree
+            min_samples_leaf: Minimum samples required at leaf node
+            subsample: Fraction of samples for fitting each tree
+        
+        Returns:
+            Dict with training metrics
+        """
+        from sklearn.ensemble import GradientBoostingRegressor
+        
+        if not self._training_data:
+            logger.warning("No training data - cannot fit GBM predictor")
+            return {}
+        
+        # Build feature matrix and target
+        X = np.array([self._row_to_features(row) for row in self._training_data])
+        y = np.array([row.option_return_pct for row in self._training_data])
+        
+        self.n_samples = len(y)
+        logger.info(f"Fitting GBM predictor on {self.n_samples} samples")
+        
+        metrics = {}
+        
+        for q in self.QUANTILES:
+            logger.info(f"  Training quantile {q:.2f}...")
+            
+            model = GradientBoostingRegressor(
+                loss='quantile',
+                alpha=q,
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                min_samples_leaf=min_samples_leaf,
+                subsample=subsample,
+                random_state=42,
+            )
+            
+            model.fit(X, y)
+            self.models[q] = model
+            
+            # Compute training pinball loss
+            y_pred = model.predict(X)
+            pinball = self._pinball_loss(y, y_pred, q)
+            metrics[f'pinball_p{int(q*100)}'] = pinball
+        
+        # Compute coverage (% of actuals within p10-p90 band)
+        p10_pred = self.models[0.10].predict(X)
+        p90_pred = self.models[0.90].predict(X)
+        coverage = np.mean((y >= p10_pred) & (y <= p90_pred))
+        metrics['coverage_10_90'] = coverage
+        
+        # MAE of median prediction
+        p50_pred = self.models[0.50].predict(X)
+        metrics['mae_p50'] = float(np.mean(np.abs(y - p50_pred)))
+        
+        self.is_fitted = True
+        logger.info(f"GBM predictor fitted: MAE={metrics['mae_p50']:.4f}, Coverage={coverage:.2%}")
+        
+        return metrics
+    
+    def _pinball_loss(self, y_true: np.ndarray, y_pred: np.ndarray, q: float) -> float:
+        """Compute pinball (quantile) loss."""
+        err = y_true - y_pred
+        return float(np.mean(np.maximum(q * err, (q - 1) * err)))
+    
+    def predict(
+        self,
+        dte: float,
+        moneyness: float,
+        option_type: str,
+        btc_change_pct: float,
+        iv: float = 0.50,
+        spread_pct: float = 0.03,
+        iv_change: float = 0.0,
+        days_held: int = 1,
+    ) -> LeveragePrediction:
+        """
+        Predict option return quantiles.
+        
+        Args:
+            dte: Days to expiry at entry
+            moneyness: (strike - spot) / spot
+            option_type: 'call' or 'put'
+            btc_change_pct: Underlying price change
+            iv: Implied volatility
+            spread_pct: Bid-ask spread %
+            iv_change: IV change from entry
+            days_held: Days position held
+        
+        Returns:
+            LeveragePrediction with quantile estimates
+        """
+        if not self.is_fitted:
+            # Fall back to synthetic estimate
+            return self._synthetic_estimate(dte, moneyness, option_type, btc_change_pct, iv)
+        
+        X = self._make_features(
+            dte, moneyness, option_type, btc_change_pct,
+            iv, spread_pct, iv_change, days_held
+        )
+        
+        predictions = {q: float(self.models[q].predict(X)[0]) for q in self.QUANTILES}
+        
+        # Determine regime label from IV
+        if iv < 0.35:
+            regime = "very_low"
+        elif iv < 0.45:
+            regime = "low"
+        elif iv < 0.60:
+            regime = "normal"
+        elif iv < 0.80:
+            regime = "elevated"
+        else:
+            regime = "high"
+        
+        # Determine DTE bucket
+        if dte <= 3:
+            dte_bucket = "0_3"
+        elif dte <= 7:
+            dte_bucket = "4_7"
+        elif dte <= 10:
+            dte_bucket = "7_10"
+        elif dte <= 14:
+            dte_bucket = "11_14"
+        elif dte <= 21:
+            dte_bucket = "15_21"
+        elif dte <= 30:
+            dte_bucket = "22_30"
+        else:
+            dte_bucket = "30_plus"
+        
+        # Determine moneyness bucket
+        if moneyness < -0.10:
+            moneyness_bucket = "deep_itm"
+        elif moneyness < -0.03:
+            moneyness_bucket = "itm"
+        elif moneyness < 0.03:
+            moneyness_bucket = "atm"
+        elif moneyness < 0.10:
+            moneyness_bucket = "otm"
+        else:
+            moneyness_bucket = "deep_otm"
+        
+        return LeveragePrediction(
+            p10=predictions[0.10],
+            p25=predictions[0.25],
+            p50=predictions[0.50],
+            p75=predictions[0.75],
+            p90=predictions[0.90],
+            dte_bucket=dte_bucket,
+            moneyness_bucket=moneyness_bucket,
+            regime=regime,
+            n_samples=self.n_samples,
+        )
+    
+    def _synthetic_estimate(
+        self,
+        dte: float,
+        moneyness: float,
+        option_type: str,
+        btc_change_pct: float,
+        iv: float,
+    ) -> LeveragePrediction:
+        """Generate synthetic estimate when model not fitted."""
+        # Simple delta-based approximation
+        if abs(moneyness) < 0.03:
+            delta = 0.50
+        elif moneyness < -0.03:
+            delta = 0.60 + min(abs(moneyness) * 2, 0.35)
+        else:
+            delta = 0.40 - min(moneyness * 2, 0.30)
+        
+        if option_type == 'put':
+            delta = -delta
+        
+        leverage = abs(delta) * 10
+        
+        if option_type == 'call':
+            base_return = btc_change_pct * leverage
+        else:
+            base_return = -btc_change_pct * leverage
+        
+        theta_decay = 0.02 * (1 if dte <= 7 else 0.5)
+        base_return -= theta_decay
+        
+        std = abs(base_return) * 0.5 + 0.10
+        
+        return LeveragePrediction(
+            p10=base_return - 1.28 * std,
+            p25=base_return - 0.67 * std,
+            p50=base_return,
+            p75=base_return + 0.67 * std,
+            p90=base_return + 1.28 * std,
+            dte_bucket="unknown",
+            moneyness_bucket="unknown",
+            regime="synthetic",
+            n_samples=0,
+        )
+    
+    def save(self, path: Path) -> None:
+        """Save predictor to disk using joblib."""
+        import joblib
+        
+        data = {
+            'models': self.models,
+            'is_fitted': self.is_fitted,
+            'n_samples': self.n_samples,
+            'feature_names': self.FEATURE_NAMES,
+            'quantiles': self.QUANTILES,
+        }
+        
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(data, path)
+        logger.info(f"Saved GBM predictor to {path}")
+    
+    def load(self, path: Path) -> None:
+        """Load predictor from disk."""
+        import joblib
+        
+        path = Path(path)
+        if not path.exists():
+            logger.warning(f"GBM predictor file not found: {path}")
+            return
+        
+        data = joblib.load(path)
+        self.models = data.get('models', {})
+        self.is_fitted = data.get('is_fitted', False)
+        self.n_samples = data.get('n_samples', 0)
+        logger.info(f"Loaded GBM predictor from {path} with {len(self.models)} quantile models, {self.n_samples} training samples")
+    
+    def get_feature_importance(self) -> Dict[str, Dict[str, float]]:
+        """Get feature importance for each quantile model."""
+        if not self.is_fitted:
+            return {}
+        
+        importance = {}
+        for q, model in self.models.items():
+            importance[f'p{int(q*100)}'] = dict(zip(
+                self.FEATURE_NAMES,
+                model.feature_importances_.tolist()
+            ))
+        return importance
 
 
 class BlackScholes:

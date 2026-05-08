@@ -202,7 +202,7 @@ class OptionPricePredict(APIView):
     
     def post(self, request):
         from pathlib import Path
-        from execution.services.option_pricer import LeveragePredictor, BlackScholes
+        from execution.services.option_pricer import LeveragePredictor, GBMPredictor, BlackScholes
         
         # Parse request
         data = request.data
@@ -236,12 +236,19 @@ class OptionPricePredict(APIView):
                 current_spot * 1.08,
             ]
         
-        # Load predictor
-        model_path = Path('models/option_response_predictor_v2.json')
-        if model_path.exists():
-            predictor = LeveragePredictor(model_path=model_path)
+        # Load predictor - prefer GBM if available, fall back to bucket model
+        gbm_path = Path('models/option_response_gbm.joblib')
+        bucket_path = Path('models/option_response_predictor_v2.json')
+        
+        if gbm_path.exists():
+            predictor = GBMPredictor(model_path=gbm_path)
+            model_type = "gbm"
+        elif bucket_path.exists():
+            predictor = LeveragePredictor(model_path=bucket_path)
+            model_type = "bucket"
         else:
             predictor = LeveragePredictor()  # Will use synthetic fallback
+            model_type = "synthetic"
         
         # Current position info
         current_moneyness = (strike - current_spot) / current_spot
@@ -262,9 +269,9 @@ class OptionPricePredict(APIView):
             },
             "scenarios": [],
             "model_info": {
-                "model_loaded": model_path.exists(),
-                "model_path": str(model_path),
-                "buckets_available": len(predictor.bucket_stats) if predictor.is_fitted else 0,
+                "model_type": model_type,
+                "model_loaded": predictor.is_fitted,
+                "n_samples": predictor.n_samples if hasattr(predictor, 'n_samples') else len(getattr(predictor, 'bucket_stats', {})),
             }
         }
         

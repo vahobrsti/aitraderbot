@@ -60,8 +60,9 @@ pytest_cache/
 .cache/
 features_14d_5pct.csv
 
-# ML Models
+# ML Models - exclude sklearn models except the trained option response model
 models/*.joblib
+!models/option_response_gbm.joblib
 models/training_rows*.csv
 
 # Report CSVs (research artifacts, regenerated on demand)
