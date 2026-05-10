@@ -133,4 +133,4 @@ The Trade Setup Builder automatically detects MVRV_SHORT as a shakeout-heavy sig
 
 - [Entry Policy Design](entry_policy_design.md) - Full policy calibration
 - [Iron Condor Spec](iron_condor_spec.md) - Range-bound strategy
-- [Production Setup](../deploy/PRODUCTION_SETUP.md) - Deployment guide
+- [Production Setup](PRODUCTION_SETUP.md) - Deployment guide
