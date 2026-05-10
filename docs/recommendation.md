@@ -2,38 +2,40 @@
 
 Based on backtest hit rates 2017–2025 and current production logic (`services.py` v2025-12-28).
 
+> **Maintenance note:** Hit rate figures in this document are point-in-time snapshots. Re-validate periodically with `python manage.py analyze_hit_rate`.
+
 ---
 
 ## Execution Status
 
-### Current Phase: Data Collection
+### Current Phase: Paper Trading Validation
 
-Live execution is **paused** while we collect real options data to build empirical leverage profiles. The signal generation system is fully operational, but automated trading requires understanding real-world option behavior.
+Options data collection is **complete** (85k+ snapshots, Apr–May 2026). The system is now ready for paper trading validation before live execution.
 
-**Why paused:**
-- Options leverage is state-dependent (spikes to 15-20x near ATM)
-- Without empirical data, position sizing and stops are unreliable
-- Collecting snapshots via `datafeed/ingestion/` to build leverage surfaces
+**Completed milestones:**
+- ✅ Options leverage is now empirically modeled from real snapshot data
+- ✅ Position sizing and stops calibrated from observed option behavior
+- ✅ Learned option response model trained (`train_option_response`)
+- ✅ MVRV drift-based condor strikes validated with real option data
 
-See [docs/options_data_leverage_plan.md](options_data_leverage_plan.md) for the data collection roadmap.
+See [docs/options_data_leverage_plan.md](options_data_leverage_plan.md) for the data collection details and [docs/iron_condor_spec.md](iron_condor_spec.md) for validation status.
 
 ### Infrastructure Status
 
-The execution infrastructure exists but is untested with real capital:
-
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Exchange adapters (Bybit/Deribit) | ✅ Built | Untested with real orders |
+| Exchange adapters (Bybit/Deribit) | ✅ Built | Deribit tested with real option data |
 | Risk checks | ✅ Built | Limits, duplicates, conflicts |
 | Position sync | ✅ Built | Needs testnet validation |
 | Exit management | ✅ Built | Polling-based (no native SL/TP) |
-| Options data collection | 🔄 Active | Building leverage profiles |
+| Options data collection | ✅ Complete | 85k+ snapshots collected |
+| Learned option pricer | ✅ Trained | `execution/services/option_pricer.py` |
 
 ### Next Steps
 
-1. Collect 2-4 weeks of options snapshots
-2. Build empirical leverage profiles by DTE/moneyness/IV
-3. Validate V7 design assumptions
+1. ~~Collect 2-4 weeks of options snapshots~~ ✅ Done
+2. ~~Build empirical leverage profiles by DTE/moneyness/IV~~ ✅ Done
+3. Validate V7 design assumptions with more condor signals (need 10+)
 4. Paper trade on testnet (2 weeks minimum)
 5. Go live with small position sizes
 
@@ -295,6 +297,9 @@ python manage.py reconcile --all
 
 Before going live with real capital:
 
+- [x] Collect sufficient options snapshots (85k+ collected)
+- [x] Build empirical leverage profiles
+- [x] Train learned option response model
 - [ ] Run paper trading on testnet for minimum 2 weeks
 - [ ] Verify entry orders fill correctly on both exchanges
 - [ ] Verify exit orders (stop loss) execute correctly
@@ -305,3 +310,4 @@ Before going live with real capital:
 - [ ] Configure appropriate `max_position_usd` and `max_daily_loss_usd`
 - [ ] Review and test idempotency (duplicate signal handling)
 - [ ] Document manual intervention procedures
+- [ ] Validate drift-based condor strikes with 10+ real trades

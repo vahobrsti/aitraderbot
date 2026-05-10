@@ -172,7 +172,7 @@ The hit rate measures whether the underlying stayed in range — not whether the
 - Spread width between bid/ask on 4 legs
 - Whether 50% take-profit was achievable before expiry
 
-These require real option snapshot data from the `OptionSnapshot` collection pipeline. Until that data is available, treat the hit rate as an upper bound on win rate.
+**Update (May 2026):** Real option snapshot data is now available (85k+ snapshots). Initial validation of the Apr 17 condor signal with real bid/ask/mid prices confirmed the MVRV drift-based strike selection. More condor signals (10+) are needed to fully validate the R:R improvement in production.
 
 ## Operational Validation TODOs
 
@@ -184,7 +184,7 @@ The statistical edge (range-staying rate) is necessary but not sufficient for pr
 - [ ] **Combined filter backtest** — Re-run `condor_walkforward` with the new `mvrv_60d_flat_underval` score component active. Verify precision improvement holds out-of-sample and doesn't just overfit to the 27 qualifying periods.
 - [ ] **Conditional lift validation** — Measure the incremental lift of `mvrv_60d_flat_underval` conditional on existing score components (chop state, MVRV neutral, sentiment neutral, etc.), not standalone. A strong standalone feature can add zero incremental edge once trend/vol filters are already active. If conditional lift < 2pp, remove the component.
 - [ ] **Score weight calibration** — Current +5 is provisional. Run `condor_walkforward` with +5, +7, +10 variants and compare precision/pass-rate tradeoff. Promote weight only if out-of-sample precision improves without inflating pass rate into bad regimes.
-- [x] **OptionSnapshot integration** — Option snapshot pipeline is live (64k+ snapshots, Apr 11–28 2026). Validated condor PNL with real bid/ask/mid prices for the Apr 17 signal. MVRV drift-based strike selection integrated into signal pipeline.
+- [x] **OptionSnapshot integration** — Option snapshot pipeline is live (85k+ snapshots, Apr–May 2026). Validated condor PNL with real bid/ask/mid prices for the Apr 17 signal. MVRV drift-based strike selection integrated into signal pipeline.
 - [ ] **Drift strike validation with more condor signals** — Current real-option validation is on a single trade (Apr 17). Need 10+ condor signals with option data to confirm drift-based R:R improvement in production.
 
 ## Monitoring & Recalibration Triggers
