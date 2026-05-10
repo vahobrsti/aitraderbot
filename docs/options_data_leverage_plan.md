@@ -1,6 +1,6 @@
 # Options Data & Leverage Modeling Plan
 
-Current priority is to build an empirical understanding of option leverage behavior from real snapshots, then feed that into execution/simulation design.
+> **Status (May 2026):** Phase 1–3 complete. 85k+ snapshots collected, learned response model trained. Phase 4 (execution integration) is in progress.
 
 ## Goal
 
@@ -11,14 +11,14 @@ Replace fixed leverage assumptions with observed option response profiles:
 
 ## Workflow
 
-1. Collect options snapshots continuously
-2. Open paper/hypothetical trades tied to snapshots
-3. Track path metrics during hold period (MAE/MFE)
-4. Close trades and compute attribution
-5. Aggregate into leverage/risk surfaces
-6. Use those surfaces to update execution policy and simulator logic
+1. ~~Collect options snapshots continuously~~ ✅ Complete (85k+ snapshots)
+2. ~~Open paper/hypothetical trades tied to snapshots~~ ✅ Complete
+3. ~~Track path metrics during hold period (MAE/MFE)~~ ✅ Complete
+4. ~~Close trades and compute attribution~~ ✅ Complete
+5. ~~Aggregate into leverage/risk surfaces~~ ✅ Complete
+6. Use those surfaces to update execution policy and simulator logic (in progress)
 
-## Phase 1: Data Collection
+## Phase 1: Data Collection ✅
 
 Use the collection commands to gather Bybit and Deribit option snapshots:
 
@@ -40,7 +40,7 @@ Primary models:
 - `datafeed.models.OptionSnapshot`
 - `datafeed.models.OptionTrade`
 
-## Phase 2: Paper Trade Path Tracking
+## Phase 2: Paper Trade Path Tracking ✅
 
 Use `datafeed.services.TradeTracker` to create and close hypothetical trades against snapshot history:
 
@@ -53,7 +53,7 @@ Use `datafeed.services.TradeTracker` to create and close hypothetical trades aga
   - IV change
   - spot change %
 
-## Phase 3: Leverage Profiling
+## Phase 3: Leverage Profiling ✅
 
 Build empirical profiles by bucket:
 
@@ -98,15 +98,17 @@ And reports walk-forward diagnostics:
 - pinball loss for p10/p90
 - interval coverage (actual inside predicted 10-90% band)
 
-## Phase 4: Integrate Into Execution Design
+## Phase 4: Integrate Into Execution Design (In Progress)
 
 After enough sample size:
 
-- revise leverage assumptions in execution policy docs
-- rework simulator to use empirical response curves
-- keep synthetic leverage mode as fallback/stress harness only
+- ✅ Revised leverage assumptions in execution policy docs (V7)
+- ✅ Trained learned option response model (`execution/services/option_pricer.py`)
+- 🔄 Rework simulator to use empirical response curves
+- Keep synthetic leverage mode as fallback/stress harness only
 
 ## Notes
 
 - `TradeTracker` is currently research/paper tracking, not exchange execution.
 - Live order placement remains in `execution/` services and exchange adapters.
+- The learned option pricer is integrated into the API (`/api/v1/options/predict/`) and trade setup builder.
