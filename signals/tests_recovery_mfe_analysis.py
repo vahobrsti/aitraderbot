@@ -147,7 +147,8 @@ class TestRecoveryMFEAnalysis(TestCase):
     @patch('signals.management.commands.analyze_loser_recovery.Command._build_trades_df')
     @patch('signals.management.commands.analyze_loser_recovery.Command._load_prices')
     @patch('signals.management.commands.analyze_loser_recovery.Command._analyze_recovery')
-    def test_command_integration(self, mock_analyze, mock_prices, mock_trades):
+    @patch('signals.management.commands.analyze_loser_recovery.Path.exists', return_value=True)
+    def test_command_integration(self, mock_path_exists, mock_analyze, mock_prices, mock_trades):
         """Test the command integration with enhanced MFE analysis."""
         # Mock the dependencies
         mock_trades.return_value = pd.DataFrame([

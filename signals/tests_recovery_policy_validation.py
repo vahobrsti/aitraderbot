@@ -584,9 +584,10 @@ class TestEdgeCaseHandling(TestCase):
 class TestRecoveryPolicyValidationIntegration(TestCase):
     """Integration tests for recovery policy validation."""
 
+    @patch('signals.management.commands.analyze_loser_recovery.Path.exists', return_value=True)
     @patch('signals.management.commands.analyze_loser_recovery.Command._build_trades_df')
     @patch('signals.management.commands.analyze_loser_recovery.Command._load_prices')
-    def test_full_command_integration_with_policy(self, mock_load_prices, mock_build_trades):
+    def test_full_command_integration_with_policy(self, mock_load_prices, mock_build_trades, mock_path_exists):
         """Test full command integration with policy validation."""
         # Mock dependencies
         mock_build_trades.return_value = pd.DataFrame([
