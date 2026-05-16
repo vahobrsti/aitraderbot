@@ -186,10 +186,21 @@ class TradeSetup:
                 "max_profit": self.max_profit,
                 "max_loss": self.max_loss,
                 "risk_reward": self.risk_reward,
+                "risk_reward_formatted": f"1:{self.risk_reward:.2f}",
                 "breakeven": self.breakeven,
                 "execution_cost": self.execution_cost,
                 "adjusted_max_profit": self.adjusted_max_profit,
                 "net_edge_pct": self.net_edge_pct,
+            },
+            "risk_reward_summary": {
+                "ratio": self.risk_reward,
+                "ratio_formatted": f"1:{self.risk_reward:.2f}",
+                "risk_pct": self.exit_rules.stop_loss_spot_pct,
+                "risk_usd": self.spot_price * self.exit_rules.stop_loss_spot_pct,
+                "reward_pct": self.spread_width_pct * self.exit_rules.take_profit_pct,
+                "reward_usd": self.spot_price * self.spread_width_pct * self.exit_rules.take_profit_pct,
+                "max_loss_per_contract": self.max_loss,
+                "max_profit_per_contract": self.max_profit,
             },
             "position": {
                 "risk_budget": self.risk_budget,
@@ -412,6 +423,10 @@ class TradeSetupBuilder:
         if direction is None:
             return None
         
+        # Handle iron condor separately (4-leg structure)
+        if option_type == "condor":
+            return self._build_condor_setup(signal_date, signal_type, spot_price)
+        
         # Get policy parameters
         dte_cfg = self.policy.get_dte_target(signal_type)
         exit_cfg = self.policy.get_exit_params(signal_type)
@@ -633,7 +648,7 @@ class TradeSetupBuilder:
             "TACTICAL_PUT": ("SHORT", "put"),
             "BEAR_PROBE": ("SHORT", "put"),
             "MVRV_SHORT": ("SHORT", "put"),
-            "IRON_CONDOR": ("NEUTRAL", None),  # Special handling needed
+            "IRON_CONDOR": ("NEUTRAL", "condor"),  # Special handling in build_setup
         }
         return mapping.get(signal_type, (None, None))
     
@@ -774,3 +789,251 @@ class TradeSetupBuilder:
         
         # Fallback to best overall score
         return candidates[0]['opt']
+    
+    def _build_condor_setup(
+        self,
+        signal_date: date,
+        signal_type: str,
+        spot_price: float,
+    ) -> Optional[TradeSetup]:
+        """
+        Build iron condor setup (4-leg structure).
+        
+        Iron condor structure:
+        - SELL short call (OTM)
+        - BUY long call (further OTM, wing protection)
+        - SELL short put (OTM)
+        - BUY long put (further OTM, wing protection)
+        
+        Net credit received = premium from selling - premium for buying wings
+        Max profit = net credit (if price stays between short strikes)
+        Max loss = wing width - net credit (if price moves beyond wings)
+        """
+        # Get policy parameters
+        dte_cfg = self.policy.get_dte_target(signal_type)
+        exit_cfg = self.policy.get_exit_params(signal_type)
+        condor_cfg = self.policy.condor
+        tier = self.policy.get_tier(signal_type)
+        risk_budget = tier.risk_usd * tier.spread_pct
+        
+        # Get signal for MVRV-based strike targets (if available)
+        try:
+            signal = DailySignal.objects.get(date=signal_date)
+            target_short_call = signal.condor_short_call or spot_price * (1 + condor_cfg.spot_call_band)
+            target_short_put = signal.condor_short_put or spot_price * (1 - condor_cfg.spot_put_band)
+        except DailySignal.DoesNotExist:
+            target_short_call = spot_price * (1 + condor_cfg.spot_call_band)
+            target_short_put = spot_price * (1 - condor_cfg.spot_put_band)
+        
+        # Get latest timestamp for options on signal date
+        latest_ts = OptionSnapshot.objects.filter(
+            timestamp__date=signal_date,
+            dte__gte=dte_cfg.min_dte,
+            dte__lte=dte_cfg.max_dte,
+        ).aggregate(Max('timestamp'))['timestamp__max']
+        
+        if not latest_ts:
+            return None
+        
+        # Get call options
+        call_options = list(OptionSnapshot.objects.filter(
+            timestamp=latest_ts,
+            option_type="call",
+            dte__gte=dte_cfg.min_dte,
+            dte__lte=dte_cfg.max_dte,
+        ))
+        
+        # Get put options
+        put_options = list(OptionSnapshot.objects.filter(
+            timestamp=latest_ts,
+            option_type="put",
+            dte__gte=dte_cfg.min_dte,
+            dte__lte=dte_cfg.max_dte,
+        ))
+        
+        if not call_options or not put_options:
+            return None
+        
+        # Find short call (closest to target, OTM)
+        short_call = min(
+            [o for o in call_options if float(o.strike) >= spot_price],
+            key=lambda x: abs(float(x.strike) - target_short_call),
+            default=None
+        )
+        if not short_call:
+            return None
+        
+        # Find long call (wing, same expiry, higher strike)
+        long_call_target = float(short_call.strike) + condor_cfg.wing_offset_usd
+        long_call = min(
+            [o for o in call_options 
+             if o.expiry == short_call.expiry and float(o.strike) > float(short_call.strike)],
+            key=lambda x: abs(float(x.strike) - long_call_target),
+            default=None
+        )
+        if not long_call:
+            return None
+        
+        # Find short put (closest to target, OTM)
+        short_put = min(
+            [o for o in put_options 
+             if float(o.strike) <= spot_price and o.expiry == short_call.expiry],
+            key=lambda x: abs(float(x.strike) - target_short_put),
+            default=None
+        )
+        if not short_put:
+            return None
+        
+        # Find long put (wing, same expiry, lower strike)
+        long_put_target = float(short_put.strike) - condor_cfg.wing_offset_usd
+        long_put = min(
+            [o for o in put_options 
+             if o.expiry == short_call.expiry and float(o.strike) < float(short_put.strike)],
+            key=lambda x: abs(float(x.strike) - long_put_target),
+            default=None
+        )
+        if not long_put:
+            return None
+        
+        # Calculate condor metrics
+        # Net credit = (short call bid + short put bid) - (long call ask + long put ask)
+        net_credit = (
+            float(short_call.bid) + float(short_put.bid) -
+            float(long_call.ask) - float(long_put.ask)
+        )
+        
+        # Wing widths
+        call_wing_width = float(long_call.strike) - float(short_call.strike)
+        put_wing_width = float(short_put.strike) - float(long_put.strike)
+        wing_width = max(call_wing_width, put_wing_width)  # Use wider wing for max loss calc
+        
+        # Max profit = net credit (if price stays between short strikes)
+        max_profit = net_credit
+        
+        # Max loss = wing width - net credit (if price moves beyond wings)
+        max_loss = wing_width - net_credit
+        
+        if max_loss <= 0 or max_profit <= 0:
+            return None
+        
+        risk_reward = max_profit / max_loss
+        
+        # Breakevens
+        upper_breakeven = float(short_call.strike) + net_credit
+        lower_breakeven = float(short_put.strike) - net_credit
+        
+        # Position sizing
+        contracts = int(risk_budget / max_loss) if max_loss > 0 else 0
+        if contracts < 1:
+            contracts = 1
+        
+        total_risk = contracts * max_loss
+        total_max_profit = contracts * max_profit
+        
+        # Build leg setups (use short call as primary "long" leg for display)
+        # Note: For condors, we show all 4 legs differently
+        long_leg = LegSetup(
+            symbol=short_call.symbol,
+            action="SELL",  # Short call
+            strike=float(short_call.strike),
+            delta=float(short_call.delta) if short_call.delta else 0,
+            iv=float(short_call.iv) if short_call.iv else 0,
+            price=float(short_call.bid),
+            open_interest=int(short_call.open_interest) if short_call.open_interest else 0,
+            bid_ask_spread_pct=float(short_call.spread_pct) if short_call.spread_pct else 0,
+        )
+        
+        short_leg = LegSetup(
+            symbol=short_put.symbol,
+            action="SELL",  # Short put
+            strike=float(short_put.strike),
+            delta=float(short_put.delta) if short_put.delta else 0,
+            iv=float(short_put.iv) if short_put.iv else 0,
+            price=float(short_put.bid),
+            open_interest=int(short_put.open_interest) if short_put.open_interest else 0,
+            bid_ask_spread_pct=float(short_put.spread_pct) if short_put.spread_pct else 0,
+        )
+        
+        # Exit rules for condor
+        exit_rules = ExitRules(
+            stop_loss_spot=upper_breakeven,  # Upper breakeven as reference
+            stop_loss_spot_pct=exit_cfg.stop_loss_pct,
+            stop_loss_value=net_credit * (1 - exit_cfg.stop_loss_pct),
+            stop_loss_value_pct=exit_cfg.stop_loss_pct,
+            take_profit_pct=exit_cfg.take_profit_pct,
+            take_profit_value=max_profit * exit_cfg.take_profit_pct,
+            max_hold_days=exit_cfg.max_hold_days,
+            max_hold_date=signal_date + timedelta(days=exit_cfg.max_hold_days),
+            scale_down_day=exit_cfg.scale_down_day,
+            scale_down_date=signal_date + timedelta(days=exit_cfg.scale_down_day) if exit_cfg.scale_down_day else None,
+            scale_down_action="close_full_position",  # Condors typically close full
+            profit_lock_threshold=exit_cfg.profit_lock_threshold,
+            profit_lock_stop=spot_price,
+            trailing_stop_pct=exit_cfg.trailing_stop_pct,
+            stop_tighten_day=exit_cfg.stop_tighten_day,
+            stop_tighten_date=signal_date + timedelta(days=exit_cfg.stop_tighten_day) if exit_cfg.stop_tighten_day else None,
+            tightened_stop_pct=exit_cfg.stop_loss_pct * exit_cfg.stop_tighten_factor if exit_cfg.stop_tighten_day else None,
+        )
+        
+        # Path profile for condor
+        path_data = self.policy.get_path_profile(signal_type)
+        path_profile = PathProfile(
+            shakeout_pct=path_data.get("shakeout_pct", 0),
+            invalidation_pct=path_data.get("invalidation_pct", 0),
+            mae_p75=path_data.get("mae_p75", 0),
+            clean_win_pct=path_data.get("clean_win_pct", 1.0),
+            is_shakeout_heavy=False,  # Condors don't have shakeout patterns
+            is_invalidation_heavy=False,
+            entry_strategy="single",
+            entry_note="Full position at entry (premium selling)",
+        )
+        
+        # Validation warnings
+        warnings = []
+        blocking = []
+        
+        # Check credit percentage
+        credit_pct = net_credit / wing_width if wing_width > 0 else 0
+        if credit_pct < condor_cfg.min_credit_pct:
+            warnings.append(f"Credit {credit_pct:.1%} below minimum {condor_cfg.min_credit_pct:.1%}")
+        
+        # Check wing distances
+        call_dist_pct = (float(short_call.strike) - spot_price) / spot_price
+        put_dist_pct = (spot_price - float(short_put.strike)) / spot_price
+        if call_dist_pct < 0.08:
+            warnings.append(f"Short call only {call_dist_pct:.1%} OTM (prefer >8%)")
+        if put_dist_pct < 0.08:
+            warnings.append(f"Short put only {put_dist_pct:.1%} OTM (prefer >8%)")
+        
+        expiry_date = short_call.expiry.date() if hasattr(short_call.expiry, 'date') else short_call.expiry
+        
+        return TradeSetup(
+            signal_date=signal_date,
+            signal_type=signal_type,
+            direction="NEUTRAL",
+            spot_price=spot_price,
+            expiry=expiry_date,
+            dte=int(short_call.dte),
+            long_leg=long_leg,  # Short call (primary display)
+            short_leg=short_leg,  # Short put
+            spread_width=wing_width,
+            spread_width_pct=wing_width / spot_price,
+            net_debit=-net_credit,  # Negative debit = credit received
+            max_profit=max_profit,
+            max_loss=max_loss,
+            risk_reward=risk_reward,
+            breakeven=upper_breakeven,  # Show upper breakeven
+            execution_cost=0,  # TODO: Calculate from policy
+            adjusted_max_profit=max_profit,
+            net_edge_pct=credit_pct,
+            risk_budget=risk_budget,
+            contracts=contracts,
+            total_risk=total_risk,
+            total_max_profit=total_max_profit,
+            exit_rules=exit_rules,
+            path_profile=path_profile,
+            validation_passed=len(blocking) == 0,
+            validation_warnings=warnings,
+            validation_blocking=blocking,
+            policy_version=self.policy.version,
+        )

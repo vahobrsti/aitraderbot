@@ -313,7 +313,7 @@ Hit rates from 5% target, 14-day horizon, 345 trades (with overlays and cooldown
 | `/api/v1/signals/` | GET | ✅ | List signals (paginated) |
 | `/api/v1/signals/latest/` | GET | ✅ | Latest signal (full detail) |
 | `/api/v1/signals/<date>/` | GET | ✅ | Signal by date |
-| `/api/v1/signals/<date>/setup/` | GET | ✅ | **Trade setup for date** |
+| `/api/v1/signals/<date>/setup/` | GET | ✅ | **Trade setup for date** (supports `?type=` override) |
 | `/api/v1/signals/latest/setup/` | GET | ✅ | **Trade setup for latest tradeable signal** |
 | `/api/v1/options/predict/` | POST | ✅ | **Predict option price under BTC scenarios** |
 | `/api/v1/fusion/explain/` | GET | ✅ | Explain fusion logic |
@@ -514,6 +514,43 @@ python manage.py calibrate_policy
 
 # Diagnose why trades didn't fire
 python manage.py diagnose_notrade --year 2025
+
+# Recovery policy analysis (FLIP/HOLD/CUT recommendations)
+python manage.py analyze_loser_recovery
+python manage.py analyze_loser_recovery --type MVRV_SHORT
+python manage.py analyze_loser_recovery --simulate-policy --sensitivity-analysis
+```
+
+### Manual Trade Setup (Income Strategies)
+
+Generate trade setups for any signal type on demand — useful for income strategies and manual overrides:
+
+```bash
+# List all available signal types with policy parameters
+python manage.py manual_setup --list
+
+# Generate setup for a specific signal (uses real option chain)
+python manage.py manual_setup --signal CALL
+python manage.py manual_setup --signal IRON_CONDOR
+python manage.py manual_setup --signal MVRV_SHORT
+
+# Generate all setups at once
+python manage.py manual_setup --all
+
+# Use specific date
+python manage.py manual_setup --signal PUT --date 2026-05-09
+
+# Output as JSON (for programmatic use)
+python manage.py manual_setup --signal CALL --json
+
+# Show theoretical setup only (no option chain lookup)
+python manage.py manual_setup --signal CALL --theoretical
+
+# Show full option chain candidates
+python manage.py manual_setup --signal CALL --show-chain
+
+# Override spot price
+python manage.py manual_setup --signal CALL --spot 105000
 ```
 
 ### Data Collection
@@ -652,10 +689,12 @@ BYBIT_API_SECRET=your_api_secret
 | `signals/overlays.py` | Edge amplifiers and veto gates |
 | `signals/options.py` | Option strategy, strikes, DTE, spread guidance |
 | `signals/services.py` | SignalService for scoring + persistence |
+| `signals/management/commands/manual_setup.py` | **Manual trade setup for any signal type** |
 | `execution/services/policy.py` | Data-driven policy engine |
 | `execution/services/trade_setup.py` | Automated trade construction |
 | `execution/services/trade_validator.py` | 11 pre-flight validation checks |
 | `execution/services/option_pricer.py` | **Learned option pricing model (85k+ snapshots)** |
+| `execution/services/recovery.py` | **Recovery decision engine (FLIP/HOLD/CUT)** |
 | `execution/exchanges/deribit.py` | Deribit API adapter |
 | `notifications/notifier.py` | Telegram notifications with trade setups |
 | `api/views.py` | REST API endpoints |
@@ -665,12 +704,13 @@ BYBIT_API_SECRET=your_api_secret
 ## Testing
 
 ```bash
-# Run all tests (370 tests)
+# Run all tests
 python manage.py test
 
 # Run specific test modules
 python manage.py test execution.tests_trade_setup
 python manage.py test execution.tests
+python manage.py test execution.tests_recovery
 python manage.py test signals.tests
 
 # Run with verbosity
@@ -737,6 +777,7 @@ sudo systemctl restart gunicorn
 | [docs/mvrv_short_signal.md](docs/mvrv_short_signal.md) | MVRV Short signal specification |
 | [docs/iron_condor_spec.md](docs/iron_condor_spec.md) | Iron condor specification |
 | [docs/options_data_leverage_plan.md](docs/options_data_leverage_plan.md) | Options data collection roadmap |
+| [docs/recovery_decision_engine.md](docs/recovery_decision_engine.md) | Recovery decision engine (FLIP/HOLD/CUT) |
 | [deploy/PRODUCTION_SETUP.md](deploy/PRODUCTION_SETUP.md) | VPS deployment guide |
 | [execution/docs/execution_design.md](execution/docs/execution_design.md) | Execution layer design |
 

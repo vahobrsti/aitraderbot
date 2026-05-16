@@ -540,7 +540,7 @@ class TradeSetupBuilderTests(TestCase):
         self.assertEqual(builder._get_direction_and_type("TACTICAL_PUT"), ("SHORT", "put"))
         self.assertEqual(builder._get_direction_and_type("BEAR_PROBE"), ("SHORT", "put"))
         self.assertEqual(builder._get_direction_and_type("MVRV_SHORT"), ("SHORT", "put"))
-        self.assertEqual(builder._get_direction_and_type("IRON_CONDOR"), ("NEUTRAL", None))
+        self.assertEqual(builder._get_direction_and_type("IRON_CONDOR"), ("NEUTRAL", "condor"))
         
         # Unknown signal
         self.assertEqual(builder._get_direction_and_type("UNKNOWN"), (None, None))
