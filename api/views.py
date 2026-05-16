@@ -66,9 +66,14 @@ class DailySignalDetailView(generics.RetrieveAPIView):
 class TradeSetupView(APIView):
     """
     GET /api/v1/signals/<date>/setup/
+    GET /api/v1/signals/<date>/setup/?type=IRON_CONDOR
     
     Get complete trade setup for a signal date.
     Includes option legs, metrics, position sizing, exit rules, and validation.
+    
+    Query params:
+        type: Override signal type (e.g., IRON_CONDOR, MVRV_SHORT)
+              If not provided, uses the stored trade_decision from the signal.
     """
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
@@ -93,20 +98,27 @@ class TradeSetupView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
+        # Get signal type from query param or use stored decision
+        signal_type = request.query_params.get('type', None)
+        if signal_type:
+            signal_type = signal_type.upper()
+        else:
+            signal_type = signal.trade_decision
+        
         # Skip NO_TRADE
-        if signal.trade_decision == "NO_TRADE":
+        if signal_type == "NO_TRADE":
             return Response(
                 {"error": "No trade setup for NO_TRADE signal", "signal_type": "NO_TRADE"},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Build setup
+        # Build setup with optional type override
         builder = TradeSetupBuilder()
-        setup = builder.build_setup(signal_date)
+        setup = builder.build_setup(signal_date, signal_type=signal_type)
         
         if setup is None:
             return Response(
-                {"error": "Could not build trade setup. No option data available."},
+                {"error": f"Could not build trade setup for {signal_type}. No option data available or signal type not supported."},
                 status=status.HTTP_404_NOT_FOUND
             )
         

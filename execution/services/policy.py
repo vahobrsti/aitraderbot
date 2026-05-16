@@ -41,6 +41,21 @@ class DTEConfig:
 
 
 @dataclass
+class RecoveryConfig:
+    """
+    Recovery policy parameters per signal type.
+    
+    Recovery parameters for trades that are adverse at checkpoint:
+    - recovery_flip_threshold: MFE threshold above which to flip the trade direction
+    - recovery_cut_threshold: MFE threshold below which to cut losses
+    - recovery_target: Profit target for recovery trades (typically lower than original)
+    """
+    recovery_flip_threshold: float = 0.05    # 5% MFE threshold to recommend flipping
+    recovery_cut_threshold: float = 0.02     # 2% MFE threshold below which to cut losses
+    recovery_target: float = 0.03            # 3% profit target for recovery trades
+
+
+@dataclass
 class ExitConfig:
     """
     Exit policy parameters per signal type.
@@ -59,6 +74,8 @@ class ExitConfig:
     trailing_stop_pct: float = 0.0           # 0 = no trailing, >0 = trail at this % below high
     stop_tighten_day: Optional[int] = None   # Day to tighten stop (None = no tightening)
     stop_tighten_factor: float = 0.5         # Multiply stop by this factor on tighten day
+    # Recovery policy integration
+    recovery: Optional[RecoveryConfig] = None  # Recovery parameters for adverse trades
 
 
 @dataclass
@@ -134,6 +151,9 @@ class PolicyVersion:
     # shakeout_pct: % of winners that experience shakeout before hitting target
     # invalidation_pct: % of winners invalidated before hit
     path_profiles: dict[str, dict] = field(default_factory=dict)
+    
+    # Recovery policy parameters per signal type
+    recovery_configs: dict[str, RecoveryConfig] = field(default_factory=dict)
     
     # Liquidity and execution
     liquidity: LiquidityConfig = field(default_factory=LiquidityConfig)
@@ -250,6 +270,32 @@ class PolicyVersion:
         total_cost = self.execution_costs.total_cost_multi_leg(num_legs, is_market)
         return expected_return_pct - total_cost
     
+    def get_recovery_config(self, signal_type: str) -> RecoveryConfig:
+        """
+        Get recovery configuration for a signal type.
+        
+        Returns signal-specific recovery config or default values.
+        
+        Args:
+            signal_type: Signal type (e.g., "CALL", "PUT", "MVRV_SHORT")
+            
+        Returns:
+            RecoveryConfig with thresholds and targets for recovery decisions
+        """
+        return self.recovery_configs.get(signal_type, RecoveryConfig())
+    
+    def get_recovery_flip_threshold(self, signal_type: str) -> float:
+        """Get recovery flip threshold for a signal type."""
+        return self.get_recovery_config(signal_type).recovery_flip_threshold
+    
+    def get_recovery_cut_threshold(self, signal_type: str) -> float:
+        """Get recovery cut threshold for a signal type."""
+        return self.get_recovery_config(signal_type).recovery_cut_threshold
+    
+    def get_recovery_target(self, signal_type: str) -> float:
+        """Get recovery target for a signal type."""
+        return self.get_recovery_config(signal_type).recovery_target
+    
     def to_dict(self) -> dict:
         """Serialize policy to dict for storage."""
         return {
@@ -265,6 +311,7 @@ class PolicyVersion:
             "exit_params": {k: vars(v) for k, v in self.exit_params.items()},
             "expected_edge_by_signal": self.expected_edge_by_signal,
             "path_profiles": self.path_profiles,
+            "recovery_configs": {k: vars(v) for k, v in self.recovery_configs.items()},
             "liquidity": vars(self.liquidity),
             "execution_costs": vars(self.execution_costs),
             "condor": vars(self.condor),
@@ -391,51 +438,60 @@ POLICY_V1 = PolicyVersion(
             stop_loss_pct=0.045, take_profit_pct=0.70, max_hold_days=9, scale_down_day=6,
             profit_lock_threshold=0.30, trailing_stop_pct=0.0,
             stop_tighten_day=6, stop_tighten_factor=0.6,
+            recovery=RecoveryConfig(recovery_flip_threshold=0.05, recovery_cut_threshold=0.02, recovery_target=0.03),
         ),
         "PUT": ExitConfig(
             stop_loss_pct=0.045, take_profit_pct=0.70, max_hold_days=8, scale_down_day=5,
             profit_lock_threshold=0.30, trailing_stop_pct=0.0,
             stop_tighten_day=5, stop_tighten_factor=0.6,
+            recovery=RecoveryConfig(recovery_flip_threshold=0.05, recovery_cut_threshold=0.02, recovery_target=0.03),
         ),
         # Invalidation-heavy signals - lower take-profit, early tightening
         "OPTION_CALL": ExitConfig(
             stop_loss_pct=0.085, take_profit_pct=0.50, max_hold_days=7, scale_down_day=4,
             profit_lock_threshold=0.25, trailing_stop_pct=0.0,
             stop_tighten_day=3, stop_tighten_factor=0.5,  # Tighten early due to 54% invalidation
+            recovery=RecoveryConfig(recovery_flip_threshold=0.05, recovery_cut_threshold=0.02, recovery_target=0.03),
         ),
         "OPTION_PUT": ExitConfig(
             stop_loss_pct=0.070, take_profit_pct=0.50, max_hold_days=5, scale_down_day=3,
             profit_lock_threshold=0.25, trailing_stop_pct=0.0,
             stop_tighten_day=2, stop_tighten_factor=0.5,  # Tighten early due to 44% invalidation
+            recovery=RecoveryConfig(recovery_flip_threshold=0.05, recovery_cut_threshold=0.02, recovery_target=0.03),
         ),
         # Clean hedge signal
         "TACTICAL_PUT": ExitConfig(
             stop_loss_pct=0.035, take_profit_pct=0.70, max_hold_days=8, scale_down_day=5,
             profit_lock_threshold=0.30, trailing_stop_pct=0.0,
             stop_tighten_day=5, stop_tighten_factor=0.6,
+            recovery=RecoveryConfig(recovery_flip_threshold=0.05, recovery_cut_threshold=0.02, recovery_target=0.03),
         ),
         # Clean probe signal
         "BULL_PROBE": ExitConfig(
             stop_loss_pct=0.040, take_profit_pct=0.70, max_hold_days=7, scale_down_day=5,
             profit_lock_threshold=0.30, trailing_stop_pct=0.0,
             stop_tighten_day=4, stop_tighten_factor=0.6,
+            recovery=RecoveryConfig(recovery_flip_threshold=0.05, recovery_cut_threshold=0.02, recovery_target=0.03),
         ),
         # Shakeout-heavy signals - trailing stop, delayed tightening, wider initial stop
         "BEAR_PROBE": ExitConfig(
             stop_loss_pct=0.065, take_profit_pct=0.60, max_hold_days=11, scale_down_day=7,
             profit_lock_threshold=0.25, trailing_stop_pct=0.03,  # 3% trailing after profit lock
             stop_tighten_day=8, stop_tighten_factor=0.7,  # Delayed tightening for 40% shakeout
+            recovery=RecoveryConfig(recovery_flip_threshold=0.05, recovery_cut_threshold=0.02, recovery_target=0.03),
         ),
         "MVRV_SHORT": ExitConfig(
             stop_loss_pct=0.070, take_profit_pct=0.60, max_hold_days=12, scale_down_day=7,
             profit_lock_threshold=0.25, trailing_stop_pct=0.04,  # 4% trailing after profit lock
             stop_tighten_day=9, stop_tighten_factor=0.7,  # Delayed tightening for 57% shakeout
+            recovery=RecoveryConfig(recovery_flip_threshold=0.05, recovery_cut_threshold=0.02, recovery_target=0.03),
         ),
         # Range-bound strategy - tighter take-profit, no trailing
         "IRON_CONDOR": ExitConfig(
             stop_loss_pct=0.068, take_profit_pct=0.50, max_hold_days=9, scale_down_day=8,
             profit_lock_threshold=0.30, trailing_stop_pct=0.0,
             stop_tighten_day=7, stop_tighten_factor=0.5,
+            # No recovery config for IRON_CONDOR (neutral direction)
         ),
     },
     
@@ -450,6 +506,53 @@ POLICY_V1 = PolicyVersion(
         "BEAR_PROBE": 0.047,   # 58.8% × 8%
         "IRON_CONDOR": 0.063,  # 63.1% × 10%
         "MVRV_SHORT": 0.060,   # 66.7% × 9%
+    },
+    
+    # Recovery configurations per signal type
+    # Based on analysis findings showing +32% net edge for flipping vs holding
+    # Thresholds calibrated from recovery MFE distribution analysis
+    recovery_configs={
+        "CALL": RecoveryConfig(
+            recovery_flip_threshold=0.05,  # 5% MFE threshold for flip recommendation
+            recovery_cut_threshold=0.02,   # 2% MFE threshold for cut losses
+            recovery_target=0.03,          # 3% profit target for recovery trades
+        ),
+        "PUT": RecoveryConfig(
+            recovery_flip_threshold=0.05,
+            recovery_cut_threshold=0.02,
+            recovery_target=0.03,
+        ),
+        "OPTION_CALL": RecoveryConfig(
+            recovery_flip_threshold=0.05,  # Always flip - 100% edge found
+            recovery_cut_threshold=0.02,
+            recovery_target=0.03,
+        ),
+        "OPTION_PUT": RecoveryConfig(
+            recovery_flip_threshold=0.05,
+            recovery_cut_threshold=0.02,
+            recovery_target=0.03,
+        ),
+        "TACTICAL_PUT": RecoveryConfig(
+            recovery_flip_threshold=0.05,  # +44.4% edge for flipping
+            recovery_cut_threshold=0.02,
+            recovery_target=0.03,
+        ),
+        "BULL_PROBE": RecoveryConfig(
+            recovery_flip_threshold=0.05,  # +22.2% edge for flipping
+            recovery_cut_threshold=0.02,
+            recovery_target=0.03,
+        ),
+        "BEAR_PROBE": RecoveryConfig(
+            recovery_flip_threshold=0.05,  # +33.3% edge for flipping
+            recovery_cut_threshold=0.02,
+            recovery_target=0.03,
+        ),
+        "MVRV_SHORT": RecoveryConfig(
+            recovery_flip_threshold=0.05,  # +14.3% edge for flipping
+            recovery_cut_threshold=0.02,
+            recovery_target=0.03,
+        ),
+        # IRON_CONDOR excluded from recovery analysis (neutral direction)
     },
     
     liquidity=LiquidityConfig(
@@ -511,7 +614,7 @@ def _coerce_exit_config(payload: dict, base_config: Optional[ExitConfig] = None)
     
     The calibration file only contains basic exit params (stop_loss_pct, take_profit_pct,
     max_hold_days, scale_down_day). Path-aware fields (trailing_stop_pct, profit_lock_threshold,
-    stop_tighten_day, stop_tighten_factor) are preserved from the base policy.
+    stop_tighten_day, stop_tighten_factor) and recovery config are preserved from the base policy.
     """
     return ExitConfig(
         stop_loss_pct=float(payload["stop_loss_pct"]),
@@ -523,6 +626,8 @@ def _coerce_exit_config(payload: dict, base_config: Optional[ExitConfig] = None)
         trailing_stop_pct=base_config.trailing_stop_pct if base_config else 0.0,
         stop_tighten_day=base_config.stop_tighten_day if base_config else None,
         stop_tighten_factor=base_config.stop_tighten_factor if base_config else 0.5,
+        # Preserve recovery config from base config if available
+        recovery=base_config.recovery if base_config else None,
     )
 
 

@@ -193,6 +193,9 @@ def classify_bear_market_state(row: pd.Series) -> MarketState:
     # Bulish macro structure but recent buyers are somehow profitable in a bear
     if mvrv_bull and m60_bucket == "profitable":
         return MarketState.TRANSITION_CHOP
+    # Breakeven valuation, no inflow, but macro bullish — conflicting signals
+    if m60_bucket == "breakeven" and not mdia_inflow and mvrv_bull:
+        return MarketState.TRANSITION_CHOP
         
     return MarketState.NO_TRADE
 
@@ -294,7 +297,7 @@ def build_explain_trace(row: pd.Series, fusion_result: FusionResult = None) -> l
             {"state": MarketState.BEAR_RALLY_LONG.value, "matched": bool(m60_bucket in {"deep_underwater", "underwater"} and mdia_inflow and (mvrv_macro_neutral or mvrv_macro_bullish)), "details": f"mvrv_60d={m60_bucket}, mdia_inflow={mdia_inflow}, neutral_or_bull_macro={(mvrv_macro_neutral or mvrv_macro_bullish)}"},
             {"state": MarketState.BEAR_CONTINUATION_SHORT.value, "matched": bool(m60_bucket == "profitable" and mdia_non_inflow and (c.get('mdia_aging', 0)==1 or mvrv_macro_bearish)), "details": f"mvrv_60d={m60_bucket}, mdia_inflow={mdia_inflow}, aging_or_bear_macro={(c.get('mdia_aging', 0)==1 or mvrv_macro_bearish)}"},
             {"state": MarketState.LATE_DISTRIBUTION_SHORT.value, "matched": bool(m60_bucket in {"breakeven", "profitable"} and mdia_non_inflow and (mvrv_macro_bearish or mvrv_macro_neutral)), "details": f"mvrv_60d={m60_bucket}, mdia_inflow={mdia_inflow}, bear_or_neutral_macro={(mvrv_macro_bearish or mvrv_macro_neutral)}"},
-            {"state": MarketState.TRANSITION_CHOP.value, "matched": bool((m60_bucket in {"deep_underwater", "underwater"} and mdia_non_inflow) or (m60_bucket in {"breakeven", "profitable"} and mdia_inflow) or (mvrv_macro_bullish and m60_bucket == "profitable")), "details": f"mvrv_60d={m60_bucket}, mdia_inflow={mdia_inflow}, macro_bullish={mvrv_macro_bullish}"},
+            {"state": MarketState.TRANSITION_CHOP.value, "matched": bool((m60_bucket in {"deep_underwater", "underwater"} and mdia_non_inflow) or (m60_bucket in {"breakeven", "profitable"} and mdia_inflow) or (mvrv_macro_bullish and m60_bucket == "profitable") or (m60_bucket == "breakeven" and mdia_non_inflow and mvrv_macro_bullish)), "details": f"mvrv_60d={m60_bucket}, mdia_inflow={mdia_inflow}, macro_bullish={mvrv_macro_bullish}"},
         ]
     else:
         trace = [
