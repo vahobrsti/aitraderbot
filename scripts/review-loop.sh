@@ -23,7 +23,7 @@ echo "Found: $CONTEXT_FILE"
 echo ""
 
 echo "=== Step 2: Run Codex review ==="
-bash scripts/codex-review-context.sh
+bash scripts/codex-review.sh
 echo ""
 
 echo "=== Step 3: Latest review ==="
