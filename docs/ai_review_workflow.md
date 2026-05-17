@@ -63,16 +63,32 @@ This will:
 The review script determines which changes to review using this priority:
 
 1. **Explicit CLI argument** — `./scripts/codex-review.sh <base-ref>`
-2. **`BASE_COMMIT:` marker** in `implementation-context.md` — parsed automatically
-3. **Upstream branch** — tries `origin/main`, `origin/develop`, `origin/master`
-4. **Fallback** — `HEAD~1`
+2. **`COMMITS:` marker** in `implementation-context.md` — cherry-picked commit hashes (for interleaved work)
+3. **`BASE_COMMIT:` marker** in `implementation-context.md` — contiguous range
+4. **Upstream branch** — tries `origin/main`, `origin/develop`, `origin/master`
+5. **Fallback** — `HEAD~1`
 
-This solves the common problem where changes are already committed by the time you run the review — `git diff` alone would show nothing.
+This solves two common problems:
+- Changes already committed by the time you run the review (`git diff` alone shows nothing)
+- Multiple features interleaved in the same branch (only your commits get reviewed)
 
 ### Implementation context
 
-The implementation agent writes a structured context file (max 15 bullets) covering:
-- `BASE_COMMIT: <hash>` — the commit before work started (used to scope the review diff)
+The implementation agent writes a structured context file (max 15 bullets) with a **commit scope header**:
+
+**Option A — Contiguous range** (all commits since a base are yours):
+```
+BASE_COMMIT: abc1234
+```
+
+**Option B — Cherry-picked commits** (your work is mixed with unrelated commits):
+```
+COMMITS: abc1234 def5678 ghi9012
+```
+
+The agent identifies relevant commits by running `git log --oneline --no-merges -20` and listing only those belonging to the current task.
+
+Followed by the context body:
 - Purpose of the change
 - Key logic changes with file paths
 - Assumptions and tradeoffs
@@ -90,7 +106,8 @@ The reviewer also flags **drift** — cases where the diff doesn't match what th
 ## Tips
 
 - Keep `implementation-context.md` focused. If it's too long, the reviewer loses signal.
-- Always include `BASE_COMMIT:` — without it, the script guesses and may review the wrong range.
+- Always include `BASE_COMMIT:` or `COMMITS:` — without it, the script guesses and may review the wrong range.
+- Use `COMMITS:` when you've made multiple unrelated commits on the same branch and only want specific ones reviewed.
 - For large PRs, consider splitting into smaller commits and reviewing incrementally.
 - The review is stateless by design — each pass is independent. If you want continuity, paste the previous review into your next prompt to Claude.
 - Reviews are gitignored (`.ai-reviews/` is in `.gitignore`), so they won't pollute your repo.
