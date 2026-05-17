@@ -292,14 +292,27 @@ class Command(BaseCommand):
             option_type=option_type,
         ).aggregate(Max('timestamp'))['timestamp__max']
         
+        used_fallback_date = False
         if not latest_ts:
-            # Try most recent date with option data
+            # No same-day data — fall back to most recent chain
             latest_ts = OptionSnapshot.objects.filter(
                 option_type=option_type,
             ).aggregate(Max('timestamp'))['timestamp__max']
+            used_fallback_date = True
         
         if not latest_ts:
             return None
+        
+        # Warn if using a different date's snapshot
+        if used_fallback_date:
+            actual_date = latest_ts.date() if hasattr(latest_ts, 'date') else latest_ts
+            self.stderr.write(self.style.WARNING(
+                f"⚠️  No option chain for {signal_date}. Using snapshot from {actual_date}. "
+                f"Prices may not reflect {signal_date} conditions."
+            ))
+        
+        # Track pricing date mismatch for downstream consumers
+        pricing_date_mismatch = used_fallback_date
         
         # Get all options in DTE range
         options = list(OptionSnapshot.objects.filter(
@@ -400,6 +413,7 @@ class Command(BaseCommand):
             "direction": direction,
             "option_type": option_type,
             "is_real_chain": True,
+            "pricing_date_mismatch": pricing_date_mismatch,
             "snapshot_timestamp": latest_ts.isoformat(),
             "signal_date": signal_date,
             "spot_price": snapshot_spot,
@@ -621,10 +635,24 @@ class Command(BaseCommand):
         # Get MVRV-based strikes
         condor_strikes = self._compute_condor_strikes(spot, signal_date)
         
-        # Find latest option snapshot
-        latest_ts = OptionSnapshot.objects.aggregate(Max('timestamp'))['timestamp__max']
+        # Find latest option snapshot for the requested date
+        latest_ts = OptionSnapshot.objects.filter(
+            timestamp__date=signal_date,
+        ).aggregate(Max('timestamp'))['timestamp__max']
+        
+        used_fallback_date = False
+        if not latest_ts:
+            latest_ts = OptionSnapshot.objects.aggregate(Max('timestamp'))['timestamp__max']
+            used_fallback_date = True
+        
         if not latest_ts:
             return None
+        
+        if used_fallback_date:
+            actual_date = latest_ts.date() if hasattr(latest_ts, 'date') else latest_ts
+            self.stderr.write(self.style.WARNING(
+                f"⚠️  No option chain for {signal_date}. Using snapshot from {actual_date}."
+            ))
         
         snapshot_spot = float(OptionSnapshot.objects.filter(timestamp=latest_ts).first().spot_price)
         
@@ -647,15 +675,71 @@ class Command(BaseCommand):
         if not call_options or not put_options:
             return None
         
-        # Find short call (closest to condor_strikes.short_call)
+        # Find short call (closest to condor_strikes.short_call, OTM)
         target_short_call = condor_strikes.short_call if condor_strikes else snapshot_spot * 1.10
-        short_call = min(call_options, key=lambda x: abs(float(x.strike) - target_short_call))
+        short_call = min(
+            [o for o in call_options if float(o.strike) >= snapshot_spot],
+            key=lambda x: abs(float(x.strike) - target_short_call),
+            default=None
+        )
+        if not short_call:
+            return None
         
-        # Find short put (closest to condor_strikes.short_put)
+        # Find short put (closest to condor_strikes.short_put, SAME EXPIRY as short call)
         target_short_put = condor_strikes.short_put if condor_strikes else snapshot_spot * 0.90
-        short_put = min(put_options, key=lambda x: abs(float(x.strike) - target_short_put))
+        same_expiry_puts = [o for o in put_options if o.expiry == short_call.expiry]
+        if not same_expiry_puts:
+            return None  # Cannot build valid condor without same-expiry puts
+        short_put = min(
+            [o for o in same_expiry_puts if float(o.strike) <= snapshot_spot],
+            key=lambda x: abs(float(x.strike) - target_short_put),
+            default=None
+        )
+        if not short_put:
+            return None
         
-        # Calculate R:R
+        # Find long call wing (same expiry, higher strike than short call)
+        condor_policy = policy.condor
+        wing_offset = condor_policy.wing_offset_usd if hasattr(condor_policy, 'wing_offset_usd') else 5000
+        long_call_target = float(short_call.strike) + wing_offset
+        long_call_candidates = [o for o in call_options 
+                                if o.expiry == short_call.expiry and float(o.strike) > float(short_call.strike)]
+        long_call = min(long_call_candidates, key=lambda x: abs(float(x.strike) - long_call_target)) if long_call_candidates else None
+        
+        # Find long put wing (same expiry, lower strike than short put)
+        long_put_target = float(short_put.strike) - wing_offset
+        long_put_candidates = [o for o in put_options 
+                               if o.expiry == short_call.expiry and float(o.strike) < float(short_put.strike)]
+        long_put = min(long_put_candidates, key=lambda x: abs(float(x.strike) - long_put_target)) if long_put_candidates else None
+        
+        # Require all 4 legs for a valid condor — fail closed if wings unavailable
+        if not long_call or not long_put:
+            return None  # Cannot build valid iron condor without wing protection
+        
+        # Calculate real metrics
+        net_credit = (
+            float(short_call.bid or 0) + float(short_put.bid or 0) -
+            float(long_call.ask or 0) - float(long_put.ask or 0)
+        )
+        
+        # Fail closed if not a valid credit structure
+        if net_credit <= 0:
+            return None  # Not a viable income condor — zero or negative credit
+        
+        call_wing_width = float(long_call.strike) - float(short_call.strike)
+        put_wing_width = float(short_put.strike) - float(long_put.strike)
+        wing_width = max(call_wing_width, put_wing_width)
+        max_profit = net_credit
+        max_loss = wing_width - net_credit
+        
+        if max_loss <= 0 or max_profit <= 0:
+            return None  # Invalid risk/reward structure
+        
+        real_rr = max_profit / max_loss
+        upper_breakeven = float(short_call.strike) + net_credit
+        lower_breakeven = float(short_put.strike) - net_credit
+        
+        # Calculate policy R:R for reference
         if exit_cfg:
             policy_rr = (spread_width_pct * exit_cfg.take_profit_pct) / exit_cfg.stop_loss_pct
         else:
@@ -666,6 +750,7 @@ class Command(BaseCommand):
             "direction": "NEUTRAL",
             "option_type": "condor",
             "is_real_chain": True,
+            "pricing_date_mismatch": used_fallback_date,
             "snapshot_timestamp": latest_ts.isoformat(),
             "signal_date": signal_date,
             "spot_price": snapshot_spot,
@@ -713,10 +798,39 @@ class Command(BaseCommand):
             } if condor_strikes else None,
             
             "risk_reward": {
-                "ratio": policy_rr,
-                "ratio_formatted": f"1:{policy_rr:.2f}",
+                "ratio": real_rr,
+                "ratio_formatted": f"1:{real_rr:.2f}" if real_rr else "N/A",
+                "policy_ratio": policy_rr,
                 "risk_pct": exit_cfg.stop_loss_pct if exit_cfg else None,
                 "risk_usd": snapshot_spot * exit_cfg.stop_loss_pct if exit_cfg else None,
+            },
+            
+            # Full 4-leg structure
+            "long_call_wing": {
+                "symbol": long_call.symbol,
+                "action": "BUY",
+                "strike": float(long_call.strike),
+                "delta": float(long_call.delta) if long_call.delta else None,
+                "ask": float(long_call.ask) if long_call.ask else None,
+                "open_interest": int(long_call.open_interest) if long_call.open_interest else 0,
+            },
+            "long_put_wing": {
+                "symbol": long_put.symbol,
+                "action": "BUY",
+                "strike": float(long_put.strike),
+                "delta": float(long_put.delta) if long_put.delta else None,
+                "ask": float(long_put.ask) if long_put.ask else None,
+                "open_interest": int(long_put.open_interest) if long_put.open_interest else 0,
+            },
+            
+            # Real metrics from option chain
+            "condor_metrics": {
+                "net_credit": net_credit,
+                "max_profit": max_profit,
+                "max_loss": max_loss,
+                "wing_width": wing_width,
+                "upper_breakeven": upper_breakeven,
+                "lower_breakeven": lower_breakeven,
             },
             
             "exit_rules": {

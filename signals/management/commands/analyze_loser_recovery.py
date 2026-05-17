@@ -75,7 +75,27 @@ class PolicyConfigAdapter:
     
     Delegates to RecoveryDecisionEngine for checkpoint days and adverse thresholds,
     with fallback to hardcoded values if the service is unavailable.
+    Uses a cached engine instance keyed by policy version to avoid repeated loading
+    while invalidating on policy changes.
     """
+    
+    _engine_cache: Optional[RecoveryDecisionEngine] = None
+    _cached_version: Optional[str] = None
+    
+    @classmethod
+    def _get_engine(cls) -> RecoveryDecisionEngine:
+        """Get or create a cached RecoveryDecisionEngine instance. Invalidates on policy version change."""
+        policy = get_policy()
+        if cls._engine_cache is None or cls._cached_version != policy.version:
+            cls._engine_cache = RecoveryDecisionEngine(policy)
+            cls._cached_version = policy.version
+        return cls._engine_cache
+    
+    @classmethod
+    def reset_cache(cls):
+        """Reset the cached engine (useful for testing)."""
+        cls._engine_cache = None
+        cls._cached_version = None
     
     @classmethod
     def get_checkpoint_day(cls, signal_type: str) -> int:
@@ -86,8 +106,7 @@ class PolicyConfigAdapter:
         Falls back to hardcoded values if unavailable.
         """
         try:
-            engine = RecoveryDecisionEngine(get_policy())
-            return engine.get_checkpoint_day(signal_type)
+            return cls._get_engine().get_checkpoint_day(signal_type)
         except Exception:
             return TTH_P75_BY_TYPE_FALLBACK.get(signal_type, 7)
     
@@ -110,8 +129,7 @@ class PolicyConfigAdapter:
             return override
             
         try:
-            engine = RecoveryDecisionEngine(get_policy())
-            return engine.get_adverse_threshold(signal_type)
+            return cls._get_engine().get_adverse_threshold(signal_type)
         except Exception:
             return MAE_W_P75_BY_TYPE_FALLBACK.get(signal_type, 0.04) / 2
 
@@ -574,12 +592,13 @@ class Command(BaseCommand):
 
             original_hit = np.any(favorable >= target)
 
-            # Check if trade already hit target BEFORE checkpoint
-            # If so, it's not a valid recovery candidate (thesis: "has not hit by checkpoint")
+            # Check if trade already hit target on or before checkpoint day
+            # Since favorable is computed from intraday highs/lows, a hit on checkpoint day
+            # means the trade would already be closed — it should not become a recovery candidate
             pre_checkpoint_favorable = favorable[:checkpoint_day]
             hit_before_checkpoint = np.any(pre_checkpoint_favorable >= target)
             if hit_before_checkpoint:
-                continue  # Already succeeded before checkpoint, not a recovery candidate
+                continue  # Already hit target, not a recovery candidate
 
             # Get checkpoint price and return
             checkpoint_price = closes[checkpoint_day - 1]  # -1 because path starts at day 1

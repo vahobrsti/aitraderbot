@@ -232,6 +232,10 @@ class PolicyVersion:
             "clean_win_pct": 0.75,
         })
     
+    def has_path_profile(self, signal_type: str) -> bool:
+        """Check if a signal type has an explicitly configured path profile."""
+        return signal_type in self.path_profiles
+    
     def is_shakeout_heavy(self, signal_type: str) -> bool:
         """
         Check if signal type has shakeout-heavy paths (>40% shakeout).
@@ -274,7 +278,8 @@ class PolicyVersion:
         """
         Get recovery configuration for a signal type.
         
-        Returns signal-specific recovery config or default values.
+        Checks top-level recovery_configs first, then falls back to
+        ExitConfig.recovery if available, then defaults.
         
         Args:
             signal_type: Signal type (e.g., "CALL", "PUT", "MVRV_SHORT")
@@ -282,7 +287,17 @@ class PolicyVersion:
         Returns:
             RecoveryConfig with thresholds and targets for recovery decisions
         """
-        return self.recovery_configs.get(signal_type, RecoveryConfig())
+        # Primary: top-level recovery_configs
+        if signal_type in self.recovery_configs:
+            return self.recovery_configs[signal_type]
+        
+        # Fallback: ExitConfig.recovery field (if populated via calibration)
+        exit_cfg = self.exit_params.get(signal_type)
+        if exit_cfg and exit_cfg.recovery:
+            return exit_cfg.recovery
+        
+        # Default
+        return RecoveryConfig()
     
     def get_recovery_flip_threshold(self, signal_type: str) -> float:
         """Get recovery flip threshold for a signal type."""
@@ -308,7 +323,13 @@ class PolicyVersion:
             "signal_delta_targets": self.signal_delta_targets,
             "spread_enabled": self.spread_enabled,
             "spread_width_pct": self.spread_width_pct,
-            "exit_params": {k: vars(v) for k, v in self.exit_params.items()},
+            "exit_params": {
+                k: {
+                    **{field: val for field, val in vars(v).items() if field != "recovery"},
+                    "recovery": vars(v.recovery) if v.recovery else None,
+                }
+                for k, v in self.exit_params.items()
+            },
             "expected_edge_by_signal": self.expected_edge_by_signal,
             "path_profiles": self.path_profiles,
             "recovery_configs": {k: vars(v) for k, v in self.recovery_configs.items()},

@@ -105,9 +105,23 @@ elif [ "$DIFF_MODE" = "range" ]; then
   echo ""
 fi
 
-# Uncommitted changes (staged + working tree) — always included
-UNCOMMITTED_DIFF=$(git diff HEAD --stat 2>/dev/null || true)
-UNCOMMITTED_DIFF_FULL=$(git diff HEAD 2>/dev/null || true)
+# Uncommitted changes (staged + working tree)
+# In commits mode: only include if --include-wt flag is passed or if there are no committed diffs
+# In range mode: always include (working tree is part of the review scope)
+if [ "$DIFF_MODE" = "commits" ]; then
+  # In commits mode, uncommitted changes are excluded by default
+  # They can pollute the review with unrelated local edits
+  if [ "${INCLUDE_WT:-}" = "1" ] || [ -z "$COMMITTED_DIFF_FULL" ]; then
+    UNCOMMITTED_DIFF=$(git diff HEAD --stat 2>/dev/null || true)
+    UNCOMMITTED_DIFF_FULL=$(git diff HEAD 2>/dev/null || true)
+  else
+    UNCOMMITTED_DIFF=""
+    UNCOMMITTED_DIFF_FULL=""
+  fi
+else
+  UNCOMMITTED_DIFF=$(git diff HEAD --stat 2>/dev/null || true)
+  UNCOMMITTED_DIFF_FULL=$(git diff HEAD 2>/dev/null || true)
+fi
 
 # Check we have something to review
 if [ -z "$COMMITTED_DIFF_FULL" ] && [ -z "$UNCOMMITTED_DIFF_FULL" ]; then
@@ -180,6 +194,28 @@ Focus on:
 - whether the diff matches the stated implementation context (flag drift)
 
 Do not modify files.
+Hard limits:
+- Return at most 3 findings total unless there are Blocking issues.
+- Only include findings that are actionable from this diff.
+- Do not suggest broad refactors.
+- Do not repeat implementation-context content.
+- Do not ask for another review pass unless there is a Blocking issue.
+
+For each finding, use this format:
+- Severity: Blocking | Should-fix | Nice-to-have
+- File/path:
+- Issue:
+- Why it matters:
+- Minimal fix:
+- Confidence: High | Medium | Low
+
+End with exactly one of:
+- APPROVE
+- APPROVE_WITH_SHOULD_FIX
+- BLOCK
+If there are no Blocking or Should-fix issues, do not invent Nice-to-have items. Return APPROVE.
+Do not reward over-engineering.
+Do not penalize intentionally simplified solutions unless correctness is affected.
 " | tee "$OUT"
 
 echo

@@ -15,18 +15,19 @@ if [ ! -f "$CONTEXT_FILE" ]; then
   echo ""
   echo "Ask your implementation agent to generate it:"
   echo "  'Update .ai-reviews/implementation-context.md per AGENTS.md rules'"
-  echo "  (Must include BASE_COMMIT: <hash> on the first line)"
+  echo "  (Must include BASE_COMMIT: or COMMITS: header)"
   echo ""
   exit 1
 fi
 
-# Check for BASE_COMMIT marker
-if ! grep -q 'BASE_COMMIT:' "$CONTEXT_FILE" 2>/dev/null; then
+# Check for commit scope marker (either BASE_COMMIT or COMMITS)
+if ! grep -qE '(BASE_COMMIT:|COMMITS:)' "$CONTEXT_FILE" 2>/dev/null; then
   echo ""
-  echo "WARNING: No BASE_COMMIT marker found in $CONTEXT_FILE"
+  echo "WARNING: No commit scope marker found in $CONTEXT_FILE"
   echo "The review will fall back to upstream or HEAD~1."
-  echo "For accurate scoping, ask your agent to add:"
+  echo "For accurate scoping, ask your agent to add one of:"
   echo "  BASE_COMMIT: <hash-before-work-started>"
+  echo "  COMMITS: <hash1> <hash2> <hash3>"
   echo ""
 fi
 
