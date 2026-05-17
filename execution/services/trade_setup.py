@@ -144,6 +144,9 @@ class TradeSetup:
     validation_warnings: list[str] = field(default_factory=list)
     validation_blocking: list[str] = field(default_factory=list)
     
+    # Extra legs (for multi-leg structures like iron condors)
+    extra_legs: list[LegSetup] = field(default_factory=list)
+    
     # Path profile (from historical analysis) - optional
     path_profile: Optional[PathProfile] = None
     
@@ -178,6 +181,18 @@ class TradeSetup:
                     "price": self.short_leg.price,
                     "open_interest": self.short_leg.open_interest,
                 } if self.short_leg else None,
+                "extra": [
+                    {
+                        "symbol": leg.symbol,
+                        "action": leg.action,
+                        "strike": leg.strike,
+                        "delta": leg.delta,
+                        "iv": leg.iv,
+                        "price": leg.price,
+                        "open_interest": leg.open_interest,
+                    }
+                    for leg in self.extra_legs
+                ] if self.extra_legs else None,
             },
             "metrics": {
                 "spread_width": self.spread_width,
@@ -298,7 +313,7 @@ class TradeSetup:
             "*EXIT RULES*",
             "━━━━━━━━━━━━━━━━━━━━━━",
             f"🛑 Stop (Spot): BTC > `${self.exit_rules.stop_loss_spot:,.0f}` (+{self.exit_rules.stop_loss_spot_pct*100:.1f}%)",
-            f"🛑 Stop (Value): Spread < `${self.exit_rules.stop_loss_value:,.0f}` ({self.exit_rules.stop_loss_value_pct*100:.0f}% lost)",
+            f"🛑 Stop (Value): Spread {'>' if self.net_debit < 0 else '<'} `${self.exit_rules.stop_loss_value:,.0f}` ({self.exit_rules.stop_loss_value_pct*100:.0f}% {'of max loss' if self.net_debit < 0 else 'lost'})",
             f"✅ Take Profit: `{self.exit_rules.take_profit_pct*100:.0f}%` = `${self.exit_rules.take_profit_value:,.0f}`/contract",
             f"⏰ Max Hold: {self.exit_rules.max_hold_days}d (until {self.exit_rules.max_hold_date})",
         ])
@@ -931,7 +946,7 @@ class TradeSetupBuilder:
         total_max_profit = contracts * max_profit
         
         # Build leg setups (use short call as primary "long" leg for display)
-        # Note: For condors, we show all 4 legs differently
+        # Note: For condors, we show all 4 legs — short legs as primary, wings in extra_legs
         long_leg = LegSetup(
             symbol=short_call.symbol,
             action="SELL",  # Short call
@@ -954,11 +969,38 @@ class TradeSetupBuilder:
             bid_ask_spread_pct=float(short_put.spread_pct) if short_put.spread_pct else 0,
         )
         
+        # Wing legs (protective long options)
+        extra_legs = [
+            LegSetup(
+                symbol=long_call.symbol,
+                action="BUY",  # Long call wing
+                strike=float(long_call.strike),
+                delta=float(long_call.delta) if long_call.delta else 0,
+                iv=float(long_call.iv) if long_call.iv else 0,
+                price=float(long_call.ask),
+                open_interest=int(long_call.open_interest) if long_call.open_interest else 0,
+                bid_ask_spread_pct=float(long_call.spread_pct) if long_call.spread_pct else 0,
+            ),
+            LegSetup(
+                symbol=long_put.symbol,
+                action="BUY",  # Long put wing
+                strike=float(long_put.strike),
+                delta=float(long_put.delta) if long_put.delta else 0,
+                iv=float(long_put.iv) if long_put.iv else 0,
+                price=float(long_put.ask),
+                open_interest=int(long_put.open_interest) if long_put.open_interest else 0,
+                bid_ask_spread_pct=float(long_put.spread_pct) if long_put.spread_pct else 0,
+            ),
+        ]
+        
         # Exit rules for condor
+        # For credit structures, stop out when spread value rises (loss grows)
+        # Stop triggers when unrealized loss exceeds stop_loss_pct of max_loss
+        stop_loss_value = net_credit + (max_loss * exit_cfg.stop_loss_pct)
         exit_rules = ExitRules(
             stop_loss_spot=upper_breakeven,  # Upper breakeven as reference
             stop_loss_spot_pct=exit_cfg.stop_loss_pct,
-            stop_loss_value=net_credit * (1 - exit_cfg.stop_loss_pct),
+            stop_loss_value=stop_loss_value,
             stop_loss_value_pct=exit_cfg.stop_loss_pct,
             take_profit_pct=exit_cfg.take_profit_pct,
             take_profit_value=max_profit * exit_cfg.take_profit_pct,
@@ -1016,6 +1058,7 @@ class TradeSetupBuilder:
             dte=int(short_call.dte),
             long_leg=long_leg,  # Short call (primary display)
             short_leg=short_leg,  # Short put
+            extra_legs=extra_legs,  # Wing protection legs
             spread_width=wing_width,
             spread_width_pct=wing_width / spot_price,
             net_debit=-net_credit,  # Negative debit = credit received

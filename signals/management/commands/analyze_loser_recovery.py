@@ -35,6 +35,7 @@ from signals.overlays import apply_overlays, compute_efb_veto, get_size_multipli
 from signals.tactical_puts import tactical_put_inside_bull
 from signals.condor_gate import compute_range_score, check_hard_vetoes, DEFAULT_SCORE_THRESHOLD, CONDOR_COOLDOWN_DAYS
 from execution.services.policy import get_policy
+from execution.services.recovery import RecoveryDecisionEngine
 
 
 # TTH p75 values from entry_policy_design.md (calibrated from path analysis)
@@ -72,8 +73,8 @@ class PolicyConfigAdapter:
     """
     Adapts PolicyVersion to provide recovery analysis parameters.
     
-    Extracts TTH p75 for checkpoint days and MAE(W) p75 for adverse thresholds
-    from the path_profiles in policy.py.
+    Delegates to RecoveryDecisionEngine for checkpoint days and adverse thresholds,
+    with fallback to hardcoded values if the service is unavailable.
     """
     
     @classmethod
@@ -81,42 +82,13 @@ class PolicyConfigAdapter:
         """
         Get checkpoint day for a signal type based on TTH p75 from policy.
         
-        The checkpoint day is when we evaluate if a trade is adverse.
-        Derived from TTH p75 values in the policy's path profiles.
-        Falls back to hardcoded values if policy data unavailable.
-        
-        Args:
-            signal_type: Signal type (e.g., "CALL", "PUT", "MVRV_SHORT")
-            
-        Returns:
-            Checkpoint day (1-indexed from trade entry)
+        Delegates to RecoveryDecisionEngine.get_checkpoint_day().
+        Falls back to hardcoded values if unavailable.
         """
         try:
-            policy = get_policy()
-            profile = policy.get_path_profile(signal_type)
-            
-            # Calculate TTH p75 from policy data if available
-            # For now, use the existing mapping but could be enhanced to derive from policy
-            # Map signal types to their expected TTH p75 values
-            tth_p75_map = {
-                "CALL": 7,
-                "LONG": 7,  # Alias for CALL
-                "PUT": 6,
-                "PRIMARY_SHORT": 6,  # Alias for PUT
-                "OPTION_CALL": 5,
-                "OPTION_PUT": 3,
-                "TACTICAL_PUT": 6,  # 5.5 rounded up
-                "BULL_PROBE": 5,
-                "BEAR_PROBE": 9,  # 8.5 rounded up
-                "MVRV_SHORT": 10,
-                "IRON_CONDOR": 7,
-            }
-            
-            # Use policy-derived value if available, otherwise fallback
-            return tth_p75_map.get(signal_type, 7)
-            
+            engine = RecoveryDecisionEngine(get_policy())
+            return engine.get_checkpoint_day(signal_type)
         except Exception:
-            # Fallback to hardcoded values if policy unavailable
             return TTH_P75_BY_TYPE_FALLBACK.get(signal_type, 7)
     
     @classmethod
@@ -124,8 +96,8 @@ class PolicyConfigAdapter:
         """
         Get adverse threshold for a signal type.
         
-        Calculated as MAE(W) p75 / 2 from path_profiles in policy.
-        Falls back to hardcoded values if policy data unavailable.
+        Delegates to RecoveryDecisionEngine.get_adverse_threshold().
+        Falls back to hardcoded values if unavailable.
         
         Args:
             signal_type: Signal type
@@ -138,18 +110,9 @@ class PolicyConfigAdapter:
             return override
             
         try:
-            policy = get_policy()
-            profile = policy.get_path_profile(signal_type)
-            mae_p75 = profile.get("mae_p75")
-            
-            if mae_p75 is not None:
-                return mae_p75 / 2
-            else:
-                # Fallback to hardcoded values
-                return MAE_W_P75_BY_TYPE_FALLBACK.get(signal_type, 0.04) / 2
-                
+            engine = RecoveryDecisionEngine(get_policy())
+            return engine.get_adverse_threshold(signal_type)
         except Exception:
-            # Fallback to hardcoded values if policy unavailable
             return MAE_W_P75_BY_TYPE_FALLBACK.get(signal_type, 0.04) / 2
 
 
@@ -279,6 +242,18 @@ class Command(BaseCommand):
         fixed_checkpoint = int(options.get("fixed_checkpoint", 7))
         simulate_policy = options.get("simulate_policy", False)
         sensitivity_analysis = options.get("sensitivity_analysis", False)
+
+        # Validate inputs
+        if horizon < 3:
+            self.stderr.write("--horizon must be >= 3")
+            return
+        if checkpoint_mode == "fixed":
+            if fixed_checkpoint < 1:
+                self.stderr.write("--fixed-checkpoint must be >= 1")
+                return
+            if fixed_checkpoint >= horizon:
+                self.stderr.write(f"--fixed-checkpoint ({fixed_checkpoint}) must be less than --horizon ({horizon})")
+                return
 
         # Build trades using same logic as analyze_path_stats
         trades_df = self._build_trades_df(csv_path, options, year_filter, no_overlay, no_cooldown)
@@ -598,6 +573,13 @@ class Command(BaseCommand):
                 favorable = 1.0 - lows / entry_price
 
             original_hit = np.any(favorable >= target)
+
+            # Check if trade already hit target BEFORE checkpoint
+            # If so, it's not a valid recovery candidate (thesis: "has not hit by checkpoint")
+            pre_checkpoint_favorable = favorable[:checkpoint_day]
+            hit_before_checkpoint = np.any(pre_checkpoint_favorable >= target)
+            if hit_before_checkpoint:
+                continue  # Already succeeded before checkpoint, not a recovery candidate
 
             # Get checkpoint price and return
             checkpoint_price = closes[checkpoint_day - 1]  # -1 because path starts at day 1
