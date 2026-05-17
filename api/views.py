@@ -100,8 +100,16 @@ class TradeSetupView(APIView):
         
         # Get signal type from query param or use stored decision
         signal_type = request.query_params.get('type', None)
+        builder = TradeSetupBuilder()
         if signal_type:
             signal_type = signal_type.upper()
+            # Validate against supported signal types
+            direction, _ = builder._get_direction_and_type(signal_type)
+            if direction is None:
+                return Response(
+                    {"error": f"Unsupported signal type: {signal_type}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         else:
             signal_type = signal.trade_decision
         
@@ -113,7 +121,6 @@ class TradeSetupView(APIView):
             )
         
         # Build setup with optional type override
-        builder = TradeSetupBuilder()
         setup = builder.build_setup(signal_date, signal_type=signal_type)
         
         if setup is None:

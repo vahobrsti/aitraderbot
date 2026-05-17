@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "name": "Update Implementation Context",
+  "description": "After completing a task, reminds the agent to update .ai-reviews/implementation-context.md with purpose, logic changes, assumptions, tradeoffs, risks, and review areas per AGENTS.md rules.",
+  "version": "1",
+  "when": {
+    "type": "agentStop"
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "If you just completed an implementation task that modified code files, update .ai-reviews/implementation-context.md per the AGENTS.md review workflow rules. Include: purpose, key logic changes with file paths, assumptions, intentional tradeoffs, known risks, and areas needing careful review. Max 15 bullets. Explain WHY not WHAT. If no code was changed, skip this."
+  }
+}
