@@ -6,7 +6,6 @@ mkdir -p .ai-reviews
 STAMP=$(date +"%Y%m%d-%H%M%S")
 OUT=".ai-reviews/codex-review-$STAMP.md"
 
-codex exec  --last "
 codex exec "
 Review the current git diff using the implementation context in:
 .ai-reviews/implementation-context.md
