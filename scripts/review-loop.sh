@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # review-loop.sh
-# Full review cycle: generate context → Codex review → output for feedback.
+# Full review cycle: verify context → run scoped review → output for feedback.
 set -euo pipefail
 
 REVIEW_DIR=".ai-reviews"
@@ -15,15 +15,26 @@ if [ ! -f "$CONTEXT_FILE" ]; then
   echo ""
   echo "Ask your implementation agent to generate it:"
   echo "  'Update .ai-reviews/implementation-context.md per AGENTS.md rules'"
+  echo "  (Must include BASE_COMMIT: <hash> on the first line)"
   echo ""
   exit 1
+fi
+
+# Check for BASE_COMMIT marker
+if ! grep -q 'BASE_COMMIT:' "$CONTEXT_FILE" 2>/dev/null; then
+  echo ""
+  echo "WARNING: No BASE_COMMIT marker found in $CONTEXT_FILE"
+  echo "The review will fall back to upstream or HEAD~1."
+  echo "For accurate scoping, ask your agent to add:"
+  echo "  BASE_COMMIT: <hash-before-work-started>"
+  echo ""
 fi
 
 echo "Found: $CONTEXT_FILE"
 echo ""
 
 echo "=== Step 2: Run Codex review ==="
-bash scripts/codex-review.sh
+bash scripts/codex-review.sh "${1:-}"
 echo ""
 
 echo "=== Step 3: Latest review ==="

@@ -50,12 +50,13 @@ This will:
 ## How it works
 
 The implementation agent writes a structured context file (max 15 bullets) covering:
+- `BASE_COMMIT: <hash>` — the commit before work started (used to scope the review diff)
 - Purpose of the change
 - Key logic changes with file paths
 - Assumptions and tradeoffs
 - Known risks and fragile areas
 
-The review agent gets this context + the actual git diff and produces a categorized review:
+The review script computes the diff from `BASE_COMMIT` to the current state (committed + uncommitted), embeds it into a self-contained prompt, and sends it to Codex. The review agent produces a categorized review:
 - **Blocking** — must fix before merge
 - **Should-fix** — important but not blocking
 - **Nice-to-have** — suggestions
