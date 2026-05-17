@@ -39,6 +39,9 @@ class TestPolicyConfigAdapter(TestCase):
 
     def setUp(self):
         """Set up test policy data."""
+        # Reset cached engine to ensure test isolation
+        PolicyConfigAdapter.reset_cache()
+        
         # Create a mock policy with test data
         self.mock_policy = PolicyVersion(
             version="test-1.0",
@@ -154,9 +157,9 @@ class TestPolicyConfigAdapter(TestCase):
         """Test fallback to default adverse threshold for unknown signal types."""
         mock_get_policy.return_value = self.mock_policy
         
-        # Test unknown signal type
+        # Test unknown signal type — falls back to calibrated default (0.04 / 2 = 0.02)
         threshold = PolicyConfigAdapter.get_adverse_threshold("UNKNOWN_SIGNAL")
-        expected_fallback = 0.05 / 2  # Default mae_p75 from policy.get_path_profile is 0.05
+        expected_fallback = 0.04 / 2  # Calibrated default for unknown types
         self.assertEqual(
             threshold, 
             expected_fallback,
@@ -391,6 +394,8 @@ class TestEdgeCaseHandling(TestCase):
     def setUp(self):
         """Set up test command instance."""
         self.command = Command()
+        # Reset cached engine to ensure test isolation
+        PolicyConfigAdapter.reset_cache()
 
     @patch('signals.management.commands.analyze_loser_recovery.get_policy')
     def test_missing_policy_data_graceful_handling(self, mock_get_policy):
@@ -416,7 +421,7 @@ class TestEdgeCaseHandling(TestCase):
         
         # Test adverse threshold for missing signal type
         threshold = PolicyConfigAdapter.get_adverse_threshold("MISSING_SIGNAL")
-        expected_fallback = 0.05 / 2  # Default mae_p75 from policy.get_path_profile is 0.05
+        expected_fallback = 0.04 / 2  # Calibrated default for unknown types
         self.assertEqual(
             threshold, 
             expected_fallback,

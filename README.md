@@ -712,6 +712,10 @@ python manage.py test execution.tests_trade_setup
 python manage.py test execution.tests
 python manage.py test execution.tests_recovery
 python manage.py test signals.tests
+python manage.py test signals.tests_recovery_candidate
+python manage.py test signals.tests_recovery_mfe_analysis
+python manage.py test signals.tests_recovery_policy_validation
+python manage.py test signals.tests_recovery_performance_regression
 
 # Run with verbosity
 python manage.py test --verbosity=2

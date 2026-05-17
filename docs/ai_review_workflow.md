@@ -7,9 +7,8 @@ Two-agent feedback loop: implementation agent (Claude/Kiro) builds, review agent
 | File | Purpose |
 |------|---------|
 | `AGENTS.md` | Repo-level rules — tells agents to auto-generate context after tasks |
-| `.ai-reviews/implementation-context.md` | Structured handoff: what changed, why, and what's risky |
-| `scripts/codex-review-context.sh` | Feeds context + diff to Codex, saves review |
-| `scripts/review-loop.sh` | Full cycle orchestrator |
+| `.ai-reviews/implementation-context.md` | Structured handoff: what changed, why, what's risky, and the base commit |
+| `scripts/codex-review.sh` | Computes scoped diff, embeds it + context into prompt, runs Codex review |
 
 ## Prerequisites
 
@@ -18,52 +17,80 @@ Two-agent feedback loop: implementation agent (Claude/Kiro) builds, review agent
 
 ## Usage
 
-### Quick review (single pass)
+```bash
+./scripts/codex-review.sh
+```
+
+Optionally pass a base ref to override automatic detection:
 
 ```bash
-./scripts/codex-review-context.sh
+./scripts/codex-review.sh HEAD~3
+./scripts/codex-review.sh origin/main
 ```
 
-### Full loop
+One pass is enough. Only re-run if the review returns **BLOCK**.
 
-```bash
-./scripts/review-loop.sh
-```
-
-This will:
-1. Check that `implementation-context.md` exists
-2. Run Codex review against context + diff
-3. Save review to `.ai-reviews/codex-review-<timestamp>.md`
-4. Show preview + next steps
-
-### Manual workflow
+### Workflow
 
 ```
-1. Give task to Claude/Kiro
-2. Agent implements + updates .ai-reviews/implementation-context.md
-3. Run: ./scripts/codex-review-context.sh
-4. Paste review back to Claude/Kiro
-5. Agent fixes issues + updates context
-6. Repeat until clean
+1. Note current HEAD before starting: git rev-parse HEAD
+2. Give task to Claude/Kiro
+3. Agent implements + updates .ai-reviews/implementation-context.md (with BASE_COMMIT)
+4. Run: ./scripts/codex-review.sh
+5. If BLOCK: paste review back, agent fixes, re-run
+6. If APPROVE or APPROVE_WITH_SHOULD_FIX: done
 ```
 
 ## How it works
 
-The implementation agent writes a structured context file (max 15 bullets) covering:
-- `BASE_COMMIT: <hash>` — the commit before work started (used to scope the review diff)
+### Diff scoping
+
+The review script determines which changes to review using this priority:
+
+1. **Explicit CLI argument** — `./scripts/codex-review.sh <base-ref>`
+2. **`COMMITS:` marker** in `implementation-context.md` — cherry-picked commit hashes (for interleaved work)
+3. **`BASE_COMMIT:` marker** in `implementation-context.md` — contiguous range
+4. **Upstream branch** — tries `origin/main`, `origin/develop`, `origin/master`
+5. **Fallback** — `HEAD~1`
+
+### Implementation context
+
+The implementation agent writes a structured context file (max 10 bullets) with a **commit scope header**:
+
+**Option A — Contiguous range:**
+```
+BASE_COMMIT: abc1234
+```
+
+**Option B — Cherry-picked commits:**
+```
+COMMITS: abc1234 def5678 ghi9012
+```
+
+The agent identifies relevant commits via `git log --oneline --no-merges -10`.
+
+Context body covers:
 - Purpose of the change
 - Key logic changes with file paths
 - Assumptions and tradeoffs
 - Known risks and fragile areas
 
-The review script computes the diff from `BASE_COMMIT` to the current state (committed + uncommitted), embeds it into a self-contained prompt, and sends it to Codex. The review agent produces a categorized review:
+Don't pad. If nothing is risky, say so in one line.
+
+### Review output
+
+Categorized findings (max 3 unless there are Blocking issues):
 - **Blocking** — must fix before merge
 - **Should-fix** — important but not blocking
 - **Nice-to-have** — suggestions
 
+Ends with one of: `APPROVE`, `APPROVE_WITH_SHOULD_FIX`, `BLOCK`.
+
+The reviewer also flags **drift** — cases where the diff doesn't match what the context claims.
+
 ## Tips
 
 - Keep `implementation-context.md` focused. If it's too long, the reviewer loses signal.
-- For large PRs, consider splitting into smaller commits and reviewing incrementally.
-- The review is stateless by design — each pass is independent. If you want continuity, paste the previous review into your next prompt to Claude.
-- Reviews are gitignored (`.ai-reviews/` is in `.gitignore`), so they won't pollute your repo.
+- Always include `BASE_COMMIT:` or `COMMITS:` — without it, the script guesses.
+- Reviews are gitignored (`.ai-reviews/` is in `.gitignore`).
+- Very large diffs may exceed Codex's context window. Pass a narrower base ref if needed.

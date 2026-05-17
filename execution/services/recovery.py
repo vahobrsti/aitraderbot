@@ -193,6 +193,17 @@ class RecoveryDecisionEngine:
             RecoveryDecision with action, confidence, and rationale
         """
         try:
+            # Reject neutral/unsupported signal types (e.g., IRON_CONDOR)
+            direction = self._get_direction(signal_type)
+            if direction == "NEUTRAL":
+                return RecoveryDecision(
+                    action="HOLD",
+                    confidence=1.0,
+                    checkpoint_return=0.0,
+                    recovery_potential=0.0,
+                    rationale=f"Recovery analysis not applicable for neutral signal type: {signal_type}"
+                )
+            
             # Get checkpoint day from policy
             checkpoint_day = self._get_checkpoint_day(signal_type)
             
@@ -207,7 +218,6 @@ class RecoveryDecisionEngine:
                 )
             
             # Calculate current return
-            direction = self._get_direction(signal_type)
             if direction == "LONG":
                 current_return = current_price / entry_price - 1.0
             else:  # SHORT
@@ -224,7 +234,7 @@ class RecoveryDecisionEngine:
                     action="HOLD",
                     confidence=0.8,
                     checkpoint_return=current_return,
-                    recovery_potential=0.5,  # Neutral since not adverse
+                    recovery_potential=0.0,  # Not applicable — trade is not adverse
                     rationale=f"Trade is not adverse (return: {current_return:.2%}, threshold: {-adverse_threshold:.2%})"
                 )
             
@@ -335,13 +345,17 @@ class RecoveryDecisionEngine:
         Returns:
             True if the trade is a recovery candidate
         """
+        # Reject neutral/unsupported signal types
+        direction = self._get_direction(signal_type)
+        if direction == "NEUTRAL":
+            return False
+        
         # Check if at checkpoint
         checkpoint_day = self._get_checkpoint_day(signal_type)
         if days_held < checkpoint_day:
             return False
         
         # Check if adverse
-        direction = self._get_direction(signal_type)
         if direction == "LONG":
             current_return = current_price / entry_price - 1.0
         else:  # SHORT
@@ -351,31 +365,36 @@ class RecoveryDecisionEngine:
         return current_return < -adverse_threshold
     
     def _get_checkpoint_day(self, signal_type: str) -> int:
-        """Get checkpoint day with caching."""
+        """Get checkpoint day with caching. Uses policy path_profiles when available."""
         if signal_type not in self._checkpoint_cache:
-            # Map signal types to their TTH p75 checkpoint days
-            # These values come from the policy's path profiles
-            tth_p75_map = {
+            # Resolve aliases to canonical signal types
+            alias_map = {
+                "LONG": "CALL",
+                "PRIMARY_SHORT": "PUT",
+            }
+            canonical_type = alias_map.get(signal_type, signal_type)
+            
+            # Default TTH p75 values (used when policy doesn't provide tth_p75 field)
+            tth_p75_defaults = {
                 "CALL": 7,
-                "LONG": 7,  # Alias for CALL
                 "PUT": 6,
-                "PRIMARY_SHORT": 6,  # Alias for PUT
                 "OPTION_CALL": 5,
                 "OPTION_PUT": 3,
-                "TACTICAL_PUT": 6,  # 5.5 rounded up
+                "TACTICAL_PUT": 6,
                 "BULL_PROBE": 5,
-                "BEAR_PROBE": 9,  # 8.5 rounded up
+                "BEAR_PROBE": 9,
                 "MVRV_SHORT": 10,
                 "IRON_CONDOR": 7,
             }
             
-            # Try to get from policy path profile, fallback to hardcoded
             try:
-                profile = self.policy.get_path_profile(signal_type)
-                # For now, use the mapping above. Could be enhanced to derive from policy data
-                checkpoint_day = tth_p75_map.get(signal_type, 7)
+                profile = self.policy.get_path_profile(canonical_type)
+                # Use tth_p75 from policy if available, otherwise use defaults
+                checkpoint_day = profile.get("tth_p75", tth_p75_defaults.get(canonical_type, 7))
+                # Round up fractional values
+                checkpoint_day = int(checkpoint_day) if checkpoint_day == int(checkpoint_day) else int(checkpoint_day) + 1
             except Exception:
-                checkpoint_day = tth_p75_map.get(signal_type, 7)
+                checkpoint_day = tth_p75_defaults.get(canonical_type, 7)
             
             self._checkpoint_cache[signal_type] = checkpoint_day
         
@@ -384,35 +403,63 @@ class RecoveryDecisionEngine:
     def _get_adverse_threshold(self, signal_type: str) -> float:
         """Get adverse threshold with caching."""
         if signal_type not in self._threshold_cache:
+            # Resolve aliases to canonical signal types used in path_profiles
+            alias_map = {
+                "LONG": "CALL",
+                "PRIMARY_SHORT": "PUT",
+            }
+            canonical_type = alias_map.get(signal_type, signal_type)
+            
+            # Hardcoded calibrated MAE p75 values (used when policy returns default profile)
+            mae_calibrated = {
+                "CALL": 0.0471,
+                "PUT": 0.0441,
+                "OPTION_CALL": 0.0848,
+                "OPTION_PUT": 0.0682,
+                "TACTICAL_PUT": 0.0308,
+                "BULL_PROBE": 0.0384,
+                "BEAR_PROBE": 0.0653,
+                "MVRV_SHORT": 0.0719,
+                "IRON_CONDOR": 0.0676,
+            }
+            
             try:
-                profile = self.policy.get_path_profile(signal_type)
-                mae_p75 = profile.get("mae_p75", 0.04)  # Default 4%
-                threshold = mae_p75 / 2
+                profile = self.policy.get_path_profile(canonical_type)
+                mae_p75 = profile.get("mae_p75")
+                
+                # Check if we got a real profile via the public API
+                has_real_profile = self.policy.has_path_profile(canonical_type)
+                
+                if mae_p75 is not None and has_real_profile:
+                    threshold = mae_p75 / 2
+                else:
+                    # No real profile — use calibrated fallback
+                    threshold = mae_calibrated.get(canonical_type, 0.04) / 2
             except Exception:
-                # Fallback to hardcoded values
-                mae_fallback = {
-                    "CALL": 0.0471,
-                    "LONG": 0.0471,
-                    "PUT": 0.0441,
-                    "PRIMARY_SHORT": 0.0441,
-                    "OPTION_CALL": 0.0848,
-                    "OPTION_PUT": 0.0682,
-                    "TACTICAL_PUT": 0.0308,
-                    "BULL_PROBE": 0.0384,
-                    "BEAR_PROBE": 0.0653,
-                    "MVRV_SHORT": 0.0719,
-                    "IRON_CONDOR": 0.0676,
-                }
-                threshold = mae_fallback.get(signal_type, 0.04) / 2
+                threshold = mae_calibrated.get(canonical_type, 0.04) / 2
             
             self._threshold_cache[signal_type] = threshold
         
         return self._threshold_cache[signal_type]
     
     def _get_direction(self, signal_type: str) -> str:
-        """Get trade direction for a signal type."""
+        """Get trade direction for a signal type. Returns NEUTRAL for unsupported types with warning."""
         long_types = {"CALL", "LONG", "OPTION_CALL", "BULL_PROBE"}
-        return "LONG" if signal_type in long_types else "SHORT"
+        short_types = {"PUT", "PRIMARY_SHORT", "OPTION_PUT", "TACTICAL_PUT", "BEAR_PROBE", "MVRV_SHORT"}
+        neutral_types = {"IRON_CONDOR"}
+        if signal_type in long_types:
+            return "LONG"
+        elif signal_type in short_types:
+            return "SHORT"
+        elif signal_type in neutral_types:
+            return "NEUTRAL"
+        else:
+            logger.warning(
+                f"Unrecognized signal type '{signal_type}' in recovery engine. "
+                f"Treating as NEUTRAL (recovery disabled). Supported types: "
+                f"{sorted(long_types | short_types)}"
+            )
+            return "NEUTRAL"
     
     def _estimate_recovery_potential(
         self,
@@ -421,10 +468,11 @@ class RecoveryDecisionEngine:
         days_held: int,
     ) -> float:
         """
-        Estimate recovery potential based on historical patterns.
+        Estimate recovery MFE potential based on historical patterns.
         
-        This is a simplified estimation. In a full implementation, this would
-        use historical recovery data or ML models to predict recovery likelihood.
+        Returns an estimated recovery MFE in the same units as flip/cut thresholds
+        (i.e., decimal percentage like 0.05 for 5%). This ensures the comparison
+        against flip_threshold and cut_threshold is unit-consistent.
         
         Args:
             signal_type: Signal type
@@ -432,42 +480,51 @@ class RecoveryDecisionEngine:
             days_held: Days held
             
         Returns:
-            Estimated recovery potential (0.0 to 1.0)
+            Estimated recovery MFE as decimal (e.g., 0.05 for 5%)
         """
-        # Simple heuristic based on signal type characteristics
-        # In practice, this would use historical recovery analysis data
-        
-        # Base recovery potential from policy analysis findings
-        # These are approximate values based on the recovery analyzer results
-        base_recovery_rates = {
-            "OPTION_CALL": 0.80,    # 100% edge found in analysis
-            "PRIMARY_SHORT": 0.70,  # 45.5% edge
-            "TACTICAL_PUT": 0.65,   # 44.4% edge
-            "BEAR_PROBE": 0.60,     # 33.3% edge
-            "CALL": 0.55,           # 27.3% edge
-            "LONG": 0.55,           # Same as CALL
-            "BULL_PROBE": 0.50,     # 22.2% edge
-            "OPTION_PUT": 0.45,     # 16.7% edge
-            "MVRV_SHORT": 0.40,     # 14.3% edge
+        # Expected recovery MFE by signal type from historical analysis
+        # These represent the EXPECTED MFE when flipping at checkpoint for adverse trades.
+        # Values are set above the flip threshold (0.05) for signals with positive flip edge,
+        # because the analysis shows the majority of flips for these signals achieve >5%.
+        # Signals with lower edge have values closer to the threshold.
+        expected_recovery_mfe = {
+            "OPTION_CALL": 0.10,    # +100% edge — almost always flips successfully
+            "PRIMARY_SHORT": 0.08,  # +45.5% edge
+            "PUT": 0.08,            # Same as PRIMARY_SHORT (alias)
+            "TACTICAL_PUT": 0.075,  # +44.4% edge
+            "BEAR_PROBE": 0.07,     # +33.3% edge
+            "CALL": 0.065,          # +27.3% edge
+            "LONG": 0.065,          # Same as CALL (alias)
+            "BULL_PROBE": 0.06,     # +22.2% edge — marginal flip signal
+            "OPTION_PUT": 0.055,    # +16.7% edge — marginal flip signal
+            "MVRV_SHORT": 0.052,    # +14.3% edge — weakest flip signal, just above threshold
         }
         
-        base_rate = base_recovery_rates.get(signal_type, 0.50)
+        base_mfe = expected_recovery_mfe.get(signal_type, 0.05)
         
         # Adjust based on severity of adverse move
-        # More adverse = lower recovery potential
+        # More adverse = lower recovery potential (strong trend less likely to reverse)
         adverse_severity = abs(current_return)
-        severity_penalty = min(adverse_severity * 2, 0.3)  # Max 30% penalty
+        if adverse_severity > 0.10:
+            severity_factor = 0.6   # Very adverse: strong trend, low recovery
+        elif adverse_severity > 0.06:
+            severity_factor = 0.8   # Moderately adverse
+        elif adverse_severity > 0.03:
+            severity_factor = 0.9   # Mildly adverse
+        else:
+            severity_factor = 1.0   # Barely adverse: normal recovery expected
         
-        # Adjust based on time held
-        # Later in trade = lower recovery potential
+        # Adjust based on time remaining
+        # Later in trade = less time for recovery MFE to materialize
         checkpoint_day = self._get_checkpoint_day(signal_type)
-        time_factor = max(0.7, 1.0 - (days_held - checkpoint_day) * 0.05)
+        days_past_checkpoint = days_held - checkpoint_day
+        time_decay = max(0.5, 1.0 - days_past_checkpoint * 0.08)
         
-        # Calculate final recovery potential
-        recovery_potential = base_rate * (1 - severity_penalty) * time_factor
+        # Calculate estimated recovery MFE
+        estimated_mfe = base_mfe * severity_factor * time_decay
         
-        # Ensure bounds
-        return max(0.0, min(1.0, recovery_potential))
+        # Ensure reasonable bounds (0% to 15% MFE)
+        return max(0.0, min(0.15, estimated_mfe))
 
 
 # Convenience functions for direct use

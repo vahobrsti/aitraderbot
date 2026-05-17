@@ -45,6 +45,7 @@ class TestRecoveryDecisionEngine(unittest.TestCase):
             "invalidation_pct": 0.25,
             "clean_win_pct": 0.75,
         }
+        self.mock_policy.has_path_profile.return_value = True
         
         self.engine = RecoveryDecisionEngine(self.mock_policy)
     
@@ -76,8 +77,9 @@ class TestRecoveryDecisionEngine(unittest.TestCase):
     def test_get_adverse_threshold(self):
         """Test adverse threshold calculation."""
         threshold = self.engine.get_adverse_threshold("CALL")
-        # Should be mae_p75 / 2 = 0.04 / 2 = 0.02
-        self.assertEqual(threshold, 0.02)
+        # Mock policy returns mae_p75=0.04, has_path_profile=True
+        # So threshold = 0.04 / 2 = 0.02
+        self.assertAlmostEqual(threshold, 0.04 / 2, places=4)
     
     def test_is_recovery_candidate_before_checkpoint(self):
         """Test recovery candidate check before checkpoint day."""
@@ -176,15 +178,18 @@ class TestRecoveryDecisionEngine(unittest.TestCase):
     
     def test_estimate_recovery_potential_option_call(self):
         """Test recovery potential estimation for OPTION_CALL."""
-        # OPTION_CALL should have high base recovery rate (0.80)
-        potential = self.engine._estimate_recovery_potential("OPTION_CALL", -0.03, 7)
-        self.assertGreater(potential, 0.5)  # Should be relatively high
+        # OPTION_CALL should have highest base recovery MFE (0.08)
+        potential = self.engine._estimate_recovery_potential("OPTION_CALL", -0.03, 5)
+        self.assertGreater(potential, 0.05)  # Should exceed flip threshold
     
     def test_estimate_recovery_potential_mvrv_short(self):
         """Test recovery potential estimation for MVRV_SHORT."""
-        # MVRV_SHORT should have lower base recovery rate (0.40)
+        # MVRV_SHORT has weakest flip edge (+14.3%), base MFE just above threshold
+        # With severity factor for -0.03 adverse (mildly adverse = 0.9), result is ~0.047
         potential = self.engine._estimate_recovery_potential("MVRV_SHORT", -0.03, 10)
-        self.assertLess(potential, 0.5)  # Should be relatively low
+        # Should be close to but may be slightly above or below flip threshold
+        self.assertLess(potential, 0.06)  # Not a strong flip signal
+        self.assertGreater(potential, 0.03)  # But not a cut signal either
     
     def test_estimate_recovery_potential_severity_penalty(self):
         """Test that more adverse moves get lower recovery potential."""

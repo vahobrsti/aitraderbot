@@ -210,12 +210,14 @@ class TradeSetup:
             "risk_reward_summary": {
                 "ratio": self.risk_reward,
                 "ratio_formatted": f"1:{self.risk_reward:.2f}",
-                "risk_pct": self.exit_rules.stop_loss_spot_pct,
-                "risk_usd": self.spot_price * self.exit_rules.stop_loss_spot_pct,
-                "reward_pct": self.spread_width_pct * self.exit_rules.take_profit_pct,
-                "reward_usd": self.spot_price * self.spread_width_pct * self.exit_rules.take_profit_pct,
                 "max_loss_per_contract": self.max_loss,
                 "max_profit_per_contract": self.max_profit,
+                # Credit structures (condors): risk/reward based on credit economics
+                # Debit structures (spreads): risk/reward based on spot move
+                "risk_pct": self.max_loss / self.spot_price if self.direction == "NEUTRAL" else self.exit_rules.stop_loss_spot_pct,
+                "risk_usd": self.max_loss if self.direction == "NEUTRAL" else self.spot_price * self.exit_rules.stop_loss_spot_pct,
+                "reward_pct": self.max_profit / self.spot_price if self.direction == "NEUTRAL" else self.spread_width_pct * self.exit_rules.take_profit_pct,
+                "reward_usd": self.max_profit if self.direction == "NEUTRAL" else self.spot_price * self.spread_width_pct * self.exit_rules.take_profit_pct,
             },
             "position": {
                 "risk_budget": self.risk_budget,
@@ -276,18 +278,42 @@ class TradeSetup:
             "*TRADE: Bear Put Spread*" if self.direction == "SHORT" else "*TRADE: Bull Call Spread*" if self.direction == "LONG" else "*TRADE: Iron Condor*",
             "━━━━━━━━━━━━━━━━━━━━━━",
             "",
-            f"*BUY:* `{self.long_leg.symbol}`",
-            f"  Strike: `${self.long_leg.strike:,.0f}` | Δ: `{self.long_leg.delta:.3f}` | IV: `{self.long_leg.iv*100:.1f}%`",
-            f"  Ask: `${self.long_leg.price:,.2f}`",
         ]
         
-        if self.short_leg:
+        if self.direction == "NEUTRAL" and self.extra_legs:
+            # Iron condor: show all 4 legs clearly
             lines.extend([
+                f"*SELL CALL:* `{self.long_leg.symbol}`",
+                f"  Strike: `${self.long_leg.strike:,.0f}` | Δ: `{self.long_leg.delta:.3f}` | IV: `{self.long_leg.iv*100:.1f}%`",
+                f"  Bid: `${self.long_leg.price:,.2f}`",
                 "",
-                f"*SELL:* `{self.short_leg.symbol}`",
+                f"*SELL PUT:* `{self.short_leg.symbol}`",
                 f"  Strike: `${self.short_leg.strike:,.0f}` | Δ: `{self.short_leg.delta:.3f}` | IV: `{self.short_leg.iv*100:.1f}%`",
                 f"  Bid: `${self.short_leg.price:,.2f}`",
             ])
+            # Show wing protection legs
+            for leg in self.extra_legs:
+                lines.extend([
+                    "",
+                    f"*BUY {'CALL' if leg.strike > self.long_leg.strike else 'PUT'}:* `{leg.symbol}`",
+                    f"  Strike: `${leg.strike:,.0f}` | Δ: `{leg.delta:.3f}` | IV: `{leg.iv*100:.1f}%`",
+                    f"  Ask: `${leg.price:,.2f}` (wing protection)",
+                ])
+        else:
+            # Standard 2-leg spread
+            lines.extend([
+                f"*BUY:* `{self.long_leg.symbol}`",
+                f"  Strike: `${self.long_leg.strike:,.0f}` | Δ: `{self.long_leg.delta:.3f}` | IV: `{self.long_leg.iv*100:.1f}%`",
+                f"  Ask: `${self.long_leg.price:,.2f}`",
+            ])
+            
+            if self.short_leg:
+                lines.extend([
+                    "",
+                    f"*SELL:* `{self.short_leg.symbol}`",
+                    f"  Strike: `${self.short_leg.strike:,.0f}` | Δ: `{self.short_leg.delta:.3f}` | IV: `{self.short_leg.iv*100:.1f}%`",
+                    f"  Bid: `${self.short_leg.price:,.2f}`",
+                ])
         
         lines.extend([
             "",
@@ -312,8 +338,23 @@ class TradeSetup:
             "━━━━━━━━━━━━━━━━━━━━━━",
             "*EXIT RULES*",
             "━━━━━━━━━━━━━━━━━━━━━━",
-            f"🛑 Stop (Spot): BTC > `${self.exit_rules.stop_loss_spot:,.0f}` (+{self.exit_rules.stop_loss_spot_pct*100:.1f}%)",
-            f"🛑 Stop (Value): Spread {'>' if self.net_debit < 0 else '<'} `${self.exit_rules.stop_loss_value:,.0f}` ({self.exit_rules.stop_loss_value_pct*100:.0f}% {'of max loss' if self.net_debit < 0 else 'lost'})",
+        ])
+        
+        if self.direction == "NEUTRAL" and self.short_leg:
+            # Iron condor: symmetric risk — show value-based stop (primary) and breakevens (reference)
+            lower_breakeven = self.short_leg.strike + self.net_debit  # net_debit is negative for credits
+            lines.extend([
+                f"🛑 Stop (Value): Close if spread value > `${self.exit_rules.stop_loss_value:,.0f}` ({self.exit_rules.stop_loss_value_pct*100:.0f}% of max loss)",
+                f"📍 Upper Breakeven: `${self.exit_rules.stop_loss_spot:,.0f}` (reference)",
+                f"📍 Lower Breakeven: `${lower_breakeven:,.0f}` (reference)",
+            ])
+        else:
+            lines.extend([
+                f"🛑 Stop (Spot): BTC {'>' if self.direction == 'SHORT' else '<'} `${self.exit_rules.stop_loss_spot:,.0f}` ({self.exit_rules.stop_loss_spot_pct*100:.1f}%)",
+                f"🛑 Stop (Value): Spread {'>' if self.net_debit < 0 else '<'} `${self.exit_rules.stop_loss_value:,.0f}` ({self.exit_rules.stop_loss_value_pct*100:.0f}% {'of max loss' if self.net_debit < 0 else 'lost'})",
+            ])
+        
+        lines.extend([
             f"✅ Take Profit: `{self.exit_rules.take_profit_pct*100:.0f}%` = `${self.exit_rules.take_profit_value:,.0f}`/contract",
             f"⏰ Max Hold: {self.exit_rules.max_hold_days}d (until {self.exit_rules.max_hold_date})",
         ])
@@ -374,12 +415,24 @@ class TradeSetup:
             "━━━━━━━━━━━━━━━━━━━━━━",
             "*ORDER ENTRY*",
             "━━━━━━━━━━━━━━━━━━━━━━",
-            f"1\\. Buy: `{self.long_leg.symbol}` × {self.contracts}",
         ])
         
-        if self.short_leg:
-            lines.append(f"2\\. Sell: `{self.short_leg.symbol}` × {self.contracts}")
-            lines.append(f"3\\. Limit: `${self.net_debit:,.2f}` debit")
+        if self.direction == "NEUTRAL" and self.extra_legs:
+            # Iron condor: 4-leg credit structure
+            lines.extend([
+                f"1\\. Sell: `{self.long_leg.symbol}` × {self.contracts} (short call)",
+                f"2\\. Sell: `{self.short_leg.symbol}` × {self.contracts} (short put)",
+            ])
+            for i, leg in enumerate(self.extra_legs, start=3):
+                leg_label = "long call wing" if leg.strike > self.long_leg.strike else "long put wing"
+                lines.append(f"{i}\\. Buy: `{leg.symbol}` × {self.contracts} ({leg_label})")
+            lines.append(f"{len(self.extra_legs) + 3}\\. Limit: `${abs(self.net_debit):,.2f}` net credit")
+        else:
+            # Standard 2-leg debit spread
+            lines.append(f"1\\. Buy: `{self.long_leg.symbol}` × {self.contracts}")
+            if self.short_leg:
+                lines.append(f"2\\. Sell: `{self.short_leg.symbol}` × {self.contracts}")
+                lines.append(f"3\\. Limit: `${self.net_debit:,.2f}` debit")
         
         return "\n".join(lines)
 

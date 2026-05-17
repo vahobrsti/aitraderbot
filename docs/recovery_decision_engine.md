@@ -178,13 +178,13 @@ No additional environment variables required — uses existing policy configurat
 python manage.py test execution.tests_recovery
 
 # Recovery policy validation tests (17 tests)
-python manage.py test signals.tests.test_recovery_policy_validation
+python manage.py test signals.tests_recovery_policy_validation
 
 # Performance regression tests (11 tests)
-python manage.py test signals.tests.test_recovery_performance_regression
+python manage.py test signals.tests_recovery_performance_regression
 
 # All recovery-related tests
-python manage.py test execution.tests_recovery signals.tests
+python manage.py test execution.tests_recovery signals.tests_recovery_candidate signals.tests_recovery_mfe_analysis signals.tests_recovery_policy_validation signals.tests_recovery_performance_regression
 ```
 
 ## Performance Considerations
