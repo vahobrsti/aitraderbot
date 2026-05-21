@@ -23,7 +23,7 @@ class DailySignalListView(generics.ListAPIView):
     """
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
-    queryset = DailySignal.objects.all().order_by('-date')
+    queryset = DailySignal.objects.all().order_by('-date', '-updated_at')
     serializer_class = DailySignalSummarySerializer
 
 
@@ -39,7 +39,19 @@ class DailySignalLatestView(APIView):
     
     def get(self, request):
         try:
-            signal = DailySignal.objects.latest('date')
+            # Get latest date with tradeable signals, pick by priority
+            latest_tradeable = DailySignal.objects.exclude(
+                trade_decision="NO_TRADE"
+            ).order_by('-date').first()
+            if latest_tradeable:
+                candidates = DailySignal.objects.filter(
+                    date=latest_tradeable.date
+                ).exclude(trade_decision="NO_TRADE")
+                signal = DailySignal.pick_highest_priority(candidates)
+            else:
+                signal = DailySignal.objects.order_by('-date').first()
+            if signal is None:
+                raise DailySignal.DoesNotExist
             serializer = DailySignalSerializer(signal)
             return Response(serializer.data)
         except DailySignal.DoesNotExist:
@@ -49,18 +61,20 @@ class DailySignalLatestView(APIView):
             )
 
 
-class DailySignalDetailView(generics.RetrieveAPIView):
+class DailySignalDetailView(generics.ListAPIView):
     """
     GET /api/v1/signals/<date>/
     
-    Get signal for a specific date.
+    Get all signals for a specific date (may be multiple trade types).
     Date format: YYYY-MM-DD
     """
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
-    queryset = DailySignal.objects.all()
     serializer_class = DailySignalSerializer
-    lookup_field = 'date'
+
+    def get_queryset(self):
+        date_str = self.kwargs['date']
+        return DailySignal.objects.filter(date=date_str).order_by('-updated_at')
 
 
 class TradeSetupView(APIView):
@@ -89,16 +103,7 @@ class TradeSetupView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Check signal exists
-        try:
-            signal = DailySignal.objects.get(date=signal_date)
-        except DailySignal.DoesNotExist:
-            return Response(
-                {"error": f"No signal found for {date}"},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        # Get signal type from query param or use stored decision
+        # Get signal type from query param first
         signal_type = request.query_params.get('type', None)
         builder = TradeSetupBuilder()
         if signal_type:
@@ -110,7 +115,26 @@ class TradeSetupView(APIView):
                     {"error": f"Unsupported signal type: {signal_type}"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-        else:
+        
+        # Load signal for that date (filtered by type if provided)
+        try:
+            if signal_type:
+                signal = DailySignal.objects.get(date=signal_date, trade_decision=signal_type)
+            else:
+                candidates = DailySignal.objects.filter(date=signal_date).exclude(
+                    trade_decision="NO_TRADE"
+                )
+                signal = DailySignal.pick_highest_priority(candidates)
+                if signal is None:
+                    raise DailySignal.DoesNotExist
+        except DailySignal.DoesNotExist:
+            return Response(
+                {"error": f"No signal found for {date}"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Use stored decision if no type override
+        if not signal_type:
             signal_type = signal.trade_decision
         
         # Skip NO_TRADE
@@ -144,10 +168,21 @@ class TradeSetupLatestView(APIView):
     def get(self, request):
         from execution.services.trade_setup import TradeSetupBuilder
         
-        # Find latest tradeable signal
-        signal = DailySignal.objects.exclude(
+        # Find latest tradeable signal by priority
+        latest_tradeable = DailySignal.objects.exclude(
             trade_decision="NO_TRADE"
         ).order_by('-date').first()
+        
+        if not latest_tradeable:
+            return Response(
+                {"error": "No tradeable signals found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        candidates = DailySignal.objects.filter(
+            date=latest_tradeable.date
+        ).exclude(trade_decision="NO_TRADE")
+        signal = DailySignal.pick_highest_priority(candidates)
         
         if not signal:
             return Response(

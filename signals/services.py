@@ -674,7 +674,11 @@ class SignalService:
     
     def persist_signal(self, result: SignalResult) -> DailySignal:
         """
-        Persist signal to database, updating if date already exists.
+        Persist signal to database, updating if same (date, trade_decision) exists.
+        
+        Multiple trade types can coexist on the same day. Each is keyed by
+        (date, trade_decision) so re-runs are idempotent but different decisions
+        create separate rows.
         
         Args:
             result: SignalResult to persist.
@@ -684,6 +688,7 @@ class SignalService:
         """
         signal, created = DailySignal.objects.update_or_create(
             date=result.date,
+            trade_decision=result.trade_decision,
             defaults={
                 'p_long': result.p_long,
                 'p_short': result.p_short,
@@ -741,3 +746,341 @@ class SignalService:
         """
         result = self.generate_signal(target_date)
         return self.persist_signal(result)
+
+    def generate_all_signals(self, target_date: Optional[date] = None) -> list[SignalResult]:
+        """
+        Generate ALL qualifying signals for a date, evaluating gates independently.
+        
+        Unlike generate_signal (which uses a priority waterfall and returns one),
+        this evaluates each gate independently and returns all that qualify.
+        This matches backtest behavior where MVRV_SHORT + IRON_CONDOR can
+        coexist on the same day.
+        
+        Returns:
+            List of SignalResult objects (one per qualifying trade type).
+            Always includes at least one result (NO_TRADE if nothing qualifies).
+        """
+        self._load_models()
+        
+        # Shared computation (same as generate_signal steps 1-11)
+        qs = RawDailyData.objects.order_by("date")
+        df_raw = pd.DataFrame.from_records(qs.values())
+        if df_raw.empty:
+            raise ValueError("No RawDailyData found in database")
+        
+        feats = build_features_and_labels_from_raw(
+            df_raw, horizon_days=self.horizon_days, target_return=self.target_return,
+        )
+        
+        if target_date is not None:
+            if target_date not in feats.index:
+                raise ValueError(f"No features available for {target_date}")
+            latest_date = target_date
+        else:
+            latest_date = feats.index.max()
+        
+        latest_row = feats.loc[[latest_date]]
+        row = feats.loc[latest_date]
+        
+        # ML Predictions
+        long_model = self._long_bundle["model"]
+        long_feats = self._long_bundle["feature_names"]
+        short_model = self._short_bundle["model"]
+        short_feats = self._short_bundle["feature_names"]
+        
+        p_long = float(long_model.predict_proba(latest_row[long_feats])[:, 1][0])
+        p_short = float(short_model.predict_proba(latest_row[short_feats])[:, 1][0])
+        signal_option_call = int(latest_row["signal_option_call"].iloc[0])
+        signal_option_put = int(latest_row["signal_option_put"].iloc[0])
+        
+        # Fusion + Overlay
+        fusion_result = fuse_signals(row)
+        overlay = apply_overlays(fusion_result, row)
+        size_mult = get_size_multiplier(overlay)
+        dte_mult = get_dte_multiplier(overlay)
+        
+        # Cooldowns
+        core_call_ok = self._check_trade_cooldown(latest_date, "CALL", CORE_SIGNAL_COOLDOWN_DAYS)
+        core_put_ok = self._check_trade_cooldown(latest_date, "PUT", CORE_SIGNAL_COOLDOWN_DAYS)
+        tactical_put_ok = self._check_trade_cooldown(latest_date, "TACTICAL_PUT", TACTICAL_PUT_COOLDOWN_DAYS)
+        
+        # Tactical Put
+        tactical_result = tactical_put_inside_bull(
+            fusion_result, row, cooldown_active=not tactical_put_ok,
+        )
+        
+        # Option signals
+        option_call_ok = signal_option_call == 1 and self._check_option_cooldown(latest_date, "OPTION_CALL")
+        option_put_ok = signal_option_put == 1 and self._check_option_cooldown(latest_date, "OPTION_PUT")
+        
+        # MVRV Short
+        try:
+            raw_data = RawDailyData.objects.get(date=latest_date)
+            row_with_mvrv = row.copy()
+            row_with_mvrv['mvrv_usd_7d'] = raw_data.mvrv_usd_7d
+            row_with_mvrv['mvrv_usd_60d'] = raw_data.mvrv_usd_60d
+            row_with_mvrv['btc_close'] = raw_data.btc_close
+        except RawDailyData.DoesNotExist:
+            raw_data = None
+            row_with_mvrv = row
+        
+        mvrv_short_signal = check_mvrv_short_signal(row_with_mvrv)
+        mvrv_short_ok = mvrv_short_signal.active and self._check_trade_cooldown(
+            latest_date, "MVRV_SHORT", MVRV_SHORT_COOLDOWN_DAYS
+        )
+        
+        # Iron Condor gate
+        ohlc_qs = RawDailyData.objects.filter(date__lte=latest_date).order_by("date").values(
+            "btc_open", "btc_high", "btc_low", "btc_close"
+        )
+        ohlc_df = pd.DataFrame.from_records(ohlc_qs)
+        if len(ohlc_df) >= 31:
+            atr_ratio, gap_pct = compute_vol_metrics(ohlc_df)
+        else:
+            atr_ratio, gap_pct = None, None
+        
+        dp_val = row.get("distribution_pressure_score", None)
+        if dp_val is not None:
+            dp_series = feats.loc[:latest_date, "distribution_pressure_score"]
+            dp_expanding_median = float(dp_series.expanding().median().iloc[-1])
+        else:
+            dp_expanding_median = None
+        
+        condor_gate = evaluate_condor_gate(
+            row, fusion_state=fusion_result.state.value,
+            dp_expanding_median=dp_expanding_median,
+            atr_ratio=atr_ratio, gap_pct=gap_pct,
+        )
+        condor_cooldown_ok = self._check_trade_cooldown(
+            latest_date, "IRON_CONDOR", CONDOR_COOLDOWN_DAYS
+        )
+        condor_ok = condor_gate.eligible and condor_cooldown_ok
+        
+        # Condor strikes
+        condor_strikes = None
+        if raw_data:
+            mvrv_60d_val = getattr(raw_data, 'mvrv_usd_60d', None)
+            btc_close_val = getattr(raw_data, 'btc_close', None)
+            if mvrv_60d_val and btc_close_val:
+                from signals.options import CONDOR_TRAILING_DAYS
+                trailing_qs = RawDailyData.objects.filter(
+                    date__lte=latest_date, mvrv_usd_60d__isnull=False,
+                ).order_by('-date')[:CONDOR_TRAILING_DAYS]
+                trailing_mvrv = [r.mvrv_usd_60d for r in trailing_qs]
+                if len(trailing_mvrv) >= CONDOR_TRAILING_DAYS:
+                    mvrv_trail_high = max(trailing_mvrv)
+                    mvrv_trail_low = min(trailing_mvrv)
+                else:
+                    mvrv_trail_high = None
+                    mvrv_trail_low = None
+                condor_strikes = compute_condor_strikes(
+                    spot=btc_close_val, mvrv_60d=mvrv_60d_val,
+                    mvrv_trailing_high=mvrv_trail_high, mvrv_trailing_low=mvrv_trail_low,
+                )
+        
+        # --- Evaluate all gates independently ---
+        results = []
+        
+        # Shared base for building SignalResult
+        def _build_result(trade_decision, trade_notes, no_trade_reasons, decision_trace, effective_size, size_m):
+            if trade_decision in DECISION_STRATEGY_MAP:
+                strategy = get_decision_strategy_summary(trade_decision)
+            else:
+                strategy = self._get_strategy_summary_with_path_risk(fusion_result.state)
+            
+            policy = get_policy()
+            policy_exit = policy.get_exit_params(trade_decision)
+            if policy_exit is not None:
+                strategy["stop_loss_pct"] = policy_exit.stop_loss_pct
+                strategy["take_profit_pct"] = policy_exit.take_profit_pct
+                strategy["max_hold_days"] = policy_exit.max_hold_days
+                strategy["scale_down_day"] = policy_exit.scale_down_day
+            strategy["spread_width_pct"] = policy.get_spread_width(trade_decision)
+            dte_cfg = policy.get_dte_target(trade_decision)
+            strategy["dte_range"] = f"{dte_cfg.min_dte}-{dte_cfg.max_dte}d"
+            
+            return SignalResult(
+                date=latest_date,
+                p_long=p_long,
+                p_short=p_short,
+                signal_option_call=signal_option_call,
+                signal_option_put=signal_option_put,
+                fusion_state=fusion_result.state.value,
+                fusion_confidence=fusion_result.confidence.value,
+                fusion_score=fusion_result.score,
+                overlay_reason=overlay.reason,
+                size_multiplier=size_m,
+                dte_multiplier=dte_mult if trade_decision != "NO_TRADE" else 0.0,
+                tactical_put_active=tactical_result.active if trade_decision == "TACTICAL_PUT" else False,
+                tactical_put_strategy=tactical_result.strategy.value if trade_decision == "TACTICAL_PUT" and tactical_result.active else "",
+                tactical_put_size=tactical_result.size_mult if trade_decision == "TACTICAL_PUT" and tactical_result.active else 0.0,
+                trade_decision=trade_decision,
+                trade_notes=trade_notes,
+                option_structures=strategy["primary_structures"],
+                strike_guidance=strategy["strike_guidance"],
+                dte_range=strategy["dte_range"],
+                strategy_rationale=strategy["rationale"],
+                stop_loss=strategy.get("stop_loss", ""),
+                stop_loss_pct=strategy.get("stop_loss_pct"),
+                scale_down_day=strategy.get("scale_down_day"),
+                max_hold_days=strategy.get("max_hold_days"),
+                spread_width_pct=strategy.get("spread_width_pct"),
+                take_profit_pct=strategy.get("take_profit_pct"),
+                no_trade_reasons=no_trade_reasons,
+                decision_trace=decision_trace,
+                score_components=fusion_result.components,
+                effective_size=effective_size,
+                decision_version="2026-04-26.1",
+                model_versions={'long': self.long_model_path.name, 'short': self.short_model_path.name},
+                short_source=fusion_result.short_source,
+                condor_score=condor_gate.score,
+                condor_eligible=condor_gate.eligible,
+                condor_veto_reasons=condor_gate.veto_reasons,
+                condor_score_components=condor_gate.score_components,
+                condor_short_call=condor_strikes.short_call if condor_strikes else None,
+                condor_short_put=condor_strikes.short_put if condor_strikes else None,
+                condor_cost_basis=condor_strikes.cost_basis if condor_strikes else None,
+                condor_strike_meta={
+                    'call_source': condor_strikes.call_source,
+                    'put_source': condor_strikes.put_source,
+                    'call_distance_pct': condor_strikes.call_distance_pct,
+                    'put_distance_pct': condor_strikes.put_distance_pct,
+                    'mvrv_60d': condor_strikes.mvrv_60d,
+                    'mvrv_drift': condor_strikes.mvrv_drift,
+                    'mvrv_ceiling': condor_strikes.mvrv_ceiling,
+                    'mvrv_floor': condor_strikes.mvrv_floor,
+                    'spot': condor_strikes.spot,
+                } if condor_strikes else {},
+            )
+        
+        # Gate 1: Core fusion (CALL/PUT) or Tactical Put
+        fusion_has_direction = fusion_result.state not in (MarketState.NO_TRADE, MarketState.TRANSITION_CHOP)
+        
+        long_states = {
+            MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY,
+            MarketState.MOMENTUM_CONTINUATION, MarketState.BEAR_EXHAUSTION_LONG,
+            MarketState.BEAR_RALLY_LONG, MarketState.BULL_PROBE,
+        }
+        short_states = {
+            MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION,
+            MarketState.BEAR_CONTINUATION_SHORT, MarketState.LATE_DISTRIBUTION_SHORT,
+            MarketState.BEAR_PROBE,
+        }
+        
+        if fusion_has_direction and size_mult > 0:
+            if fusion_result.state in long_states and core_call_ok:
+                notes = f"Fusion: {fusion_result.state.value}"
+                trace = [f"fusion={fusion_result.state.value} -> CALL"]
+                results.append(_build_result("CALL", notes, [], trace, size_mult, size_mult))
+            elif fusion_result.state in long_states and not core_call_ok and tactical_result.active:
+                trace = [f"fusion={fusion_result.state.value} -> CALL blocked, fallback=TACTICAL_PUT"]
+                results.append(_build_result("TACTICAL_PUT", tactical_result.reason, [], trace, size_mult, size_mult))
+            elif fusion_result.state in short_states and core_put_ok:
+                source_label = f"[{fusion_result.short_source}]" if fusion_result.short_source else ""
+                notes = f"Fusion: {fusion_result.state.value} {source_label}".strip()
+                trace = [f"fusion={fusion_result.state.value} -> PUT"]
+                results.append(_build_result("PUT", notes, [], trace, size_mult, size_mult))
+        elif not fusion_has_direction and tactical_result.active:
+            trace = [f"fusion={fusion_result.state.value}(no direction), tactical_put=active"]
+            results.append(_build_result("TACTICAL_PUT", tactical_result.reason, [], trace, size_mult, size_mult))
+        
+        # Gate 2: Option CALL (independent of fusion direction)
+        if option_call_ok and size_mult > 0:
+            scaled = min(OPTION_SIGNAL_SIZE_MULT, OPTION_SIGNAL_SIZE_MULT * size_mult)
+            trace = [f"option_call=fired(cooldown_ok), effective_size={scaled:.2f}"]
+            results.append(_build_result("OPTION_CALL", "Rule: MVRV cheap (2+ flags) + Sentiment fear", [], trace, scaled, scaled))
+        
+        # Gate 3: Option PUT (independent)
+        if option_put_ok and size_mult > 0:
+            efb_veto, _ = compute_efb_veto(row)
+            if efb_veto < 1:
+                scaled = min(OPTION_SIGNAL_SIZE_MULT, OPTION_SIGNAL_SIZE_MULT * size_mult)
+                trace = [f"option_put=fired(cooldown_ok), effective_size={scaled:.2f}"]
+                results.append(_build_result("OPTION_PUT", "Rule: MVRV overheated + Sentiment greed + Whale distrib", [], trace, scaled, scaled))
+        
+        # Gate 4: MVRV Short (independent)
+        if mvrv_short_ok:
+            trace = [f"mvrv_short=active(7d={mvrv_short_signal.mvrv_7d:.3f}, 60d={mvrv_short_signal.mvrv_60d:.3f})"]
+            notes = (
+                f"Rule: Bear mode + MVRV 7d >= 1.02 + MVRV 60d >= 1.0 | "
+                f"Entry: {MVRV_SHORT_SIZE_MULT*100:.0f}% at ${mvrv_short_signal.btc_price:,.0f}, "
+                f"DCA at ${mvrv_short_signal.dca_trigger_price:,.0f}, "
+                f"Target: ${mvrv_short_signal.target_price:,.0f}"
+            )
+            results.append(_build_result("MVRV_SHORT", notes, [], trace, MVRV_SHORT_SIZE_MULT, MVRV_SHORT_SIZE_MULT))
+        
+        # Gate 5: Iron Condor (independent)
+        if condor_ok:
+            trace = [f"condor_gate=eligible(score={condor_gate.score:.0f})"]
+            notes = f"Range gate: score={condor_gate.score:.0f}, chop state"
+            results.append(_build_result("IRON_CONDOR", notes, [], trace, 0.50, 0.50))
+        
+        # If nothing qualified, return NO_TRADE
+        if not results:
+            no_trade_reasons = ["FUSION_STATE_NO_TRADE"]
+            trace = [f"fusion={fusion_result.state.value}", "all_gates=inactive -> NO_TRADE"]
+            results.append(_build_result("NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, trace, 0.0, 0.0))
+        
+        return results
+
+    def persist_all_signals(self, results: list[SignalResult]) -> list[tuple[DailySignal, bool]]:
+        """
+        Persist multiple signals. Returns list of (signal, changed) tuples.
+        
+        `changed` is True if the signal was newly created or if key fields
+        (trade_decision, fusion_state, effective_size) differ from the stored value.
+        
+        Also removes stale signals: if a trade type was stored from a previous
+        hourly run but no longer qualifies, it gets deleted — unless protected
+        by an active ExecutionIntent (on_delete=PROTECT).
+        """
+        from django.db.models import ProtectedError
+        
+        # Determine which trade decisions currently qualify
+        active_decisions = {r.trade_decision for r in results if r.trade_decision != "NO_TRADE"}
+        
+        # Get the date from results (all share the same date)
+        if not results:
+            return []
+        signal_date = results[0].date
+        
+        # Delete stale signals: rows for this date whose trade_decision
+        # is no longer in the active set. Skip those with active execution intents.
+        stale_qs = DailySignal.objects.filter(date=signal_date).exclude(
+            trade_decision__in=active_decisions
+        )
+        for stale_signal in stale_qs:
+            try:
+                stale_signal.delete()
+            except ProtectedError:
+                # Signal has active execution intents — leave it in place
+                pass
+        
+        # Persist active signals
+        persisted = []
+        for result in results:
+            if result.trade_decision == "NO_TRADE":
+                # Don't persist NO_TRADE rows — they're noise
+                continue
+            
+            # Check if existing row has different values (= signal changed)
+            existing = DailySignal.objects.filter(
+                date=result.date, trade_decision=result.trade_decision
+            ).first()
+            
+            signal = self.persist_signal(result)
+            
+            if existing is None:
+                # New signal
+                changed = True
+            else:
+                # Check if meaningful fields changed
+                changed = (
+                    existing.fusion_state != result.fusion_state
+                    or existing.effective_size != result.effective_size
+                    or existing.fusion_score != result.fusion_score
+                )
+            
+            persisted.append((signal, changed))
+        
+        return persisted

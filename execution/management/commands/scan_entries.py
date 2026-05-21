@@ -58,7 +58,14 @@ class Command(BaseCommand):
         # Load signal if requested
         signal = None
         if options["latest"]:
-            signal = DailySignal.objects.order_by("-date").first()
+            latest_tradeable = DailySignal.objects.exclude(
+                trade_decision="NO_TRADE"
+            ).order_by("-date").first()
+            if latest_tradeable:
+                candidates = DailySignal.objects.filter(
+                    date=latest_tradeable.date
+                ).exclude(trade_decision="NO_TRADE")
+                signal = DailySignal.pick_highest_priority(candidates)
             if signal:
                 self.stdout.write(
                     f"Signal: {signal.date} | {signal.trade_decision} | "

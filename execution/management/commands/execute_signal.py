@@ -52,15 +52,28 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         # Get signal
         if options['latest']:
-            signal = DailySignal.objects.order_by('-date').first()
+            latest_tradeable = DailySignal.objects.exclude(
+                trade_decision="NO_TRADE"
+            ).order_by('-date').first()
+            if not latest_tradeable:
+                raise CommandError('No tradeable signals found')
+            candidates = DailySignal.objects.filter(
+                date=latest_tradeable.date
+            ).exclude(trade_decision="NO_TRADE")
+            signal = DailySignal.pick_highest_priority(candidates)
             if not signal:
-                raise CommandError('No signals found')
+                raise CommandError('No tradeable signals found')
         elif options['date']:
             try:
                 signal_date = date.fromisoformat(options['date'])
-                signal = DailySignal.objects.get(date=signal_date)
-            except DailySignal.DoesNotExist:
-                raise CommandError(f"No signal found for date {options['date']}")
+                candidates = DailySignal.objects.filter(date=signal_date).exclude(
+                    trade_decision="NO_TRADE"
+                )
+                signal = DailySignal.pick_highest_priority(candidates)
+                if not signal:
+                    raise CommandError(f"No tradeable signal found for date {options['date']}")
+            except ValueError:
+                raise CommandError(f"Invalid date format: {options['date']}")
         else:
             raise CommandError('Must specify --date or --latest')
 

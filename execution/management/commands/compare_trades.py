@@ -79,11 +79,13 @@ class Command(BaseCommand):
         """Record a manual trade and compute engine comparison."""
         signal_date = date.fromisoformat(options['signal_date'])
         
-        # Load signal
-        try:
-            signal = DailySignal.objects.get(date=signal_date)
-        except DailySignal.DoesNotExist:
-            raise CommandError(f"No signal for {signal_date}")
+        # Load signal (get highest priority tradeable one for that date)
+        candidates = DailySignal.objects.filter(date=signal_date).exclude(
+            trade_decision="NO_TRADE"
+        )
+        signal = DailySignal.pick_highest_priority(candidates)
+        if not signal:
+            raise CommandError(f"No tradeable signal for {signal_date}")
         
         # Load spot price
         try:
