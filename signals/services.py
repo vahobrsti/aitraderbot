@@ -1143,6 +1143,11 @@ class SignalService:
                             'updated_at',
                         ])
                         persisted.append((s, False))
+                # Deactivate any stale NO_TRADE rows for this date
+                # (tradeable signals exist, NO_TRADE is contradictory)
+                DailySignal.objects.filter(
+                    date=signal_date, trade_decision="NO_TRADE", is_active=True
+                ).update(is_active=False)
             else:
                 # First fire of the day — persist all qualifying signals
                 tradeable_persisted = False
