@@ -22,6 +22,29 @@ def _float_changed(old, new, atol: float = 0.001) -> bool:
     if old is None or new is None:
         return True
     return abs(old - new) > atol
+
+
+def _signal_changed(existing: DailySignal, result) -> bool:
+    """Check if a SignalResult has meaningful changes vs existing DailySignal."""
+    # Key execution-relevant fields
+    if existing.fusion_state != result.fusion_state:
+        return True
+    if existing.fusion_confidence != result.fusion_confidence:
+        return True
+    if _float_changed(existing.size_multiplier, result.size_multiplier):
+        return True
+    if _float_changed(existing.effective_size, result.effective_size):
+        return True
+    if _float_changed(existing.fusion_score, result.fusion_score, atol=1):
+        return True
+    # Condor strike fields (execution-critical)
+    if _float_changed(existing.condor_short_call, result.condor_short_call, atol=10):
+        return True
+    if _float_changed(existing.condor_short_put, result.condor_short_put, atol=10):
+        return True
+    return False
+
+
 from signals.fusion import fuse_signals, MarketState
 from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier, compute_efb_veto
 from signals.tactical_puts import tactical_put_inside_bull
@@ -1086,27 +1109,33 @@ class SignalService:
                     f"No RawDailyData for {signal_date} — cannot safely serialize signal persistence"
                 )
 
-            # Now safely check if today already has any active tradeable signals
+            # Check if today already has any tradeable signals (active OR inactive).
+            # If any exist, the day is "done" — we only refresh/reactivate, not create new types.
+            # This prevents operator deactivation from reopening the day for different signals.
             existing_tradeable = list(
                 DailySignal.objects.filter(
-                    date=signal_date, is_active=True
+                    date=signal_date
                 ).exclude(trade_decision="NO_TRADE")
             )
+            existing_active = [s for s in existing_tradeable if s.is_active]
 
             persisted = []
 
             if existing_tradeable:
                 # Day is done — update existing active rows to keep data fresh.
                 # Also reactivate any inactive rows that re-qualify.
-                existing_decisions = {s.trade_decision for s in existing_tradeable}
+                existing_by_decision = {s.trade_decision: s for s in existing_active}
+                all_decisions = {s.trade_decision for s in existing_tradeable}
                 updated_decisions = set()
                 for result in results:
                     if result.trade_decision == "NO_TRADE":
                         continue
-                    if result.trade_decision in existing_decisions:
-                        # Active signal exists — just refresh it
+                    if result.trade_decision in existing_by_decision:
+                        # Active signal exists — check for meaningful changes before refresh
+                        existing = existing_by_decision[result.trade_decision]
+                        changed = _signal_changed(existing, result)
                         signal, _ = self.persist_signal(result)
-                        persisted.append((signal, False))
+                        persisted.append((signal, changed))
                         updated_decisions.add(result.trade_decision)
                     else:
                         # Not in active set — check if there's an inactive row to reactivate
@@ -1125,7 +1154,7 @@ class SignalService:
                         # after day is done — this is intentional
                 # For existing active signals not in current results, refresh market-context
                 # fields (probabilities, fusion, scores) so API/execution see current data
-                for s in existing_tradeable:
+                for s in existing_active:
                     if s.trade_decision not in updated_decisions:
                         # Use any result's shared market fields (all share same date/row)
                         ref = results[0]

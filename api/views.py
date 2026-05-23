@@ -32,27 +32,41 @@ class DailySignalLatestView(APIView):
     GET /api/v1/signals/latest/
     
     Get the most recent signal.
-    Returns full detail view.
+    Returns full detail view. If latest date has a veto, returns 404.
     """
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
         try:
-            # Get latest date with tradeable signals, pick by priority
-            latest_tradeable = DailySignal.tradeable().order_by('-date').first()
-            if latest_tradeable:
-                candidates = DailySignal.tradeable().filter(date=latest_tradeable.date)
-                signal = DailySignal.pick_highest_priority(candidates)
-            else:
-                signal = DailySignal.active().order_by('-date').first()
+            # Find latest active signal date first (mirrors notify_signal/execution logic)
+            latest_active = DailySignal.active().order_by('-date').first()
+            if latest_active is None:
+                raise DailySignal.DoesNotExist
+            latest_date = latest_active.date
+            
+            # Check if latest date has a veto
+            veto_row = DailySignal.active().filter(
+                date=latest_date, trade_decision="NO_TRADE"
+            ).first()
+            if veto_row:
+                no_trade_reasons = veto_row.no_trade_reasons or []
+                if "OVERLAY_VETO" in no_trade_reasons:
+                    return Response(
+                        {"error": f"Latest date {latest_date} has an active veto (OVERLAY_VETO)"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+            
+            # Get tradeable signal for latest date
+            candidates = DailySignal.tradeable().filter(date=latest_date)
+            signal = DailySignal.pick_highest_priority(candidates)
             if signal is None:
                 raise DailySignal.DoesNotExist
             serializer = DailySignalSerializer(signal)
             return Response(serializer.data)
         except DailySignal.DoesNotExist:
             return Response(
-                {"error": "No signals found"},
+                {"error": "No tradeable signals found"},
                 status=status.HTTP_404_NOT_FOUND
             )
 
@@ -194,6 +208,7 @@ class TradeSetupLatestView(APIView):
     GET /api/v1/signals/latest/setup/
     
     Get trade setup for the most recent tradeable signal.
+    If latest date has a veto, returns 404.
     """
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
@@ -201,21 +216,36 @@ class TradeSetupLatestView(APIView):
     def get(self, request):
         from execution.services.trade_setup import TradeSetupBuilder
         
-        # Find latest tradeable signal by priority
-        latest_tradeable = DailySignal.tradeable().order_by('-date').first()
+        # Find latest active signal date first (mirrors notify_signal/execution logic)
+        latest_active = DailySignal.active().order_by('-date').first()
         
-        if not latest_tradeable:
+        if not latest_active:
             return Response(
-                {"error": "No tradeable signals found"},
+                {"error": "No active signals found"},
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        candidates = DailySignal.tradeable().filter(date=latest_tradeable.date)
+        latest_date = latest_active.date
+        
+        # Check if latest date has a veto
+        veto_row = DailySignal.active().filter(
+            date=latest_date, trade_decision="NO_TRADE"
+        ).first()
+        if veto_row:
+            no_trade_reasons = veto_row.no_trade_reasons or []
+            if "OVERLAY_VETO" in no_trade_reasons:
+                return Response(
+                    {"error": f"Latest date {latest_date} has an active veto (OVERLAY_VETO)"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        
+        # Get tradeable signal for latest date
+        candidates = DailySignal.tradeable().filter(date=latest_date)
         signal = DailySignal.pick_highest_priority(candidates)
         
         if not signal:
             return Response(
-                {"error": "No tradeable signals found"},
+                {"error": f"No tradeable signals found for latest date {latest_date}"},
                 status=status.HTTP_404_NOT_FOUND
             )
         

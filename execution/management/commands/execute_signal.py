@@ -62,20 +62,32 @@ class Command(BaseCommand):
             signal_type_filter = signal_type_filter.upper()
 
         if options['latest']:
-            if signal_type_filter:
-                signal = DailySignal.tradeable().filter(
-                    trade_decision=signal_type_filter
-                ).order_by('-date').first()
-            else:
-                latest = DailySignal.tradeable().order_by('-date').first()
-                if latest:
-                    signal = DailySignal.pick_highest_priority(
-                        DailySignal.tradeable().filter(date=latest.date)
+            # Find latest active signal date first (mirrors notify_signal logic)
+            latest_active = DailySignal.active().order_by('-date').first()
+            if not latest_active:
+                raise CommandError('No active signals found')
+            latest_date = latest_active.date
+
+            # Check if latest date has a veto (blocks execution of older trades)
+            veto_row = DailySignal.active().filter(
+                date=latest_date, trade_decision="NO_TRADE"
+            ).first()
+            if veto_row:
+                no_trade_reasons = veto_row.no_trade_reasons or []
+                if "OVERLAY_VETO" in no_trade_reasons:
+                    raise CommandError(
+                        f"Latest date {latest_date} has an active veto (OVERLAY_VETO). "
+                        f"Cannot execute stale trades. Use --date to override."
                     )
-                else:
-                    signal = None
+
+            # Now select tradeable signal for latest date
+            qs = DailySignal.tradeable().filter(date=latest_date)
+            if signal_type_filter:
+                signal = qs.filter(trade_decision=signal_type_filter).first()
+            else:
+                signal = DailySignal.pick_highest_priority(qs)
             if not signal:
-                raise CommandError('No tradeable signals found')
+                raise CommandError(f'No tradeable signals found for latest date {latest_date}')
         elif options['date']:
             try:
                 signal_date = date.fromisoformat(options['date'])
