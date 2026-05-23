@@ -118,7 +118,7 @@ class SignalService:
     Usage:
         service = SignalService()
         result = service.generate_signal()
-        service.persist_signal(result)
+        signal, created = service.persist_signal(result)
     """
 
     def __init__(
@@ -760,15 +760,19 @@ class SignalService:
             target_date: Specific date to score, or None for latest.
 
         Returns:
-            DailySignal model instance (highest priority).
+            DailySignal model instance (highest priority), or None if only ordinary NO_TRADE.
         """
         results = self.generate_all_signals(target_date)
         persisted = self.persist_all_signals(results)
         if not persisted:
-            # No tradeable signals — return the NO_TRADE result
-            result = self.generate_signal(target_date)
-            signal, _ = self.persist_signal(result)
-            return signal
+            # No tradeable or vetoed signals persisted — check if we have a vetoed NO_TRADE
+            # Only persist vetoed NO_TRADE, not ordinary NO_TRADE
+            for result in results:
+                if result.trade_decision == "NO_TRADE" and "OVERLAY_VETO" in (result.no_trade_reasons or []):
+                    signal, _ = self.persist_signal(result)
+                    return signal
+            # Ordinary NO_TRADE — don't persist, return None
+            return None
         # Return highest priority signal
         signals = [s for s, _ in persisted]
         return DailySignal.pick_highest_priority(signals) or signals[0]

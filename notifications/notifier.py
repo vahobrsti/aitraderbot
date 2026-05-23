@@ -169,16 +169,17 @@ class TelegramNotifier:
     def _format_option_signal_message(self, signal: SignalMessage) -> str:
         """Format a standalone option signal notification (call/put from interaction rules)."""
         parts = []
-        
-        if signal.signal_option_call == 1:
+
+        # Only emit the message matching the trade_decision to avoid duplicates
+        if signal.trade_decision == "OPTION_CALL" and signal.signal_option_call == 1:
             parts.append("📗 *OPTION SIGNAL: CALL*")
             parts.append("Rule: `MVRV cheap + Sentiment fear`")
             parts.append(f"Historical hit rate: ~72%")
-        
-        if signal.signal_option_put == 1:
+
+        if signal.trade_decision == "OPTION_PUT" and signal.signal_option_put == 1:
             parts.append("📕 *OPTION SIGNAL: PUT*")
             parts.append("Rule: `MVRV overheated + Sentiment greed`")
-        
+
         parts.append(f"📅 {signal.date}")
         parts.append("")
         parts.append(f"*Fusion State:* `{signal.fusion_state}`")
