@@ -114,13 +114,13 @@ class SignalResult:
 class SignalService:
     """
     Service for generating and persisting daily trading signals.
-    
+
     Usage:
         service = SignalService()
         result = service.generate_signal()
         service.persist_signal(result)
     """
-    
+
     def __init__(
         self,
         long_model_path: str = "models/long_model.joblib",
@@ -132,44 +132,44 @@ class SignalService:
         self.short_model_path = Path(short_model_path)
         self.horizon_days = horizon_days
         self.target_return = target_return
-        
+
         # Lazy load models
         self._long_bundle = None
         self._short_bundle = None
-    
+
     def _load_models(self):
         """Load ML models if not already loaded."""
         if self._long_bundle is None:
             self._long_bundle = joblib.load(self.long_model_path)
         if self._short_bundle is None:
             self._short_bundle = joblib.load(self.short_model_path)
-    
+
     def generate_signal(self, target_date: Optional[date] = None) -> SignalResult:
         """
         Generate signal for the specified date (or latest available).
-        
+
         Args:
             target_date: Specific date to score, or None for latest.
-            
+
         Returns:
             SignalResult with all signal components.
         """
         self._load_models()
-        
+
         # 1) Pull raw data
         qs = RawDailyData.objects.order_by("date")
         df_raw = pd.DataFrame.from_records(qs.values())
-        
+
         if df_raw.empty:
             raise ValueError("No RawDailyData found in database")
-        
+
         # 2) Build features
         feats = build_features_and_labels_from_raw(
             df_raw,
             horizon_days=self.horizon_days,
             target_return=self.target_return,
         )
-        
+
         # 3) Get target row
         if target_date is not None:
             if target_date not in feats.index:
@@ -177,28 +177,28 @@ class SignalService:
             latest_date = target_date
         else:
             latest_date = feats.index.max()
-        
+
         latest_row = feats.loc[[latest_date]]
         row = feats.loc[latest_date]
-        
+
         # 4) ML Predictions
         long_model = self._long_bundle["model"]
         long_feats = self._long_bundle["feature_names"]
         short_model = self._short_bundle["model"]
         short_feats = self._short_bundle["feature_names"]
-        
+
         p_long = float(long_model.predict_proba(latest_row[long_feats])[:, 1][0])
         p_short = float(short_model.predict_proba(latest_row[short_feats])[:, 1][0])
-        
+
         signal_option_call = int(latest_row["signal_option_call"].iloc[0])
         signal_option_put = int(latest_row["signal_option_put"].iloc[0])
-        
+
         # 5) Fusion Engine
         fusion_result = fuse_signals(row)
         overlay = apply_overlays(fusion_result, row)
         size_mult = get_size_multiplier(overlay)
         dte_mult = get_dte_multiplier(overlay)
-        
+
         # 6) Core and tactical cooldown checks
         core_call_ok = self._check_trade_cooldown(latest_date, "CALL", CORE_SIGNAL_COOLDOWN_DAYS)
         core_put_ok = self._check_trade_cooldown(latest_date, "PUT", CORE_SIGNAL_COOLDOWN_DAYS)
@@ -214,7 +214,7 @@ class SignalService:
         # 8) Option signal cooldown check
         option_call_ok = signal_option_call == 1 and self._check_option_cooldown(latest_date, "OPTION_CALL")
         option_put_ok = signal_option_put == 1 and self._check_option_cooldown(latest_date, "OPTION_PUT")
-        
+
         # 9) MVRV Short signal check (bear market tactical short)
         # Add raw MVRV data to row for signal check
         try:
@@ -225,12 +225,12 @@ class SignalService:
             row_with_mvrv['btc_close'] = raw_data.btc_close
         except RawDailyData.DoesNotExist:
             row_with_mvrv = row
-        
+
         mvrv_short_signal = check_mvrv_short_signal(row_with_mvrv)
         mvrv_short_ok = mvrv_short_signal.active and self._check_trade_cooldown(
             latest_date, "MVRV_SHORT", MVRV_SHORT_COOLDOWN_DAYS
         )
-        
+
         # 10) Iron Condor gate evaluation
         # Compute vol metrics from raw OHLC (no lookahead)
         ohlc_qs = RawDailyData.objects.filter(date__lte=latest_date).order_by("date").values(
@@ -288,7 +288,7 @@ class SignalService:
                     mvrv_trailing_high=mvrv_trail_high,
                     mvrv_trailing_low=mvrv_trail_low,
                 )
-        
+
         trade_decision, trade_notes, no_trade_reasons, decision_trace = self._determine_trade_decision(
             fusion_result, size_mult, dte_mult, tactical_result, p_long, p_short,
             signal_option_call, signal_option_put, overlay, row,
@@ -297,7 +297,7 @@ class SignalService:
             mvrv_short_ok=mvrv_short_ok, mvrv_short_signal=mvrv_short_signal,
             condor_ok=condor_ok, condor_gate=condor_gate,
         )
-        
+
         # 10) Get strategy recommendation based on final trade decision
         if trade_decision in DECISION_STRATEGY_MAP:
             strategy_summary = get_decision_strategy_summary(trade_decision)
@@ -315,7 +315,7 @@ class SignalService:
         strategy_summary["spread_width_pct"] = policy.get_spread_width(trade_decision)
         dte_cfg = policy.get_dte_target(trade_decision)
         strategy_summary["dte_range"] = f"{dte_cfg.min_dte}-{dte_cfg.max_dte}d"
-        
+
         # Compute effective values
         if trade_decision == "NO_TRADE":
             effective_size = 0.0
@@ -335,14 +335,14 @@ class SignalService:
             size_mult = effective_size
         else:
             effective_size = size_mult
-        
+
         # Build model version info
         model_versions = {
             'long': self.long_model_path.name,
             'short': self.short_model_path.name,
         }
         decision_version = "2026-04-26.1"
-        
+
         return SignalResult(
             date=latest_date,
             p_long=p_long,
@@ -427,14 +427,14 @@ class SignalService:
         structures = ", ".join(s.value for s in strategy.primary_structures)
         dte_range = f"{strategy.dte.min_dte}-{strategy.dte.max_dte}d"
         rationale = strategy.rationale
-        
+
         # Extract numeric fields from spread guidance
         stop_loss_pct = None
         scale_down_day = None
         max_hold_days = None
         spread_width_pct = None
         take_profit_pct = None
-        
+
         if strategy.spread is not None:
             stop_loss_pct = strategy.spread.stop_loss_pct
             scale_down_day = strategy.spread.scale_down_day
@@ -462,13 +462,17 @@ class SignalService:
             "spread_width_pct": spread_width_pct,
             "take_profit_pct": take_profit_pct,
         }
-    
+
     def _check_trade_cooldown(self, current_date: date, decision_type: str, cooldown_days: int) -> bool:
-        """Return True when decision_type can fire on current_date."""
+        """Return True when decision_type can fire on current_date.
+
+        Note: Cooldown checks include inactive signals. Operator deactivation
+        hides signals from execution/API but doesn't reset cooldown timers.
+        """
         cutoff = current_date - timedelta(days=cooldown_days)
         last_signal = (
             DailySignal.objects
-            .filter(trade_decision=decision_type, date__gte=cutoff, date__lt=current_date, is_active=True)
+            .filter(trade_decision=decision_type, date__gte=cutoff, date__lt=current_date)
             .order_by("-date")
             .first()
         )
@@ -491,7 +495,7 @@ class SignalService:
     ) -> tuple[str, str, list, list]:
         """
         Determine final trade decision, notes, and diagnostics.
-        
+
         Priority:
             1. Fusion state (CALL/PUT/probes)
             2. Tactical Put (when fusion=NO_TRADE or CALL is cooldown-blocked)
@@ -499,17 +503,17 @@ class SignalService:
             4. MVRV Short (bear market tactical)
             5. Iron Condor (range gate passes in chop)
             6. NO_TRADE
-        
+
         Returns:
             Tuple of (decision, notes, no_trade_reasons, decision_trace)
         """
         no_trade_reasons = []
         decision_trace = []
-        
+
         # Build decision trace step by step
         fusion_step = f"fusion={fusion_result.state.value}(score={fusion_result.score},conf={fusion_result.confidence.value})"
         decision_trace.append(fusion_step)
-        
+
         # Check fusion state first — if fusion has a directional view, use it
         # TRANSITION_CHOP is treated like NO_TRADE for fallback purposes
         fusion_has_direction = fusion_result.state not in (MarketState.NO_TRADE, MarketState.TRANSITION_CHOP)
@@ -519,20 +523,20 @@ class SignalService:
                 decision_trace.append(f"tactical_put=active(strategy={tactical_result.strategy.value})")
             else:
                 decision_trace.append("tactical_put=inactive")
-            
+
             # Check confidence
             if fusion_result.confidence.value == "low":
                 no_trade_reasons.append("CONFIDENCE_TOO_LOW")
-            
+
             # Check overlay
             overlay_step = f"overlay(size={size_mult},dte={dte_mult},reason={overlay.reason[:30]})"
             decision_trace.append(overlay_step)
-            
+
             if size_mult == 0:
                 no_trade_reasons.append("OVERLAY_VETO")
                 decision_trace.append("stop_reason=OVERLAY_VETO")
                 return "NO_TRADE", "Overlay vetoed (size_mult=0)", no_trade_reasons, decision_trace
-            
+
             # Check fusion-based trades
             is_long = fusion_result.state in {
                 MarketState.STRONG_BULLISH,
@@ -588,21 +592,21 @@ class SignalService:
 
                 decision_trace.append(f"stop_reason={cooldown_reason}")
                 return "NO_TRADE", f"{core_decision} cooldown active", no_trade_reasons, decision_trace
-            
+
             # Catch-all for non-tradeable fusion states
             no_trade_reasons.append("STATE_NOT_TRADEABLE")
             decision_trace.append("stop_reason=STATE_NOT_TRADEABLE")
             return "NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, decision_trace
-        
+
         # --- Fusion is NO_TRADE or TRANSITION_CHOP — check fallbacks ---
         decision_trace.append(f"fusion={fusion_result.state.value} (no direction)")
-        
+
         if tactical_result.active:
             decision_trace.append(f"tactical_put=active(strategy={tactical_result.strategy.value}) -> TRADE")
             return "TACTICAL_PUT", tactical_result.reason, [], decision_trace
         else:
             decision_trace.append("tactical_put=inactive")
-        
+
         # Option CALL fallback
         if option_call_ok:
             # Apply overlay check
@@ -617,7 +621,7 @@ class SignalService:
             return "OPTION_CALL", "Rule: MVRV cheap (2+ flags) + Sentiment fear", [], decision_trace
         elif signal_option_call == 1:
             decision_trace.append("option_call=fired but cooldown_active -> skip")
-        
+
         # Option PUT fallback
         if option_put_ok:
             if size_mult == 0:
@@ -637,7 +641,7 @@ class SignalService:
             return "OPTION_PUT", "Rule: MVRV overheated + Sentiment greed + Whale distrib", [], decision_trace
         elif signal_option_put == 1:
             decision_trace.append("option_put=fired but cooldown_active -> skip")
-        
+
         # MVRV Short fallback (bear market tactical short)
         if mvrv_short_ok and mvrv_short_signal is not None and mvrv_short_signal.active:
             decision_trace.append(
@@ -657,7 +661,7 @@ class SignalService:
             decision_trace.append(f"mvrv_short=active but cooldown_active -> skip")
         elif mvrv_short_signal is not None and not mvrv_short_signal.active:
             decision_trace.append(f"mvrv_short=inactive({mvrv_short_signal.reason})")
-        
+
         # Iron Condor fallback (range-bound strategy when everything is flat)
         if condor_ok and condor_gate is not None:
             decision_trace.append(
@@ -675,23 +679,23 @@ class SignalService:
             if condor_gate.eligible and not condor_ok:
                 reasons.append("cooldown")
             decision_trace.append(f"condor_gate=blocked({'; '.join(reasons)})")
-        
+
         # Default NO_TRADE
         no_trade_reasons.append("FUSION_STATE_NO_TRADE")
         decision_trace.append("stop_reason=FUSION_STATE_NO_TRADE")
         return "NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, decision_trace
-    
+
     def persist_signal(self, result: SignalResult) -> tuple[DailySignal, bool]:
         """
         Persist signal to database, updating if same (date, trade_decision) exists.
-        
+
         Multiple trade types can coexist on the same day. Each is keyed by
         (date, trade_decision) so re-runs are idempotent but different decisions
         create separate rows.
-        
+
         Args:
             result: SignalResult to persist.
-            
+
         Returns:
             Tuple of (DailySignal instance, created: bool).
         """
@@ -743,18 +747,18 @@ class SignalService:
             }
         )
         return signal, created
-    
+
     def generate_and_persist(self, target_date: Optional[date] = None) -> DailySignal:
         """
         Convenience method to generate and persist in one call.
-        
+
         Uses the full multi-signal flow (generate_all_signals + persist_all_signals)
         to ensure proper handling of inactive rows and day-is-done rules.
         Returns the highest-priority signal.
-        
+
         Args:
             target_date: Specific date to score, or None for latest.
-            
+
         Returns:
             DailySignal model instance (highest priority).
         """
@@ -772,69 +776,69 @@ class SignalService:
     def generate_all_signals(self, target_date: Optional[date] = None) -> list[SignalResult]:
         """
         Generate ALL qualifying signals for a date, evaluating gates independently.
-        
+
         Unlike generate_signal (which uses a priority waterfall and returns one),
         this evaluates each gate independently and returns all that qualify.
         This matches backtest behavior where MVRV_SHORT + IRON_CONDOR can
         coexist on the same day.
-        
+
         Returns:
             List of SignalResult objects (one per qualifying trade type).
             Always includes at least one result (NO_TRADE if nothing qualifies).
         """
         self._load_models()
-        
+
         # Shared computation (same as generate_signal steps 1-11)
         qs = RawDailyData.objects.order_by("date")
         df_raw = pd.DataFrame.from_records(qs.values())
         if df_raw.empty:
             raise ValueError("No RawDailyData found in database")
-        
+
         feats = build_features_and_labels_from_raw(
             df_raw, horizon_days=self.horizon_days, target_return=self.target_return,
         )
-        
+
         if target_date is not None:
             if target_date not in feats.index:
                 raise ValueError(f"No features available for {target_date}")
             latest_date = target_date
         else:
             latest_date = feats.index.max()
-        
+
         latest_row = feats.loc[[latest_date]]
         row = feats.loc[latest_date]
-        
+
         # ML Predictions
         long_model = self._long_bundle["model"]
         long_feats = self._long_bundle["feature_names"]
         short_model = self._short_bundle["model"]
         short_feats = self._short_bundle["feature_names"]
-        
+
         p_long = float(long_model.predict_proba(latest_row[long_feats])[:, 1][0])
         p_short = float(short_model.predict_proba(latest_row[short_feats])[:, 1][0])
         signal_option_call = int(latest_row["signal_option_call"].iloc[0])
         signal_option_put = int(latest_row["signal_option_put"].iloc[0])
-        
+
         # Fusion + Overlay
         fusion_result = fuse_signals(row)
         overlay = apply_overlays(fusion_result, row)
         size_mult = get_size_multiplier(overlay)
         dte_mult = get_dte_multiplier(overlay)
-        
+
         # Cooldowns
         core_call_ok = self._check_trade_cooldown(latest_date, "CALL", CORE_SIGNAL_COOLDOWN_DAYS)
         core_put_ok = self._check_trade_cooldown(latest_date, "PUT", CORE_SIGNAL_COOLDOWN_DAYS)
         tactical_put_ok = self._check_trade_cooldown(latest_date, "TACTICAL_PUT", TACTICAL_PUT_COOLDOWN_DAYS)
-        
+
         # Tactical Put
         tactical_result = tactical_put_inside_bull(
             fusion_result, row, cooldown_active=not tactical_put_ok,
         )
-        
+
         # Option signals
         option_call_ok = signal_option_call == 1 and self._check_option_cooldown(latest_date, "OPTION_CALL")
         option_put_ok = signal_option_put == 1 and self._check_option_cooldown(latest_date, "OPTION_PUT")
-        
+
         # MVRV Short
         try:
             raw_data = RawDailyData.objects.get(date=latest_date)
@@ -845,12 +849,12 @@ class SignalService:
         except RawDailyData.DoesNotExist:
             raw_data = None
             row_with_mvrv = row
-        
+
         mvrv_short_signal = check_mvrv_short_signal(row_with_mvrv)
         mvrv_short_ok = mvrv_short_signal.active and self._check_trade_cooldown(
             latest_date, "MVRV_SHORT", MVRV_SHORT_COOLDOWN_DAYS
         )
-        
+
         # Iron Condor gate
         ohlc_qs = RawDailyData.objects.filter(date__lte=latest_date).order_by("date").values(
             "btc_open", "btc_high", "btc_low", "btc_close"
@@ -860,14 +864,14 @@ class SignalService:
             atr_ratio, gap_pct = compute_vol_metrics(ohlc_df)
         else:
             atr_ratio, gap_pct = None, None
-        
+
         dp_val = row.get("distribution_pressure_score", None)
         if dp_val is not None:
             dp_series = feats.loc[:latest_date, "distribution_pressure_score"]
             dp_expanding_median = float(dp_series.expanding().median().iloc[-1])
         else:
             dp_expanding_median = None
-        
+
         condor_gate = evaluate_condor_gate(
             row, fusion_state=fusion_result.state.value,
             dp_expanding_median=dp_expanding_median,
@@ -877,7 +881,7 @@ class SignalService:
             latest_date, "IRON_CONDOR", CONDOR_COOLDOWN_DAYS
         )
         condor_ok = condor_gate.eligible and condor_cooldown_ok
-        
+
         # Condor strikes
         condor_strikes = None
         if raw_data:
@@ -899,17 +903,17 @@ class SignalService:
                     spot=btc_close_val, mvrv_60d=mvrv_60d_val,
                     mvrv_trailing_high=mvrv_trail_high, mvrv_trailing_low=mvrv_trail_low,
                 )
-        
+
         # --- Evaluate all gates independently ---
         results = []
-        
+
         # Shared base for building SignalResult
         def _build_result(trade_decision, trade_notes, no_trade_reasons, decision_trace, effective_size, size_m):
             if trade_decision in DECISION_STRATEGY_MAP:
                 strategy = get_decision_strategy_summary(trade_decision)
             else:
                 strategy = self._get_strategy_summary_with_path_risk(fusion_result.state)
-            
+
             policy = get_policy()
             policy_exit = policy.get_exit_params(trade_decision)
             if policy_exit is not None:
@@ -920,7 +924,7 @@ class SignalService:
             strategy["spread_width_pct"] = policy.get_spread_width(trade_decision)
             dte_cfg = policy.get_dte_target(trade_decision)
             strategy["dte_range"] = f"{dte_cfg.min_dte}-{dte_cfg.max_dte}d"
-            
+
             return SignalResult(
                 date=latest_date,
                 p_long=p_long,
@@ -974,10 +978,10 @@ class SignalService:
                     'spot': condor_strikes.spot,
                 } if condor_strikes and trade_decision == "IRON_CONDOR" else {},
             )
-        
+
         # Gate 1: Core fusion (CALL/PUT) or Tactical Put
         fusion_has_direction = fusion_result.state not in (MarketState.NO_TRADE, MarketState.TRANSITION_CHOP)
-        
+
         long_states = {
             MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY,
             MarketState.MOMENTUM_CONTINUATION, MarketState.BEAR_EXHAUSTION_LONG,
@@ -988,7 +992,7 @@ class SignalService:
             MarketState.BEAR_CONTINUATION_SHORT, MarketState.LATE_DISTRIBUTION_SHORT,
             MarketState.BEAR_PROBE,
         }
-        
+
         if fusion_has_direction and size_mult > 0:
             if fusion_result.state in long_states and core_call_ok:
                 notes = f"Fusion: {fusion_result.state.value}"
@@ -1005,13 +1009,13 @@ class SignalService:
         elif not fusion_has_direction and tactical_result.active:
             trace = [f"fusion={fusion_result.state.value}(no direction), tactical_put=active"]
             results.append(_build_result("TACTICAL_PUT", tactical_result.reason, [], trace, size_mult, size_mult))
-        
+
         # Gate 2: Option CALL (independent of fusion direction)
         if option_call_ok and size_mult > 0:
             scaled = min(OPTION_SIGNAL_SIZE_MULT, OPTION_SIGNAL_SIZE_MULT * size_mult)
             trace = [f"option_call=fired(cooldown_ok), effective_size={scaled:.2f}"]
             results.append(_build_result("OPTION_CALL", "Rule: MVRV cheap (2+ flags) + Sentiment fear", [], trace, scaled, scaled))
-        
+
         # Gate 3: Option PUT (independent)
         if option_put_ok and size_mult > 0:
             efb_veto, _ = compute_efb_veto(row)
@@ -1019,7 +1023,7 @@ class SignalService:
                 scaled = min(OPTION_SIGNAL_SIZE_MULT, OPTION_SIGNAL_SIZE_MULT * size_mult)
                 trace = [f"option_put=fired(cooldown_ok), effective_size={scaled:.2f}"]
                 results.append(_build_result("OPTION_PUT", "Rule: MVRV overheated + Sentiment greed + Whale distrib", [], trace, scaled, scaled))
-        
+
         # Gate 4: MVRV Short (independent)
         if mvrv_short_ok:
             trace = [f"mvrv_short=active(7d={mvrv_short_signal.mvrv_7d:.3f}, 60d={mvrv_short_signal.mvrv_60d:.3f})"]
@@ -1030,39 +1034,45 @@ class SignalService:
                 f"Target: ${mvrv_short_signal.target_price:,.0f}"
             )
             results.append(_build_result("MVRV_SHORT", notes, [], trace, MVRV_SHORT_SIZE_MULT, MVRV_SHORT_SIZE_MULT))
-        
+
         # Gate 5: Iron Condor (independent)
         if condor_ok:
             trace = [f"condor_gate=eligible(score={condor_gate.score:.0f})"]
             notes = f"Range gate: score={condor_gate.score:.0f}, chop state"
             results.append(_build_result("IRON_CONDOR", notes, [], trace, 0.50, 0.50))
-        
+
         # If nothing qualified, return NO_TRADE
         if not results:
-            no_trade_reasons = ["FUSION_STATE_NO_TRADE"]
-            trace = [f"fusion={fusion_result.state.value}", "all_gates=inactive -> NO_TRADE"]
+            # Determine why no trade: overlay veto vs fusion state
+            if size_mult == 0 and fusion_result.state not in (MarketState.NO_TRADE, MarketState.TRANSITION_CHOP):
+                # Overlay vetoed a directional fusion state
+                no_trade_reasons = ["OVERLAY_VETO"]
+                trace = [f"fusion={fusion_result.state.value}", "overlay_veto=size_mult_0 -> NO_TRADE"]
+            else:
+                no_trade_reasons = ["FUSION_STATE_NO_TRADE"]
+                trace = [f"fusion={fusion_result.state.value}", "all_gates=inactive -> NO_TRADE"]
             results.append(_build_result("NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, trace, 0.0, 0.0))
-        
+
         return results
 
     def persist_all_signals(self, results: list[SignalResult]) -> list[tuple[DailySignal, bool]]:
         """
         Persist signals for the day. Returns list of (signal, is_new) tuples.
-        
+
         Rules:
             - If the date already has active tradeable signals, the day is done.
               Only update those existing rows (keep fresh). No new signals created.
             - If no tradeable signals exist for the date yet, persist all qualifying
               results and notify (first fire of the day).
-        
+
         Wrapped in a transaction with row lock for race safety.
         """
         from django.db import transaction
-        
+
         if not results:
             return []
         signal_date = results[0].date
-        
+
         with transaction.atomic():
             # Lock a guaranteed row to serialize concurrent hourly runs for the same date.
             # RawDailyData always has a row for the evaluated date (it's the data source).
@@ -1071,16 +1081,16 @@ class SignalService:
                 raise ValueError(
                     f"No RawDailyData for {signal_date} — cannot safely serialize signal persistence"
                 )
-            
+
             # Now safely check if today already has any active tradeable signals
             existing_tradeable = list(
                 DailySignal.objects.filter(
                     date=signal_date, is_active=True
                 ).exclude(trade_decision="NO_TRADE")
             )
-            
+
             persisted = []
-            
+
             if existing_tradeable:
                 # Day is done — update existing active rows to keep data fresh.
                 # Also reactivate any inactive rows that re-qualify.
@@ -1132,8 +1142,13 @@ class SignalService:
             else:
                 # First fire of the day — persist all qualifying signals
                 tradeable_persisted = False
+                vetoed_no_trade = None
+
                 for result in results:
                     if result.trade_decision == "NO_TRADE":
+                        # Check if this is a vetoed NO_TRADE (worth persisting for notifications)
+                        if "OVERLAY_VETO" in (result.no_trade_reasons or []):
+                            vetoed_no_trade = result
                         continue
                     # Check for existing inactive row (operator deactivated, now re-qualifies)
                     inactive_row = DailySignal.objects.filter(
@@ -1148,12 +1163,23 @@ class SignalService:
                     is_new = created or (inactive_row is not None)
                     persisted.append((signal, is_new))
                     tradeable_persisted = True
-                
+
                 # If we persisted tradeable signals, deactivate any stale NO_TRADE for this date
                 # (NO_TRADE from earlier hourly run is now superseded by real signals)
                 if tradeable_persisted:
                     DailySignal.objects.filter(
                         date=signal_date, trade_decision="NO_TRADE", is_active=True
                     ).update(is_active=False)
-        
+                elif vetoed_no_trade:
+                    # No tradeable signals, but we have a vetoed NO_TRADE — persist it
+                    # so notify_signal can find it and avoid notifying stale older trades
+                    signal, created = self.persist_signal(vetoed_no_trade)
+                    persisted.append((signal, created))
+                else:
+                    # No tradeable signals and no veto — deactivate any stale vetoed NO_TRADE
+                    # (veto lifted, day is now ordinary NO_TRADE)
+                    DailySignal.objects.filter(
+                        date=signal_date, trade_decision="NO_TRADE", is_active=True
+                    ).update(is_active=False)
+
         return persisted

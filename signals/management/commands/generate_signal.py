@@ -159,9 +159,12 @@ class Command(BaseCommand):
     def _send_telegram_notification(self, signal, verbose: bool, include_setup: bool = True):
         """Send Telegram notification for new/changed tradeable signals."""
         if signal.trade_decision == "NO_TRADE":
-            if verbose:
-                self.stdout.write("Skipping Telegram notification (NO_TRADE)")
-            return
+            # Check if this is a vetoed NO_TRADE (worth notifying)
+            no_trade_reasons = signal.no_trade_reasons or []
+            if "OVERLAY_VETO" not in no_trade_reasons:
+                if verbose:
+                    self.stdout.write("Skipping Telegram notification (NO_TRADE)")
+                return
 
         try:
             from notifications.notifier import TelegramNotifier
