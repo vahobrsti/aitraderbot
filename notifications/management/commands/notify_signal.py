@@ -24,18 +24,34 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        # Find latest signal — tradeable preferred, fall back to any for --force
-        latest_tradeable = DailySignal.tradeable().order_by('-date').first()
+        # Find the latest active signal date, then pick the best signal for that date
+        latest_active = DailySignal.active().order_by('-date').first()
         
-        if latest_tradeable:
-            candidates = DailySignal.tradeable().filter(date=latest_tradeable.date)
-            signal = DailySignal.pick_highest_priority(candidates)
-        else:
-            signal = None
+        if latest_active is None:
+            if options.get("force"):
+                # --force: try any signal at all
+                latest_active = DailySignal.objects.order_by('-date').first()
+            if latest_active is None:
+                self.stderr.write(self.style.ERROR("No signals found in database"))
+                return
         
-        # If no tradeable signal and --force, fall back to any active signal
+        latest_date = latest_active.date
+        
+        # For the latest date, prefer tradeable signals
+        tradeable_candidates = DailySignal.tradeable().filter(date=latest_date)
+        signal = DailySignal.pick_highest_priority(tradeable_candidates)
+        
+        if signal is None:
+            # No tradeable signals for this date — check for vetoed NO_TRADE
+            no_trade = DailySignal.active().filter(date=latest_date, trade_decision="NO_TRADE").first()
+            if no_trade:
+                no_trade_reasons = no_trade.no_trade_reasons or []
+                if "OVERLAY_VETO" in no_trade_reasons:
+                    signal = no_trade  # Vetoed signal — worth notifying
+        
+        # If still no signal and --force, use any active signal for the date
         if signal is None and options.get("force"):
-            signal = DailySignal.active().order_by('-date').first()
+            signal = DailySignal.active().filter(date=latest_date).first()
         
         if signal is None:
             self.stderr.write(self.style.ERROR("No active signals found in database"))
@@ -47,10 +63,13 @@ class Command(BaseCommand):
             self.stdout.write(f"Fusion State: {signal.fusion_state}")
 
         if signal.trade_decision == "NO_TRADE" and not options["force"]:
-            self.stdout.write(
-                self.style.WARNING(f"Skipping NO_TRADE signal for {signal.date}")
-            )
-            return
+            # Check if this is a vetoed signal (worth notifying)
+            no_trade_reasons = signal.no_trade_reasons or []
+            if "OVERLAY_VETO" not in no_trade_reasons:
+                self.stdout.write(
+                    self.style.WARNING(f"Skipping NO_TRADE signal for {signal.date}")
+                )
+                return
 
         try:
             notifier = TelegramNotifier()

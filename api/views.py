@@ -57,29 +57,59 @@ class DailySignalLatestView(APIView):
             )
 
 
-class DailySignalDetailView(generics.ListAPIView):
+class DailySignalDetailView(APIView):
     """
     GET /api/v1/signals/<date>/
+    GET /api/v1/signals/<date>/?type=IRON_CONDOR
+    GET /api/v1/signals/<date>/?all=true
     
-    Get all signals for a specific date (may be multiple trade types).
+    Get signal(s) for a specific date.
     Date format: YYYY-MM-DD
-    Ordered by trading priority (highest priority first).
+    
+    By default, returns the highest-priority signal as a single object (backward compatible).
+    
+    Query params:
+        type: Filter to specific trade decision (e.g., IRON_CONDOR, CALL)
+        all: If "true", returns all signals for the date as a list
     """
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
-    serializer_class = DailySignalSerializer
 
-    def get_queryset(self):
+    def get(self, request, date):
         from django.db.models import Case, When, IntegerField
-        date_str = self.kwargs['date']
+        
+        # Build priority ordering
         priority_ordering = Case(
             *[When(trade_decision=k, then=v) for k, v in DailySignal.DECISION_PRIORITY.items()],
             default=50,
             output_field=IntegerField(),
         )
-        return DailySignal.active().filter(date=date_str).annotate(
+        
+        # Base queryset
+        qs = DailySignal.active().filter(date=date).annotate(
             priority_rank=priority_ordering
         ).order_by('priority_rank')
+        
+        # Filter by type if specified
+        signal_type = request.query_params.get('type')
+        if signal_type:
+            qs = qs.filter(trade_decision=signal_type.upper())
+        
+        # Return all signals as list if requested
+        return_all = request.query_params.get('all', '').lower() == 'true'
+        if return_all:
+            serializer = DailySignalSerializer(qs, many=True)
+            return Response(serializer.data)
+        
+        # Default: return single highest-priority signal (backward compatible)
+        signal = qs.first()
+        if signal is None:
+            return Response(
+                {"error": f"No signals found for {date}"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        serializer = DailySignalSerializer(signal)
+        return Response(serializer.data)
 
 
 class TradeSetupView(APIView):

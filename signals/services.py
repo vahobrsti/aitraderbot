@@ -699,6 +699,7 @@ class SignalService:
             date=result.date,
             trade_decision=result.trade_decision,
             defaults={
+                'is_active': True,  # Always reactivate when persisting
                 'p_long': result.p_long,
                 'p_short': result.p_short,
                 'signal_option_call': result.signal_option_call,
@@ -747,15 +748,26 @@ class SignalService:
         """
         Convenience method to generate and persist in one call.
         
+        Uses the full multi-signal flow (generate_all_signals + persist_all_signals)
+        to ensure proper handling of inactive rows and day-is-done rules.
+        Returns the highest-priority signal.
+        
         Args:
             target_date: Specific date to score, or None for latest.
             
         Returns:
-            DailySignal model instance.
+            DailySignal model instance (highest priority).
         """
-        result = self.generate_signal(target_date)
-        signal, _ = self.persist_signal(result)
-        return signal
+        results = self.generate_all_signals(target_date)
+        persisted = self.persist_all_signals(results)
+        if not persisted:
+            # No tradeable signals — return the NO_TRADE result
+            result = self.generate_signal(target_date)
+            signal, _ = self.persist_signal(result)
+            return signal
+        # Return highest priority signal
+        signals = [s for s, _ in persisted]
+        return DailySignal.pick_highest_priority(signals) or signals[0]
 
     def generate_all_signals(self, target_date: Optional[date] = None) -> list[SignalResult]:
         """
@@ -1070,15 +1082,34 @@ class SignalService:
             persisted = []
             
             if existing_tradeable:
-                # Day is done — update existing rows to keep data fresh
+                # Day is done — update existing active rows to keep data fresh.
+                # Also reactivate any inactive rows that re-qualify.
                 existing_decisions = {s.trade_decision for s in existing_tradeable}
                 updated_decisions = set()
                 for result in results:
+                    if result.trade_decision == "NO_TRADE":
+                        continue
                     if result.trade_decision in existing_decisions:
+                        # Active signal exists — just refresh it
                         signal, _ = self.persist_signal(result)
                         persisted.append((signal, False))
                         updated_decisions.add(result.trade_decision)
-                # For existing signals not in current results, refresh market-context
+                    else:
+                        # Not in active set — check if there's an inactive row to reactivate
+                        inactive_row = DailySignal.objects.filter(
+                            date=result.date, trade_decision=result.trade_decision, is_active=False
+                        ).first()
+                        if inactive_row:
+                            # Reactivate: set is_active=True before persist_signal updates it
+                            inactive_row.is_active = True
+                            inactive_row.save(update_fields=['is_active'])
+                            signal, _ = self.persist_signal(result)
+                            # Treat reactivation as new for notification
+                            persisted.append((signal, True))
+                            updated_decisions.add(result.trade_decision)
+                        # else: no inactive row exists, and we don't create new signals
+                        # after day is done — this is intentional
+                # For existing active signals not in current results, refresh market-context
                 # fields (probabilities, fusion, scores) so API/execution see current data
                 for s in existing_tradeable:
                     if s.trade_decision not in updated_decisions:
@@ -1100,6 +1131,7 @@ class SignalService:
                         persisted.append((s, False))
             else:
                 # First fire of the day — persist all qualifying signals
+                tradeable_persisted = False
                 for result in results:
                     if result.trade_decision == "NO_TRADE":
                         continue
@@ -1115,5 +1147,13 @@ class SignalService:
                     # Treat reactivation as a new signal for notification purposes
                     is_new = created or (inactive_row is not None)
                     persisted.append((signal, is_new))
+                    tradeable_persisted = True
+                
+                # If we persisted tradeable signals, deactivate any stale NO_TRADE for this date
+                # (NO_TRADE from earlier hourly run is now superseded by real signals)
+                if tradeable_persisted:
+                    DailySignal.objects.filter(
+                        date=signal_date, trade_decision="NO_TRADE", is_active=True
+                    ).update(is_active=False)
         
         return persisted

@@ -23,17 +23,7 @@ class Migration(migrations.Migration):
             name='date',
             field=models.DateField(db_index=True),
         ),
-        # 2. Add is_active field (default True for existing rows)
-        migrations.AddField(
-            model_name='dailysignal',
-            name='is_active',
-            field=models.BooleanField(
-                default=True,
-                db_index=True,
-                help_text='False = signal no longer qualifies but couldn\'t be deleted (protected by execution intent)',
-            ),
-        ),
-        # 3. Add composite unique constraint (date, trade_decision)
+        # 2. Add composite unique constraint (date, trade_decision)
         migrations.AddConstraint(
             model_name='dailysignal',
             constraint=models.UniqueConstraint(
@@ -41,7 +31,7 @@ class Migration(migrations.Migration):
                 name='unique_date_trade_decision',
             ),
         ),
-        # 4. Update ordering
+        # 3. Update ordering
         migrations.AlterModelOptions(
             name='dailysignal',
             options={
