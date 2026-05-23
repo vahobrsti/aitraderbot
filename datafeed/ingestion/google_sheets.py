@@ -86,8 +86,8 @@ def force_refresh_control_cell(
     control_cell: str = "A1",
 ) -> str:
     """
-    Force the Google Sheet to recalculate by writing today's UTC date
-    to the control cell.
+    Force the Google Sheet to recalculate by toggling the control cell
+    between a DATE() formula and a plain string.
     
     Args:
         sheet_id: The Google Sheet ID
@@ -95,19 +95,28 @@ def force_refresh_control_cell(
         control_cell: Cell address to write to (default: "A1")
     
     Returns:
-        The date string that was written (YYYY-MM-DD format)
+        The value that was written (formula or date string)
     
-    This creates a real edit which forces recalculation of any formulas
-    that depend on this cell.
+    This guarantees a cell change even if called multiple times per day,
+    which forces recalculation of any formulas that depend on this cell.
     """
     client = get_write_client()
     spreadsheet = client.open_by_key(sheet_id)
     worksheet = spreadsheet.worksheet(control_sheet)
     
-    today_utc = datetime.datetime.utcnow().date().strftime("%Y-%m-%d")
-    worksheet.update_acell(control_cell, today_utc)
+    # Read current value to decide what to write
+    current = worksheet.acell(control_cell).value or ""
+    today = datetime.datetime.utcnow().date()
     
-    return today_utc
+    if current.startswith("="):
+        # Currently a formula, write plain string
+        new_value = today.strftime("%Y-%m-%d")
+    else:
+        # Currently a string, write DATE() formula
+        new_value = f"=DATE({today.year},{today.month},{today.day})"
+    
+    worksheet.update_acell(control_cell, new_value)
+    return new_value
 
 
 def verify_sheet_freshness(
