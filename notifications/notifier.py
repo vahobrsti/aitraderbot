@@ -99,17 +99,21 @@ class TelegramNotifier:
         decision_emoji = self._get_decision_emoji(signal.trade_decision)
         confidence_emoji = self._get_confidence_emoji(signal.fusion_confidence)
         
+        # Escape underscores for Telegram Markdown
+        safe_decision = signal.trade_decision.replace("_", "\\_")
+        safe_state = signal.fusion_state.replace("_", "\\_")
+        
         # Header - different for vetoed signals
         if signal.overlay_veto:
             msg = f"⛔ *SIGNAL VETOED*\n"
             msg += f"📅 {signal.date}\n\n"
             msg += f"⚠️ *Veto Reason:* `{signal.overlay_reason}`\n\n"
         else:
-            msg = f"{decision_emoji} *{signal.trade_decision}* Signal\n"
+            msg = f"{decision_emoji} *{safe_decision}* Signal\n"
             msg += f"📅 {signal.date}\n\n"
         
         # Market State
-        msg += f"*Fusion State:* `{signal.fusion_state}`\n"
+        msg += f"*Fusion State:* `{safe_state}`\n"
         msg += f"*Score:* {signal.fusion_score:+d} {confidence_emoji} ({signal.fusion_confidence})\n"
         
         # Score breakdown (if available)
@@ -165,16 +169,17 @@ class TelegramNotifier:
     def _format_option_signal_message(self, signal: SignalMessage) -> str:
         """Format a standalone option signal notification (call/put from interaction rules)."""
         parts = []
-        
-        if signal.signal_option_call == 1:
+
+        # Only emit the message matching the trade_decision to avoid duplicates
+        if signal.trade_decision == "OPTION_CALL" and signal.signal_option_call == 1:
             parts.append("📗 *OPTION SIGNAL: CALL*")
             parts.append("Rule: `MVRV cheap + Sentiment fear`")
             parts.append(f"Historical hit rate: ~72%")
-        
-        if signal.signal_option_put == 1:
+
+        if signal.trade_decision == "OPTION_PUT" and signal.signal_option_put == 1:
             parts.append("📕 *OPTION SIGNAL: PUT*")
             parts.append("Rule: `MVRV overheated + Sentiment greed`")
-        
+
         parts.append(f"📅 {signal.date}")
         parts.append("")
         parts.append(f"*Fusion State:* `{signal.fusion_state}`")
@@ -200,6 +205,11 @@ class TelegramNotifier:
             print(f"Telegram send error: {e}")
             return False
     
+    def send_message(self, message: str) -> bool:
+        """Send a raw text message to Telegram."""
+        import asyncio
+        return asyncio.run(self._send_async(message))
+
     def send_signal(self, signal: SignalMessage) -> bool:
         """
         Send signal notification to Telegram.
@@ -207,10 +217,8 @@ class TelegramNotifier:
         Returns:
             True if sent successfully, False otherwise.
         """
-        has_option_signal = (signal.signal_option_call == 1 or signal.signal_option_put == 1)
-        
-        # Skip NO_TRADE unless it's a vetoed signal or an option signal fired
-        if signal.trade_decision == "NO_TRADE" and not signal.overlay_veto and not has_option_signal:
+        # Skip NO_TRADE unless it's a vetoed signal
+        if signal.trade_decision == "NO_TRADE" and not signal.overlay_veto:
             return False
         
         # If fusion produced a trade, send the normal message
@@ -220,8 +228,8 @@ class TelegramNotifier:
         else:
             result = True  # No fusion message needed
         
-        # Additionally send option signal alert if fired
-        if has_option_signal:
+        # Additionally send option signal alert if this IS an option trade
+        if signal.trade_decision in ("OPTION_CALL", "OPTION_PUT"):
             option_msg = self._format_option_signal_message(signal)
             option_result = asyncio.run(self._send_async(option_msg))
             result = result and option_result
@@ -285,7 +293,7 @@ class TelegramNotifier:
             try:
                 from execution.services.trade_setup import TradeSetupBuilder
                 builder = TradeSetupBuilder()
-                setup = builder.build_setup(daily_signal.date)
+                setup = builder.build_setup(daily_signal.date, signal_type=daily_signal.trade_decision)
                 if setup:
                     setup_result = self.send_trade_setup(setup)
                     result = result and setup_result

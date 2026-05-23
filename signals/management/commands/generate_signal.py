@@ -1,7 +1,10 @@
 # signals/management/commands/generate_signal.py
 """
-Generate and persist daily trading signal.
-Designed for cron/scheduled execution.
+Generate and persist trading signals.
+Designed for hourly cron execution.
+
+Evaluates all independent gates and persists each qualifying signal.
+Only sends notifications when a signal is new or has changed.
 """
 from django.core.management.base import BaseCommand
 
@@ -9,7 +12,7 @@ from signals.services import SignalService
 
 
 class Command(BaseCommand):
-    help = "Generate today's trading signal and save to database."
+    help = "Generate trading signals and save to database. Supports multiple signals per day."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -44,7 +47,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--notify",
             action="store_true",
-            help="Send Telegram notification (only for non-NO_TRADE signals)",
+            help="Send Telegram notification (only on new/changed signals)",
         )
         parser.add_argument(
             "--date",
@@ -80,115 +83,100 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         from datetime import datetime
-        
+
         service = SignalService(
             long_model_path=options["long_model"],
             short_model_path=options["short_model"],
             horizon_days=options["horizon"],
             target_return=options["target_return"],
         )
-        
+
         # Parse optional date
         target_date = None
         if options["date"]:
             target_date = datetime.strptime(options["date"], "%Y-%m-%d").date()
 
         try:
-            # Generate signal
-            result = service.generate_signal(target_date)
-            
-            # Persist if requested
-            if options["persist"]:
-                signal = service.persist_signal(result)
-            else:
-                # Create a mock object with the same attributes for output
-                from types import SimpleNamespace
-                signal = SimpleNamespace(
-                    date=result.date,
-                    p_long=result.p_long,
-                    p_short=result.p_short,
-                    signal_option_call=result.signal_option_call,
-                    signal_option_put=result.signal_option_put,
-                    fusion_state=result.fusion_state,
-                    fusion_confidence=result.fusion_confidence,
-                    fusion_score=result.fusion_score,
-                    trade_decision=result.trade_decision,
-                    size_multiplier=result.size_multiplier,
-                    tactical_put_active=result.tactical_put_active,
-                    tactical_put_strategy=result.tactical_put_strategy,
-                    no_trade_reasons=result.no_trade_reasons,
-                    # Added missing fields for notification
-                    option_structures=result.option_structures,
-                    strike_guidance=result.strike_guidance,
-                    dte_range=result.dte_range,
-                    strategy_rationale=result.strategy_rationale,
-                    stop_loss=result.stop_loss,
-                    score_components=result.score_components,
-                    overlay_reason=result.overlay_reason,
-                )
-                self.stdout.write(self.style.WARNING("[DRY RUN] Signal not persisted"))
-            
-            if options["verbose"]:
-                self.stdout.write(f"\n{'='*50}")
-                self.stdout.write(f"Signal generated for: {signal.date}")
-                self.stdout.write(f"{'='*50}")
-                self.stdout.write(f"p_long:         {signal.p_long:.3f}")
-                self.stdout.write(f"p_short:        {signal.p_short:.3f}")
-                self.stdout.write(f"Fusion State:   {signal.fusion_state}")
-                self.stdout.write(f"Fusion Score:   {signal.fusion_score:+d}")
-                self.stdout.write(f"Decision:       {signal.trade_decision}")
-                self.stdout.write(f"Size Mult:      {signal.size_multiplier:.2f}")
-                if signal.tactical_put_active:
-                    self.stdout.write(f"Tactical Put:   {signal.tactical_put_strategy}")
-                if hasattr(signal, 'signal_option_call'):
-                    self.stdout.write(f"Option Call:    {signal.signal_option_call}")
-                    self.stdout.write(f"Option Put:     {signal.signal_option_put}")
-                if hasattr(signal, 'stop_loss') and signal.stop_loss:
-                    self.stdout.write(f"Stop Loss:      {signal.stop_loss}")
-                self.stdout.write(f"{'='*50}\n")
-            else:
-                # Minimal output for cron
+            # Generate all qualifying signals
+            results = service.generate_all_signals(target_date)
+
+            if not options["persist"]:
+                self.stdout.write(self.style.WARNING("[DRY RUN] Signals not persisted"))
+                for r in results:
+                    self.stdout.write(
+                        f"  {r.date} | {r.fusion_state} | {r.trade_decision} | size={r.effective_size:.2f}"
+                    )
+                return
+
+            # Persist and detect changes
+            persisted = service.persist_all_signals(results)
+
+            if not persisted:
+                # All results were NO_TRADE (not persisted)
                 self.stdout.write(
-                    f"OK: {signal.date} | {signal.fusion_state} | {signal.trade_decision}"
+                    f"OK: {results[0].date} | {results[0].fusion_state} | NO_TRADE (no signals qualify)"
                 )
-            
-            # Send Telegram notification if requested
-            if options["notify"]:
-                self._send_telegram_notification(signal, options["verbose"], options["include_setup"])
-                
+                return
+
+            # Output results
+            for signal, changed in persisted:
+                status = "NEW" if changed else "unchanged"
+                if options["verbose"]:
+                    self._print_verbose(signal)
+                else:
+                    self.stdout.write(
+                        f"OK: {signal.date} | {signal.trade_decision} | "
+                        f"{signal.fusion_state} | size={signal.effective_size:.2f} [{status}]"
+                    )
+
+                # Notify only on new/changed signals
+                if options["notify"] and changed:
+                    self._send_telegram_notification(
+                        signal, options["verbose"], options["include_setup"]
+                    )
+
         except Exception as e:
             self.stderr.write(self.style.ERROR(f"Error: {e}"))
             raise
 
+    def _print_verbose(self, signal):
+        """Print detailed signal info."""
+        self.stdout.write(f"\n{'='*50}")
+        self.stdout.write(f"Signal: {signal.date} | {signal.trade_decision}")
+        self.stdout.write(f"{'='*50}")
+        self.stdout.write(f"p_long:         {signal.p_long:.3f}")
+        self.stdout.write(f"p_short:        {signal.p_short:.3f}")
+        self.stdout.write(f"Fusion State:   {signal.fusion_state}")
+        self.stdout.write(f"Fusion Score:   {signal.fusion_score:+d}")
+        self.stdout.write(f"Size Mult:      {signal.size_multiplier:.2f}")
+        self.stdout.write(f"Effective Size: {signal.effective_size:.2f}")
+        if signal.tactical_put_active:
+            self.stdout.write(f"Tactical Put:   {signal.tactical_put_strategy}")
+        if signal.stop_loss:
+            self.stdout.write(f"Stop Loss:      {signal.stop_loss}")
+        self.stdout.write(f"{'='*50}\n")
+
     def _send_telegram_notification(self, signal, verbose: bool, include_setup: bool = True):
-        """Send Telegram notification for tradeable or vetoed signals."""
-        # Check if overlay vetoed (fusion wanted to trade but overlay said no)
-        no_trade_reasons = signal.no_trade_reasons or []
-        is_overlay_veto = "OVERLAY_VETO" in no_trade_reasons
-        
-        # Check if option signal fired
-        has_option_signal = getattr(signal, 'signal_option_call', 0) == 1 or getattr(signal, 'signal_option_put', 0) == 1
-        is_option_trade = signal.trade_decision in ("OPTION_CALL", "OPTION_PUT")
-        
-        # Skip NO_TRADE unless it's a vetoed signal or an option signal fired
-        if signal.trade_decision == "NO_TRADE" and not is_overlay_veto and not has_option_signal:
-            if verbose:
-                self.stdout.write("Skipping Telegram notification (NO_TRADE)")
-            return
-        
+        """Send Telegram notification for new/changed tradeable signals."""
+        if signal.trade_decision == "NO_TRADE":
+            # Check if this is a vetoed NO_TRADE (worth notifying)
+            no_trade_reasons = signal.no_trade_reasons or []
+            if "OVERLAY_VETO" not in no_trade_reasons:
+                if verbose:
+                    self.stdout.write("Skipping Telegram notification (NO_TRADE)")
+                return
+
         try:
             from notifications.notifier import TelegramNotifier
             notifier = TelegramNotifier()
             success = notifier.send_from_model(signal, include_setup=include_setup)
-            
+
             if success:
                 self.stdout.write(
-                    self.style.SUCCESS(f"✓ Telegram notification sent")
-                )
-                if include_setup:
-                    self.stdout.write(
-                        self.style.SUCCESS(f"✓ Trade setup included")
+                    self.style.SUCCESS(
+                        f"✓ Telegram sent: {signal.trade_decision}"
                     )
+                )
             else:
                 self.stderr.write(
                     self.style.WARNING("Telegram notification failed")
@@ -201,4 +189,3 @@ class Command(BaseCommand):
             self.stderr.write(
                 self.style.ERROR(f"Telegram error: {e}")
             )
-

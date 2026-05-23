@@ -53,6 +53,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--date", type=str, help="Signal date (YYYY-MM-DD)")
         parser.add_argument("--latest", action="store_true", help="Use latest signal")
+        parser.add_argument("--type", type=str, default=None, help="Trade decision type (e.g., IRON_CONDOR, MVRV_SHORT)")
         parser.add_argument("--account", type=str, required=True, help="Deribit account name")
         parser.add_argument("--plan", action="store_true", help="Show entry plan only (no intent created)")
         parser.add_argument("--dry-run", action="store_true", help="Create intent but don't place orders")
@@ -152,17 +153,51 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     def _load_signal(self, options) -> DailySignal:
+        signal_type_filter = options.get("type")
+        if signal_type_filter:
+            signal_type_filter = signal_type_filter.upper()
+
         if options["latest"]:
-            signal = DailySignal.objects.order_by("-date").first()
+            # Find latest active signal date first (mirrors notify_signal logic)
+            latest_active = DailySignal.active().order_by("-date").first()
+            if not latest_active:
+                raise CommandError("No active signals found")
+            latest_date = latest_active.date
+
+            # Check if latest date has a veto (blocks execution of older trades)
+            veto_row = DailySignal.active().filter(
+                date=latest_date, trade_decision="NO_TRADE"
+            ).first()
+            if veto_row:
+                no_trade_reasons = veto_row.no_trade_reasons or []
+                if "OVERLAY_VETO" in no_trade_reasons:
+                    raise CommandError(
+                        f"Latest date {latest_date} has an active veto (OVERLAY_VETO). "
+                        f"Cannot execute stale trades. Use --date to override."
+                    )
+
+            # Now select tradeable signal for latest date
+            qs = DailySignal.tradeable().filter(date=latest_date)
+            if signal_type_filter:
+                signal = qs.filter(trade_decision=signal_type_filter).first()
+            else:
+                signal = DailySignal.pick_highest_priority(qs)
             if not signal:
-                raise CommandError("No signals found")
+                raise CommandError(f"No tradeable signals found for latest date {latest_date}")
             return signal
         elif options["date"]:
             try:
                 d = date.fromisoformat(options["date"])
-                return DailySignal.objects.get(date=d)
-            except DailySignal.DoesNotExist:
-                raise CommandError(f"No signal for {options['date']}")
+                qs = DailySignal.tradeable().filter(date=d)
+                if signal_type_filter:
+                    signal = qs.filter(trade_decision=signal_type_filter).first()
+                else:
+                    signal = DailySignal.pick_highest_priority(qs)
+                if not signal:
+                    raise CommandError(f"No tradeable signal for {options['date']}")
+                return signal
+            except ValueError:
+                raise CommandError(f"Invalid date format: {options['date']}")
         else:
             raise CommandError("Specify --date or --latest")
 

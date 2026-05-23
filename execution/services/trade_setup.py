@@ -469,10 +469,11 @@ class TradeSetupBuilder:
         """
         # Get signal from DB if not overridden
         if signal_type is None:
-            try:
-                signal = DailySignal.objects.get(date=signal_date)
+            candidates = DailySignal.tradeable().filter(date=signal_date)
+            signal = DailySignal.pick_highest_priority(candidates)
+            if signal:
                 signal_type = signal.trade_decision
-            except DailySignal.DoesNotExist:
+            else:
                 return None
         
         # Skip NO_TRADE
@@ -886,7 +887,7 @@ class TradeSetupBuilder:
         
         # Get signal for MVRV-based strike targets (if available)
         try:
-            signal = DailySignal.objects.get(date=signal_date)
+            signal = DailySignal.active().get(date=signal_date, trade_decision="IRON_CONDOR")
             target_short_call = signal.condor_short_call or spot_price * (1 + condor_cfg.spot_call_band)
             target_short_put = signal.condor_short_put or spot_price * (1 - condor_cfg.spot_put_band)
         except DailySignal.DoesNotExist:

@@ -245,6 +245,58 @@ Net Edge: `72.3%`
 
 ---
 
+## Multi-Signal Days & Hourly Re-evaluation
+
+The signal system supports multiple trade types coexisting on the same day (e.g., `MVRV_SHORT` + `IRON_CONDOR`). Signals are evaluated hourly until tradeable signals fire, then the day is "done."
+
+### How It Works
+
+1. **Hourly cron** runs `generate_signal` throughout the day
+2. **First fire**: When tradeable signals qualify, they're persisted and notifications sent
+3. **Day is done**: Once any tradeable signal fires, no new signal types can be added
+4. **Refresh only**: Subsequent hourly runs update market context (prices, scores) but don't create new signals
+5. **Reactivation**: If an operator deactivates a signal and it re-qualifies, it's reactivated (treated as new for notifications)
+
+### Database Schema
+
+Each `(date, trade_decision)` pair is unique. Multiple rows can exist for the same date:
+
+```
+2026-05-23 | MVRV_SHORT   | is_active=True
+2026-05-23 | IRON_CONDOR  | is_active=True
+```
+
+### Operator Deactivation
+
+The `is_active` field allows operators to manually deactivate signals:
+
+```python
+# Deactivate a signal (prevents execution/API from seeing it)
+signal.is_active = False
+signal.save()
+```
+
+Deactivated signals:
+- Are excluded from execution and API responses
+- Still count toward cooldowns (prevents gaming)
+- Can be reactivated if they re-qualify on a subsequent hourly run
+
+### Veto Handling
+
+When overlays block a directional trade, the system emits `OVERLAY_VETO`:
+
+- Vetoed `NO_TRADE` rows are persisted so the system knows "today has a veto"
+- Execution commands and API endpoints check for vetoes on the latest date
+- If today is vetoed, stale older trades are not executed
+
+```bash
+# This will error if today has an OVERLAY_VETO
+python manage.py execute_deribit --latest
+# Error: Latest date 2026-05-23 has OVERLAY_VETO — execution blocked
+```
+
+---
+
 ## Market Regimes & States
 
 The fusion engine (`signals/fusion.py`) operates in two distinct modes based on the current cycle phase.
@@ -312,7 +364,7 @@ Hit rates from 5% target, 14-day horizon, 345 trades (with overlays and cooldown
 | `/api/v1/health/` | GET | ❌ | Health check |
 | `/api/v1/signals/` | GET | ✅ | List signals (paginated) |
 | `/api/v1/signals/latest/` | GET | ✅ | Latest signal (full detail) |
-| `/api/v1/signals/<date>/` | GET | ✅ | Signal by date |
+| `/api/v1/signals/<date>/` | GET | ✅ | Signal by date (single object; `?all=true` for list) |
 | `/api/v1/signals/<date>/setup/` | GET | ✅ | **Trade setup for date** (supports `?type=` override) |
 | `/api/v1/signals/latest/setup/` | GET | ✅ | **Trade setup for latest tradeable signal** |
 | `/api/v1/options/predict/` | POST | ✅ | **Predict option price under BTC scenarios** |
@@ -480,6 +532,9 @@ python manage.py generate_signal --notify --no-setup
 
 # Generate signal without persistence (dry run)
 python manage.py generate_signal --verbose --no-persist
+
+# Generate signal for specific trade type (multi-signal days)
+python manage.py generate_signal --type MVRV_SHORT --notify
 ```
 
 ### Execution
@@ -488,6 +543,9 @@ python manage.py generate_signal --verbose --no-persist
 # Execute today's signal (ALWAYS dry-run first!)
 python manage.py execute_deribit --latest --dry-run
 python manage.py execute_deribit --latest
+
+# Execute specific signal type on multi-signal days
+python manage.py execute_deribit --latest --type MVRV_SHORT --dry-run
 
 # Check position status
 python manage.py sync_positions --all
@@ -743,11 +801,11 @@ sudo systemctl restart gunicorn
 ### Cron Jobs
 
 ```cron
-# Daily signal pipeline (UTC)
-5 0 * * * python manage.py refresh_sheet
-10 0 * * * python manage.py sync_sheets
-13 0 * * * python manage.py build_features
-16 0 * * * python manage.py generate_signal --notify
+# Hourly signal pipeline (UTC) - re-evaluates until tradeable signals fire
+5 * * * * python manage.py refresh_sheet
+10 * * * * python manage.py sync_sheets
+13 * * * * python manage.py build_features
+16 * * * * python manage.py generate_signal --notify
 
 # Execution layer
 * * * * * python manage.py check_protection
@@ -755,6 +813,8 @@ sudo systemctl restart gunicorn
 */5 * * * * python manage.py sync_positions --all
 0 * * * * python manage.py reconcile --all
 ```
+
+> **Note:** Hourly signal generation allows the system to catch signals that qualify later in the day. Once tradeable signals fire, subsequent runs only refresh market context.
 
 ---
 

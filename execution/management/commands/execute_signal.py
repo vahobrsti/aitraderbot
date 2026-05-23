@@ -33,6 +33,12 @@ class Command(BaseCommand):
             help='Execute the latest signal',
         )
         parser.add_argument(
+            '--type',
+            type=str,
+            default=None,
+            help='Trade decision type (CALL, PUT, OPTION_CALL, OPTION_PUT, TACTICAL_PUT). For IRON_CONDOR/MVRV_SHORT use execute_deribit.',
+        )
+        parser.add_argument(
             '--account',
             type=str,
             required=True,
@@ -51,28 +57,61 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         # Get signal
+        signal_type_filter = options.get('type')
+        if signal_type_filter:
+            signal_type_filter = signal_type_filter.upper()
+
         if options['latest']:
-            signal = DailySignal.objects.order_by('-date').first()
+            # Find latest active signal date first (mirrors notify_signal logic)
+            latest_active = DailySignal.active().order_by('-date').first()
+            if not latest_active:
+                raise CommandError('No active signals found')
+            latest_date = latest_active.date
+
+            # Check if latest date has a veto (blocks execution of older trades)
+            veto_row = DailySignal.active().filter(
+                date=latest_date, trade_decision="NO_TRADE"
+            ).first()
+            if veto_row:
+                no_trade_reasons = veto_row.no_trade_reasons or []
+                if "OVERLAY_VETO" in no_trade_reasons:
+                    raise CommandError(
+                        f"Latest date {latest_date} has an active veto (OVERLAY_VETO). "
+                        f"Cannot execute stale trades. Use --date to override."
+                    )
+
+            # Now select tradeable signal for latest date
+            qs = DailySignal.tradeable().filter(date=latest_date)
+            if signal_type_filter:
+                signal = qs.filter(trade_decision=signal_type_filter).first()
+            else:
+                signal = DailySignal.pick_highest_priority(qs)
             if not signal:
-                raise CommandError('No signals found')
+                raise CommandError(f'No tradeable signals found for latest date {latest_date}')
         elif options['date']:
             try:
                 signal_date = date.fromisoformat(options['date'])
-                signal = DailySignal.objects.get(date=signal_date)
-            except DailySignal.DoesNotExist:
-                raise CommandError(f"No signal found for date {options['date']}")
+                qs = DailySignal.tradeable().filter(date=signal_date)
+                if signal_type_filter:
+                    signal = qs.filter(trade_decision=signal_type_filter).first()
+                else:
+                    signal = DailySignal.pick_highest_priority(qs)
+                if not signal:
+                    raise CommandError(f"No tradeable signal found for date {options['date']}")
+            except ValueError:
+                raise CommandError(f"Invalid date format: {options['date']}")
         else:
             raise CommandError('Must specify --date or --latest')
 
         self.stdout.write(f"Signal: {signal.date} | {signal.trade_decision} | {signal.fusion_state}")
 
-        # Check if tradeable
+        # Check if tradeable by this command
         valid_decisions = ('CALL', 'PUT', 'OPTION_CALL', 'OPTION_PUT', 'TACTICAL_PUT')
         if signal.trade_decision.upper() not in valid_decisions:
-            self.stdout.write(self.style.WARNING(
-                f'Signal is {signal.trade_decision}, not executable (valid: {valid_decisions})'
-            ))
-            return
+            raise CommandError(
+                f"Signal is {signal.trade_decision}, not supported by execute_signal. "
+                f"Use 'execute_deribit' for IRON_CONDOR/MVRV_SHORT."
+            )
 
         # Get account
         try:

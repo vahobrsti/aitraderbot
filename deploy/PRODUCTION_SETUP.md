@@ -72,20 +72,22 @@ crontab -e
 Add these lines:
 ```cron
 # ============================================
-# AI Trader Bot - Daily Signal Pipeline (UTC)
+# AI Trader Bot - Hourly Signal Pipeline (UTC)
 # ============================================
+# Signals are re-evaluated hourly until tradeable signals fire.
+# Once fired, subsequent runs only refresh market context.
 
-# 00:05 - Refresh Google Sheet
-5 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py refresh_sheet >> /var/www/app/logs/cron.log 2>&1
+# :05 - Refresh Google Sheet
+5 * * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py refresh_sheet >> /var/www/app/logs/cron.log 2>&1
 
-# 00:10 - Sync sheet data to database (last 14 days)
-10 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py sync_sheets >> /var/www/app/logs/cron.log 2>&1
+# :10 - Sync sheet data to database (last 14 days)
+10 * * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py sync_sheets >> /var/www/app/logs/cron.log 2>&1
 
-# 00:13 - Rebuild features
-13 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py build_features >> /var/www/app/logs/cron.log 2>&1
+# :13 - Rebuild features
+13 * * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py build_features >> /var/www/app/logs/cron.log 2>&1
 
-# 00:16 - Generate daily trading signal
-16 0 * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py generate_signal --notify >> /var/www/app/logs/cron.log 2>&1
+# :16 - Generate trading signal (hourly re-evaluation)
+16 * * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py generate_signal --notify >> /var/www/app/logs/cron.log 2>&1
 
 # ============================================
 # Execution Layer - Position Management (UTC)
@@ -137,11 +139,12 @@ Add these lines:
 
 | Command | Purpose | When |
 |---------|---------|------|
-| `refresh_sheet` | Trigger Google Sheet refresh | Daily cron 00:05 |
-| `sync_sheets` | Sync last 14 days | Daily cron 00:10 |
+| `refresh_sheet` | Trigger Google Sheet refresh | Hourly cron :05 |
+| `sync_sheets` | Sync last 14 days | Hourly cron :10 |
 | `sync_sheets --full-sync` | Sync ALL historical data | First install only |
-| `build_features` | Generate feature CSV | Daily cron 00:13 |
-| `generate_signal --notify` | Create daily signal + notify | Daily cron 00:16 |
+| `build_features` | Generate feature CSV | Hourly cron :13 |
+| `generate_signal --notify` | Create/refresh signal + notify | Hourly cron :16 |
+| `generate_signal --type X` | Generate specific signal type | Manual (multi-signal days) |
 | `train_models --production` | Train ML models | Weekly / first install |
 
 ### Execution Layer
@@ -153,6 +156,7 @@ Add these lines:
 | `sync_positions --all` | Sync positions from exchange | Every 5 minutes |
 | `reconcile --all` | Full state reconciliation | Hourly |
 | `execute_signal --latest` | Execute today's signal | Manual (after signal) |
+| `execute_signal --latest --type X` | Execute specific signal type | Manual (multi-signal days) |
 | `execute_signal --dry-run` | Preview execution | Manual (test first!) |
 
 ---
@@ -279,6 +283,19 @@ ExchangeAccount.objects.create(
 
 ## 🚀 Deploying New Changes (develop → main)
 
+### Migration Notes (v2026-05-23)
+
+**New migrations to run:**
+- `0010_unique_date_trade_decision` - Changes unique constraint from `date` to `(date, trade_decision)`
+- `0011_dailysignal_is_active` - Adds `is_active` boolean field (default=True)
+
+**Breaking changes:**
+- API `/signals/<date>/` now returns a single object (highest priority). Use `?all=true` for list of all signals on that date.
+- Execution commands check for `OVERLAY_VETO` on latest date before executing stale trades.
+
+**Cron job update required:**
+- Signal pipeline should run hourly (not daily) for proper re-evaluation.
+
 ### Standard Deployment Workflow
 
 ```bash
@@ -366,6 +383,27 @@ chmod +x deploy.sh
 |----------|------|-------------|
 | `/api/v1/signals/<date>/setup/` | Yes | Get complete trade setup for a signal date |
 | `/api/v1/signals/latest/setup/` | Yes | Get trade setup for latest tradeable signal |
+
+### API Changes (v2026-05-23)
+
+**`/api/v1/signals/<date>/`** - Now returns single object by default:
+- Returns highest-priority active signal for the date
+- Add `?all=true` to get list of all signals on that date
+- Add `?type=MVRV_SHORT` to get specific signal type
+
+```bash
+# Single signal (default - backward compatible)
+curl -H "Authorization: Token YOUR_TOKEN" \
+  https://options.somimobile.com/api/v1/signals/2026-05-23/
+
+# All signals for date
+curl -H "Authorization: Token YOUR_TOKEN" \
+  "https://options.somimobile.com/api/v1/signals/2026-05-23/?all=true"
+
+# Specific signal type
+curl -H "Authorization: Token YOUR_TOKEN" \
+  "https://options.somimobile.com/api/v1/signals/2026-05-23/?type=MVRV_SHORT"
+```
 
 ### Example API Response
 
@@ -477,6 +515,50 @@ python manage.py test --verbosity=2
 ---
 
 ## 🔧 Troubleshooting
+
+### Execution Blocked by OVERLAY_VETO
+
+If you see "Latest date has OVERLAY_VETO — execution blocked":
+
+```bash
+# Check what signals exist for today
+python manage.py shell -c "
+from signals.models import DailySignal
+from datetime import date
+for s in DailySignal.objects.filter(date=date.today()):
+    print(f'{s.trade_decision}: active={s.is_active}, reasons={s.no_trade_reasons}')
+"
+```
+
+This is expected behavior — the system prevents executing stale trades when today has a veto.
+
+### Multiple Signals on Same Day
+
+```bash
+# List all signals for a date
+python manage.py shell -c "
+from signals.models import DailySignal
+for s in DailySignal.objects.filter(date='2026-05-23'):
+    print(f'{s.trade_decision}: active={s.is_active}, priority={s.priority}')
+"
+
+# Execute specific signal type
+python manage.py execute_deribit --latest --type MVRV_SHORT --dry-run
+```
+
+### Reactivating a Deactivated Signal
+
+Signals can be manually deactivated by operators. If conditions re-qualify, the hourly cron will reactivate them:
+
+```bash
+# Manual reactivation
+python manage.py shell -c "
+from signals.models import DailySignal
+s = DailySignal.objects.get(date='2026-05-23', trade_decision='MVRV_SHORT')
+s.is_active = True
+s.save()
+"
+```
 
 ### Trade Setup Returns 404
 

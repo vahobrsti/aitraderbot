@@ -3,11 +3,13 @@ from django.db import models
 
 class DailySignal(models.Model):
     """
-    Stores daily ML predictions and fusion engine outputs.
-    One row per date, capturing the complete signal state for that day.
+    Stores ML predictions and fusion engine outputs.
+    One row per (date, trade_decision) pair. Multiple trade types can
+    coexist on the same day (e.g., MVRV_SHORT + IRON_CONDOR).
+    Hourly re-evaluation updates the existing row if the decision hasn't changed.
     """
-    # Primary key
-    date = models.DateField(unique=True, db_index=True)
+    # Primary temporal key
+    date = models.DateField(db_index=True)
 
     # ML Model Outputs
     p_long = models.FloatField(help_text="ML probability for long position")
@@ -169,6 +171,11 @@ class DailySignal(models.Model):
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="False = manually deactivated by operator. Currently always True (signals are final once fired)."
+    )
 
     # Iron Condor Gate
     condor_score = models.FloatField(
@@ -214,9 +221,55 @@ class DailySignal(models.Model):
 
     class Meta:
         db_table = "daily_signal"
-        ordering = ["-date"]
+        ordering = ["-date", "-updated_at"]
         verbose_name = "Daily Signal"
         verbose_name_plural = "Daily Signals"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["date", "trade_decision"],
+                name="unique_date_trade_decision",
+            )
+        ]
+
+    # Trade decision priority (lower number = higher priority).
+    # Used for deterministic selection when multiple signals exist on the same day.
+    DECISION_PRIORITY = {
+        "CALL": 1,
+        "PUT": 2,
+        "TACTICAL_PUT": 3,
+        "OPTION_CALL": 4,
+        "OPTION_PUT": 5,
+        "MVRV_SHORT": 6,
+        "IRON_CONDOR": 7,
+        "NO_TRADE": 99,
+    }
+
+    @property
+    def priority(self) -> int:
+        return self.DECISION_PRIORITY.get(self.trade_decision, 50)
+
+    @classmethod
+    def active(cls):
+        """Return queryset of active (non-stale) signals."""
+        return cls.objects.filter(is_active=True)
+
+    @classmethod
+    def tradeable(cls):
+        """Return queryset of active, non-NO_TRADE signals."""
+        return cls.objects.filter(is_active=True).exclude(trade_decision="NO_TRADE")
+
+    @classmethod
+    def pick_highest_priority(cls, queryset):
+        """
+        From a queryset of signals, return the one with highest trading priority.
+        Only considers active signals. Deterministic: uses DECISION_PRIORITY,
+        then falls back to updated_at.
+        """
+        signals = list(queryset.filter(is_active=True) if hasattr(queryset, 'filter') else [s for s in queryset if s.is_active])
+        if not signals:
+            return None
+        signals.sort(key=lambda s: (cls.DECISION_PRIORITY.get(s.trade_decision, 50), -(s.updated_at.timestamp() if s.updated_at else 0)))
+        return signals[0]
 
     def __str__(self):
         return f"{self.date} | {self.fusion_state} | {self.trade_decision}"

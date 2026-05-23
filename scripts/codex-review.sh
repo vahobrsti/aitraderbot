@@ -4,14 +4,49 @@ set -euo pipefail
 mkdir -p .ai-reviews
 
 CONTEXT_FILE=".ai-reviews/implementation-context.md"
+ROUND_FILE=".ai-reviews/.review-round"
+MAX_ROUNDS=5
 STAMP=$(date +"%Y%m%d-%H%M%S")
 OUT=".ai-reviews/codex-review-$STAMP.md"
+
+# --- Round tracking ---
+# Reset round counter if --reset flag is passed or if context file is newer than round file
+if [ "${1:-}" = "--reset" ]; then
+  rm -f "$ROUND_FILE"
+  echo "Round counter reset."
+  shift  # Remove --reset from args
+fi
 
 # --- Validate context file exists ---
 if [ ! -f "$CONTEXT_FILE" ]; then
   echo "ERROR: Missing $CONTEXT_FILE"
   echo "Ask your implementation agent to generate it per AGENTS.md rules."
   exit 1
+fi
+
+# Auto-reset if context file was modified after round file (new implementation cycle)
+if [ -f "$ROUND_FILE" ] && [ "$CONTEXT_FILE" -nt "$ROUND_FILE" ]; then
+  echo "Context file updated — resetting round counter for new review cycle."
+  rm -f "$ROUND_FILE"
+fi
+
+# Read or initialize round counter
+if [ -f "$ROUND_FILE" ]; then
+  CURRENT_ROUND=$(cat "$ROUND_FILE")
+  CURRENT_ROUND=$((CURRENT_ROUND + 1))
+else
+  CURRENT_ROUND=1
+fi
+
+echo "$CURRENT_ROUND" > "$ROUND_FILE"
+echo "=== Review Round $CURRENT_ROUND of $MAX_ROUNDS ==="
+
+# Check if this is the final round
+FINAL_ROUND=false
+if [ "$CURRENT_ROUND" -ge "$MAX_ROUNDS" ]; then
+  FINAL_ROUND=true
+  echo "⚠️  FINAL ROUND — Only critical blocking issues will prevent approval."
+  echo ""
 fi
 
 # --- Determine diff mode ---
@@ -167,9 +202,32 @@ fi
 
 CONTEXT_CONTENT=$(cat "$CONTEXT_FILE")
 
+# --- Build round-specific instructions ---
+ROUND_INSTRUCTIONS=""
+if [ "$FINAL_ROUND" = true ]; then
+  ROUND_INSTRUCTIONS="
+# ⚠️ FINAL REVIEW ROUND ($CURRENT_ROUND of $MAX_ROUNDS)
+This is the final review round. The implementation has been through multiple iterations.
+- ONLY return BLOCK if there is a genuine correctness bug, security vulnerability, or data loss risk.
+- Should-fix and Nice-to-have items should be noted but MUST NOT prevent approval.
+- If the code is functional and safe, return APPROVE even with minor imperfections.
+- Do not block for style, naming, test coverage, or architectural preferences.
+- Trust that previous rounds have addressed major issues.
+"
+else
+  ROUND_INSTRUCTIONS="
+# Review Round $CURRENT_ROUND of $MAX_ROUNDS
+Remaining rounds: $((MAX_ROUNDS - CURRENT_ROUND))
+- Focus on the most critical issues first.
+- Be pragmatic — perfect is the enemy of good.
+- If an issue was raised in a previous round and addressed, do not re-raise variants of it.
+"
+fi
+
 # --- Run review ---
 codex exec "
 You are a code reviewer. Review the following changes using the implementation context provided.
+$ROUND_INSTRUCTIONS
 
 # Implementation Context
 $CONTEXT_CONTENT
@@ -179,7 +237,7 @@ $DIFF_SECTION
 
 # Instructions
 Return a categorized review:
-1. **Blocking** — must fix before merge
+1. **Blocking** — must fix before merge (correctness bugs, security issues, data loss risks ONLY)
 2. **Should-fix** — important but not blocking
 3. **Nice-to-have** — suggestions
 
@@ -200,6 +258,7 @@ Hard limits:
 - Do not suggest broad refactors.
 - Do not repeat implementation-context content.
 - Do not ask for another review pass unless there is a Blocking issue.
+- On round $MAX_ROUNDS or later, ONLY block for critical correctness/security/data-loss issues.
 
 For each finding, use this format:
 - Severity: Blocking | Should-fix | Nice-to-have
@@ -220,3 +279,8 @@ Do not penalize intentionally simplified solutions unless correctness is affecte
 
 echo
 echo "Saved review to: $OUT"
+echo "Review round: $CURRENT_ROUND of $MAX_ROUNDS"
+if [ "$CURRENT_ROUND" -ge "$MAX_ROUNDS" ]; then
+  echo "✅ Maximum review rounds reached. Consider this review cycle complete."
+  echo "   To start a fresh cycle: bash scripts/codex-review.sh --reset"
+fi
