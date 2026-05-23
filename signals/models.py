@@ -171,6 +171,11 @@ class DailySignal(models.Model):
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="False = manually deactivated by operator. Currently always True (signals are final once fired)."
+    )
 
     # Iron Condor Gate
     condor_score = models.FloatField(
@@ -244,12 +249,23 @@ class DailySignal(models.Model):
         return self.DECISION_PRIORITY.get(self.trade_decision, 50)
 
     @classmethod
+    def active(cls):
+        """Return queryset of active (non-stale) signals."""
+        return cls.objects.filter(is_active=True)
+
+    @classmethod
+    def tradeable(cls):
+        """Return queryset of active, non-NO_TRADE signals."""
+        return cls.objects.filter(is_active=True).exclude(trade_decision="NO_TRADE")
+
+    @classmethod
     def pick_highest_priority(cls, queryset):
         """
         From a queryset of signals, return the one with highest trading priority.
-        Deterministic: uses DECISION_PRIORITY, then falls back to updated_at.
+        Only considers active signals. Deterministic: uses DECISION_PRIORITY,
+        then falls back to updated_at.
         """
-        signals = list(queryset)
+        signals = list(queryset.filter(is_active=True) if hasattr(queryset, 'filter') else [s for s in queryset if s.is_active])
         if not signals:
             return None
         signals.sort(key=lambda s: (cls.DECISION_PRIORITY.get(s.trade_decision, 50), -(s.updated_at.timestamp() if s.updated_at else 0)))

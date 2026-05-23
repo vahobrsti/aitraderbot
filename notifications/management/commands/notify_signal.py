@@ -24,10 +24,21 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        try:
-            signal = DailySignal.objects.latest("date")
-        except DailySignal.DoesNotExist:
-            self.stderr.write(self.style.ERROR("No signals found in database"))
+        # Find latest signal — tradeable preferred, fall back to any for --force
+        latest_tradeable = DailySignal.tradeable().order_by('-date').first()
+        
+        if latest_tradeable:
+            candidates = DailySignal.tradeable().filter(date=latest_tradeable.date)
+            signal = DailySignal.pick_highest_priority(candidates)
+        else:
+            signal = None
+        
+        # If no tradeable signal and --force, fall back to any active signal
+        if signal is None and options.get("force"):
+            signal = DailySignal.active().order_by('-date').first()
+        
+        if signal is None:
+            self.stderr.write(self.style.ERROR("No active signals found in database"))
             return
 
         if options["verbose"]:

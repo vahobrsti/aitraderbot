@@ -40,6 +40,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--latest", action="store_true", help="Use latest signal for context")
         parser.add_argument("--date", type=str, help="Signal date (YYYY-MM-DD)")
+        parser.add_argument("--signal-type", type=str, default=None, dest="signal_type", help="Trade decision type (e.g., IRON_CONDOR)")
         parser.add_argument("--type", type=str, choices=["call", "put"], help="Filter by option type")
         parser.add_argument("--dte-min", type=int, default=7, help="Min DTE (default: 7)")
         parser.add_argument("--dte-max", type=int, default=30, help="Max DTE (default: 30)")
@@ -58,14 +59,17 @@ class Command(BaseCommand):
         # Load signal if requested
         signal = None
         if options["latest"]:
-            latest_tradeable = DailySignal.objects.exclude(
-                trade_decision="NO_TRADE"
-            ).order_by("-date").first()
-            if latest_tradeable:
-                candidates = DailySignal.objects.filter(
-                    date=latest_tradeable.date
-                ).exclude(trade_decision="NO_TRADE")
-                signal = DailySignal.pick_highest_priority(candidates)
+            qs = DailySignal.tradeable()
+            if options.get("signal_type"):
+                signal = qs.filter(
+                    trade_decision=options["signal_type"].upper()
+                ).order_by("-date").first()
+            else:
+                latest = qs.order_by("-date").first()
+                if latest:
+                    signal = DailySignal.pick_highest_priority(
+                        DailySignal.tradeable().filter(date=latest.date)
+                    )
             if signal:
                 self.stdout.write(
                     f"Signal: {signal.date} | {signal.trade_decision} | "

@@ -13,6 +13,15 @@ import pandas as pd
 from datafeed.models import RawDailyData
 from features.feature_builder import build_features_and_labels_from_raw
 from signals.models import DailySignal
+
+
+def _float_changed(old, new, atol: float = 0.001) -> bool:
+    """Compare two float/None values with tolerance. Returns True if meaningfully different."""
+    if old is None and new is None:
+        return False
+    if old is None or new is None:
+        return True
+    return abs(old - new) > atol
 from signals.fusion import fuse_signals, MarketState
 from signals.overlays import apply_overlays, get_size_multiplier, get_dte_multiplier, compute_efb_veto
 from signals.tactical_puts import tactical_put_inside_bull
@@ -459,7 +468,7 @@ class SignalService:
         cutoff = current_date - timedelta(days=cooldown_days)
         last_signal = (
             DailySignal.objects
-            .filter(trade_decision=decision_type, date__gte=cutoff, date__lt=current_date)
+            .filter(trade_decision=decision_type, date__gte=cutoff, date__lt=current_date, is_active=True)
             .order_by("-date")
             .first()
         )
@@ -672,7 +681,7 @@ class SignalService:
         decision_trace.append("stop_reason=FUSION_STATE_NO_TRADE")
         return "NO_TRADE", f"State: {fusion_result.state.value}", no_trade_reasons, decision_trace
     
-    def persist_signal(self, result: SignalResult) -> DailySignal:
+    def persist_signal(self, result: SignalResult) -> tuple[DailySignal, bool]:
         """
         Persist signal to database, updating if same (date, trade_decision) exists.
         
@@ -684,7 +693,7 @@ class SignalService:
             result: SignalResult to persist.
             
         Returns:
-            DailySignal model instance.
+            Tuple of (DailySignal instance, created: bool).
         """
         signal, created = DailySignal.objects.update_or_create(
             date=result.date,
@@ -732,7 +741,7 @@ class SignalService:
                 'condor_strike_meta': result.condor_strike_meta or {},
             }
         )
-        return signal
+        return signal, created
     
     def generate_and_persist(self, target_date: Optional[date] = None) -> DailySignal:
         """
@@ -745,7 +754,8 @@ class SignalService:
             DailySignal model instance.
         """
         result = self.generate_signal(target_date)
-        return self.persist_signal(result)
+        signal, _ = self.persist_signal(result)
+        return signal
 
     def generate_all_signals(self, target_date: Optional[date] = None) -> list[SignalResult]:
         """
@@ -937,9 +947,9 @@ class SignalService:
                 condor_eligible=condor_gate.eligible,
                 condor_veto_reasons=condor_gate.veto_reasons,
                 condor_score_components=condor_gate.score_components,
-                condor_short_call=condor_strikes.short_call if condor_strikes else None,
-                condor_short_put=condor_strikes.short_put if condor_strikes else None,
-                condor_cost_basis=condor_strikes.cost_basis if condor_strikes else None,
+                condor_short_call=condor_strikes.short_call if condor_strikes and trade_decision == "IRON_CONDOR" else None,
+                condor_short_put=condor_strikes.short_put if condor_strikes and trade_decision == "IRON_CONDOR" else None,
+                condor_cost_basis=condor_strikes.cost_basis if condor_strikes and trade_decision == "IRON_CONDOR" else None,
                 condor_strike_meta={
                     'call_source': condor_strikes.call_source,
                     'put_source': condor_strikes.put_source,
@@ -950,7 +960,7 @@ class SignalService:
                     'mvrv_ceiling': condor_strikes.mvrv_ceiling,
                     'mvrv_floor': condor_strikes.mvrv_floor,
                     'spot': condor_strikes.spot,
-                } if condor_strikes else {},
+                } if condor_strikes and trade_decision == "IRON_CONDOR" else {},
             )
         
         # Gate 1: Core fusion (CALL/PUT) or Tactical Put
@@ -1025,62 +1035,85 @@ class SignalService:
 
     def persist_all_signals(self, results: list[SignalResult]) -> list[tuple[DailySignal, bool]]:
         """
-        Persist multiple signals. Returns list of (signal, changed) tuples.
+        Persist signals for the day. Returns list of (signal, is_new) tuples.
         
-        `changed` is True if the signal was newly created or if key fields
-        (trade_decision, fusion_state, effective_size) differ from the stored value.
+        Rules:
+            - If the date already has active tradeable signals, the day is done.
+              Only update those existing rows (keep fresh). No new signals created.
+            - If no tradeable signals exist for the date yet, persist all qualifying
+              results and notify (first fire of the day).
         
-        Also removes stale signals: if a trade type was stored from a previous
-        hourly run but no longer qualifies, it gets deleted — unless protected
-        by an active ExecutionIntent (on_delete=PROTECT).
+        Wrapped in a transaction with row lock for race safety.
         """
-        from django.db.models import ProtectedError
+        from django.db import transaction
         
-        # Determine which trade decisions currently qualify
-        active_decisions = {r.trade_decision for r in results if r.trade_decision != "NO_TRADE"}
-        
-        # Get the date from results (all share the same date)
         if not results:
             return []
         signal_date = results[0].date
         
-        # Delete stale signals: rows for this date whose trade_decision
-        # is no longer in the active set. Skip those with active execution intents.
-        stale_qs = DailySignal.objects.filter(date=signal_date).exclude(
-            trade_decision__in=active_decisions
-        )
-        for stale_signal in stale_qs:
-            try:
-                stale_signal.delete()
-            except ProtectedError:
-                # Signal has active execution intents — leave it in place
-                pass
-        
-        # Persist active signals
-        persisted = []
-        for result in results:
-            if result.trade_decision == "NO_TRADE":
-                # Don't persist NO_TRADE rows — they're noise
-                continue
-            
-            # Check if existing row has different values (= signal changed)
-            existing = DailySignal.objects.filter(
-                date=result.date, trade_decision=result.trade_decision
-            ).first()
-            
-            signal = self.persist_signal(result)
-            
-            if existing is None:
-                # New signal
-                changed = True
-            else:
-                # Check if meaningful fields changed
-                changed = (
-                    existing.fusion_state != result.fusion_state
-                    or existing.effective_size != result.effective_size
-                    or existing.fusion_score != result.fusion_score
+        with transaction.atomic():
+            # Lock a guaranteed row to serialize concurrent hourly runs for the same date.
+            # RawDailyData always has a row for the evaluated date (it's the data source).
+            lock_row = RawDailyData.objects.select_for_update().filter(date=signal_date).first()
+            if lock_row is None:
+                raise ValueError(
+                    f"No RawDailyData for {signal_date} — cannot safely serialize signal persistence"
                 )
             
-            persisted.append((signal, changed))
+            # Now safely check if today already has any active tradeable signals
+            existing_tradeable = list(
+                DailySignal.objects.filter(
+                    date=signal_date, is_active=True
+                ).exclude(trade_decision="NO_TRADE")
+            )
+            
+            persisted = []
+            
+            if existing_tradeable:
+                # Day is done — update existing rows to keep data fresh
+                existing_decisions = {s.trade_decision for s in existing_tradeable}
+                updated_decisions = set()
+                for result in results:
+                    if result.trade_decision in existing_decisions:
+                        signal, _ = self.persist_signal(result)
+                        persisted.append((signal, False))
+                        updated_decisions.add(result.trade_decision)
+                # For existing signals not in current results, refresh market-context
+                # fields (probabilities, fusion, scores) so API/execution see current data
+                for s in existing_tradeable:
+                    if s.trade_decision not in updated_decisions:
+                        # Use any result's shared market fields (all share same date/row)
+                        ref = results[0]
+                        s.p_long = ref.p_long
+                        s.p_short = ref.p_short
+                        s.fusion_state = ref.fusion_state
+                        s.fusion_confidence = ref.fusion_confidence
+                        s.fusion_score = ref.fusion_score
+                        s.score_components = ref.score_components
+                        from django.utils import timezone
+                        s.updated_at = timezone.now()
+                        s.save(update_fields=[
+                            'p_long', 'p_short', 'fusion_state',
+                            'fusion_confidence', 'fusion_score', 'score_components',
+                            'updated_at',
+                        ])
+                        persisted.append((s, False))
+            else:
+                # First fire of the day — persist all qualifying signals
+                for result in results:
+                    if result.trade_decision == "NO_TRADE":
+                        continue
+                    # Check for existing inactive row (operator deactivated, now re-qualifies)
+                    inactive_row = DailySignal.objects.filter(
+                        date=result.date, trade_decision=result.trade_decision, is_active=False
+                    ).first()
+                    if inactive_row:
+                        # Reactivate: set is_active=True before persist_signal updates it
+                        inactive_row.is_active = True
+                        inactive_row.save(update_fields=['is_active'])
+                    signal, created = self.persist_signal(result)
+                    # Treat reactivation as a new signal for notification purposes
+                    is_new = created or (inactive_row is not None)
+                    persisted.append((signal, is_new))
         
         return persisted

@@ -47,6 +47,7 @@ class Command(BaseCommand):
         # Record subcommand
         record_parser = subparsers.add_parser('record', help='Record a manual trade')
         record_parser.add_argument('--signal-date', type=str, required=True)
+        record_parser.add_argument('--type', type=str, default=None, help='Trade decision type (e.g., IRON_CONDOR)')
         record_parser.add_argument('--long-symbol', type=str, help='Long leg symbol')
         record_parser.add_argument('--long-entry', type=float, help='Long leg entry price (USD)')
         record_parser.add_argument('--long-exit', type=float, help='Long leg exit price (USD)')
@@ -59,6 +60,7 @@ class Command(BaseCommand):
         # Show subcommand
         show_parser = subparsers.add_parser('show', help='Show comparison for a signal')
         show_parser.add_argument('--signal-date', type=str, required=True)
+        show_parser.add_argument('--type', type=str, default=None, help='Trade decision type (e.g., IRON_CONDOR)')
         
         # List subcommand
         subparsers.add_parser('list', help='List all recorded comparisons')
@@ -79,11 +81,13 @@ class Command(BaseCommand):
         """Record a manual trade and compute engine comparison."""
         signal_date = date.fromisoformat(options['signal_date'])
         
-        # Load signal (get highest priority tradeable one for that date)
-        candidates = DailySignal.objects.filter(date=signal_date).exclude(
-            trade_decision="NO_TRADE"
-        )
-        signal = DailySignal.pick_highest_priority(candidates)
+        # Load signal by type or highest priority
+        signal_type_filter = options.get('type')
+        candidates = DailySignal.tradeable().filter(date=signal_date)
+        if signal_type_filter:
+            signal = candidates.filter(trade_decision=signal_type_filter.upper()).first()
+        else:
+            signal = DailySignal.pick_highest_priority(candidates)
         if not signal:
             raise CommandError(f"No tradeable signal for {signal_date}")
         
@@ -170,6 +174,7 @@ class Command(BaseCommand):
         # Store comparison
         comparison = {
             'signal_date': str(signal_date),
+            'trade_decision': signal.trade_decision,
             'signal_type': signal.trade_decision,
             'fusion_state': signal.fusion_state,
             'spot': spot,
@@ -189,9 +194,12 @@ class Command(BaseCommand):
     def _show_comparison(self, options):
         """Show comparison for a specific signal date."""
         signal_date = options['signal_date']
+        signal_type = options.get('type')
         comparisons = self._load_comparisons()
         
         found = [c for c in comparisons if c['signal_date'] == signal_date]
+        if signal_type:
+            found = [c for c in found if c.get('trade_decision') == signal_type.upper()]
         if not found:
             self.stdout.write(f"No comparison recorded for {signal_date}")
             return
@@ -266,16 +274,18 @@ class Command(BaseCommand):
         return []
 
     def _save_comparison(self, comparison: dict):
-        """Save comparison to JSON file."""
+        """Save comparison to JSON file, keyed by (signal_date, trade_decision)."""
         import os
         path = 'data/trade_comparisons.json'
         os.makedirs('data', exist_ok=True)
         
         comparisons = self._load_comparisons()
         
-        # Update existing or append
+        # Update existing or append — keyed by both date and trade_decision
         existing_idx = next(
-            (i for i, c in enumerate(comparisons) if c['signal_date'] == comparison['signal_date']),
+            (i for i, c in enumerate(comparisons)
+             if c['signal_date'] == comparison['signal_date']
+             and c.get('trade_decision') == comparison.get('trade_decision')),
             None
         )
         if existing_idx is not None:

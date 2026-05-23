@@ -53,6 +53,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--date", type=str, help="Signal date (YYYY-MM-DD)")
         parser.add_argument("--latest", action="store_true", help="Use latest signal")
+        parser.add_argument("--type", type=str, default=None, help="Trade decision type (e.g., IRON_CONDOR, MVRV_SHORT)")
         parser.add_argument("--account", type=str, required=True, help="Deribit account name")
         parser.add_argument("--plan", action="store_true", help="Show entry plan only (no intent created)")
         parser.add_argument("--dry-run", action="store_true", help="Create intent but don't place orders")
@@ -152,26 +153,34 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     def _load_signal(self, options) -> DailySignal:
+        signal_type_filter = options.get("type")
+        if signal_type_filter:
+            signal_type_filter = signal_type_filter.upper()
+
         if options["latest"]:
-            latest_tradeable = DailySignal.objects.exclude(
-                trade_decision="NO_TRADE"
-            ).order_by("-date").first()
-            if not latest_tradeable:
-                raise CommandError("No tradeable signals found")
-            candidates = DailySignal.objects.filter(
-                date=latest_tradeable.date
-            ).exclude(trade_decision="NO_TRADE")
-            signal = DailySignal.pick_highest_priority(candidates)
+            if signal_type_filter:
+                signal = DailySignal.tradeable().filter(
+                    trade_decision=signal_type_filter
+                ).order_by("-date").first()
+            else:
+                latest = DailySignal.tradeable().order_by("-date").first()
+                if latest:
+                    signal = DailySignal.pick_highest_priority(
+                        DailySignal.tradeable().filter(date=latest.date)
+                    )
+                else:
+                    signal = None
             if not signal:
                 raise CommandError("No tradeable signals found")
             return signal
         elif options["date"]:
             try:
                 d = date.fromisoformat(options["date"])
-                candidates = DailySignal.objects.filter(date=d).exclude(
-                    trade_decision="NO_TRADE"
-                )
-                signal = DailySignal.pick_highest_priority(candidates)
+                qs = DailySignal.tradeable().filter(date=d)
+                if signal_type_filter:
+                    signal = qs.filter(trade_decision=signal_type_filter).first()
+                else:
+                    signal = DailySignal.pick_highest_priority(qs)
                 if not signal:
                     raise CommandError(f"No tradeable signal for {options['date']}")
                 return signal

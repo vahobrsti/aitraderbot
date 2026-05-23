@@ -33,6 +33,12 @@ class Command(BaseCommand):
             help='Execute the latest signal',
         )
         parser.add_argument(
+            '--type',
+            type=str,
+            default=None,
+            help='Trade decision type (CALL, PUT, OPTION_CALL, OPTION_PUT, TACTICAL_PUT). For IRON_CONDOR/MVRV_SHORT use execute_deribit.',
+        )
+        parser.add_argument(
             '--account',
             type=str,
             required=True,
@@ -51,25 +57,33 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         # Get signal
+        signal_type_filter = options.get('type')
+        if signal_type_filter:
+            signal_type_filter = signal_type_filter.upper()
+
         if options['latest']:
-            latest_tradeable = DailySignal.objects.exclude(
-                trade_decision="NO_TRADE"
-            ).order_by('-date').first()
-            if not latest_tradeable:
-                raise CommandError('No tradeable signals found')
-            candidates = DailySignal.objects.filter(
-                date=latest_tradeable.date
-            ).exclude(trade_decision="NO_TRADE")
-            signal = DailySignal.pick_highest_priority(candidates)
+            if signal_type_filter:
+                signal = DailySignal.tradeable().filter(
+                    trade_decision=signal_type_filter
+                ).order_by('-date').first()
+            else:
+                latest = DailySignal.tradeable().order_by('-date').first()
+                if latest:
+                    signal = DailySignal.pick_highest_priority(
+                        DailySignal.tradeable().filter(date=latest.date)
+                    )
+                else:
+                    signal = None
             if not signal:
                 raise CommandError('No tradeable signals found')
         elif options['date']:
             try:
                 signal_date = date.fromisoformat(options['date'])
-                candidates = DailySignal.objects.filter(date=signal_date).exclude(
-                    trade_decision="NO_TRADE"
-                )
-                signal = DailySignal.pick_highest_priority(candidates)
+                qs = DailySignal.tradeable().filter(date=signal_date)
+                if signal_type_filter:
+                    signal = qs.filter(trade_decision=signal_type_filter).first()
+                else:
+                    signal = DailySignal.pick_highest_priority(qs)
                 if not signal:
                     raise CommandError(f"No tradeable signal found for date {options['date']}")
             except ValueError:
@@ -79,13 +93,13 @@ class Command(BaseCommand):
 
         self.stdout.write(f"Signal: {signal.date} | {signal.trade_decision} | {signal.fusion_state}")
 
-        # Check if tradeable
+        # Check if tradeable by this command
         valid_decisions = ('CALL', 'PUT', 'OPTION_CALL', 'OPTION_PUT', 'TACTICAL_PUT')
         if signal.trade_decision.upper() not in valid_decisions:
-            self.stdout.write(self.style.WARNING(
-                f'Signal is {signal.trade_decision}, not executable (valid: {valid_decisions})'
-            ))
-            return
+            raise CommandError(
+                f"Signal is {signal.trade_decision}, not supported by execute_signal. "
+                f"Use 'execute_deribit' for IRON_CONDOR/MVRV_SHORT."
+            )
 
         # Get account
         try:

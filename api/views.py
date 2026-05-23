@@ -23,7 +23,7 @@ class DailySignalListView(generics.ListAPIView):
     """
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
-    queryset = DailySignal.objects.all().order_by('-date', '-updated_at')
+    queryset = DailySignal.active().order_by('-date', '-updated_at')
     serializer_class = DailySignalSummarySerializer
 
 
@@ -40,16 +40,12 @@ class DailySignalLatestView(APIView):
     def get(self, request):
         try:
             # Get latest date with tradeable signals, pick by priority
-            latest_tradeable = DailySignal.objects.exclude(
-                trade_decision="NO_TRADE"
-            ).order_by('-date').first()
+            latest_tradeable = DailySignal.tradeable().order_by('-date').first()
             if latest_tradeable:
-                candidates = DailySignal.objects.filter(
-                    date=latest_tradeable.date
-                ).exclude(trade_decision="NO_TRADE")
+                candidates = DailySignal.tradeable().filter(date=latest_tradeable.date)
                 signal = DailySignal.pick_highest_priority(candidates)
             else:
-                signal = DailySignal.objects.order_by('-date').first()
+                signal = DailySignal.active().order_by('-date').first()
             if signal is None:
                 raise DailySignal.DoesNotExist
             serializer = DailySignalSerializer(signal)
@@ -67,14 +63,23 @@ class DailySignalDetailView(generics.ListAPIView):
     
     Get all signals for a specific date (may be multiple trade types).
     Date format: YYYY-MM-DD
+    Ordered by trading priority (highest priority first).
     """
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
     serializer_class = DailySignalSerializer
 
     def get_queryset(self):
+        from django.db.models import Case, When, IntegerField
         date_str = self.kwargs['date']
-        return DailySignal.objects.filter(date=date_str).order_by('-updated_at')
+        priority_ordering = Case(
+            *[When(trade_decision=k, then=v) for k, v in DailySignal.DECISION_PRIORITY.items()],
+            default=50,
+            output_field=IntegerField(),
+        )
+        return DailySignal.active().filter(date=date_str).annotate(
+            priority_rank=priority_ordering
+        ).order_by('priority_rank')
 
 
 class TradeSetupView(APIView):
@@ -119,11 +124,9 @@ class TradeSetupView(APIView):
         # Load signal for that date (filtered by type if provided)
         try:
             if signal_type:
-                signal = DailySignal.objects.get(date=signal_date, trade_decision=signal_type)
+                signal = DailySignal.active().get(date=signal_date, trade_decision=signal_type)
             else:
-                candidates = DailySignal.objects.filter(date=signal_date).exclude(
-                    trade_decision="NO_TRADE"
-                )
+                candidates = DailySignal.tradeable().filter(date=signal_date)
                 signal = DailySignal.pick_highest_priority(candidates)
                 if signal is None:
                     raise DailySignal.DoesNotExist
@@ -169,9 +172,7 @@ class TradeSetupLatestView(APIView):
         from execution.services.trade_setup import TradeSetupBuilder
         
         # Find latest tradeable signal by priority
-        latest_tradeable = DailySignal.objects.exclude(
-            trade_decision="NO_TRADE"
-        ).order_by('-date').first()
+        latest_tradeable = DailySignal.tradeable().order_by('-date').first()
         
         if not latest_tradeable:
             return Response(
@@ -179,9 +180,7 @@ class TradeSetupLatestView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        candidates = DailySignal.objects.filter(
-            date=latest_tradeable.date
-        ).exclude(trade_decision="NO_TRADE")
+        candidates = DailySignal.tradeable().filter(date=latest_tradeable.date)
         signal = DailySignal.pick_highest_priority(candidates)
         
         if not signal:
