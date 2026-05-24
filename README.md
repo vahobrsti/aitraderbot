@@ -247,23 +247,23 @@ Net Edge: `72.3%`
 
 ## Multi-Signal Days & Hourly Re-evaluation
 
-The signal system supports multiple trade types coexisting on the same day (e.g., `MVRV_SHORT` + `IRON_CONDOR`). Signals are evaluated hourly until tradeable signals fire, then the day is "done."
+The signal system supports multiple trade types coexisting on the same day (e.g., `MVRV_SHORT` + `IRON_CONDOR`). Signals are evaluated hourly and new signal types can fire at any time throughout the day.
 
 ### How It Works
 
 1. **Hourly cron** runs `generate_signal` throughout the day
-2. **First fire**: When tradeable signals qualify, they're persisted and notifications sent
-3. **Day is done**: Once any tradeable signal fires, no new signal types can be added
-4. **Refresh only**: Subsequent hourly runs update market context (prices, scores) but don't create new signals
-5. **Reactivation**: If an operator deactivates a signal and it re-qualifies, it's reactivated (treated as new for notifications)
+2. **Independent gates**: Each signal type (CALL, PUT, OPTION_CALL, MVRV_SHORT, IRON_CONDOR) is evaluated independently
+3. **Additive**: New signal types can fire at any hour (e.g., IRON_CONDOR at 2pm even if CALL fired at 9am)
+4. **Idempotent**: If the same signal type already exists, it's updated only if meaningfully changed (no duplicate notifications)
+5. **NO_TRADE ignored**: Fusion transitioning to NO_TRADE mid-day doesn't affect existing tradeable signals
 
 ### Database Schema
 
 Each `(date, trade_decision)` pair is unique. Multiple rows can exist for the same date:
 
 ```
-2026-05-23 | MVRV_SHORT   | is_active=True
-2026-05-23 | IRON_CONDOR  | is_active=True
+2026-05-23 | CALL         | is_active=True  (fired at 9am)
+2026-05-23 | IRON_CONDOR  | is_active=True  (fired at 2pm)
 ```
 
 ### Operator Deactivation
@@ -279,20 +279,22 @@ signal.save()
 Deactivated signals:
 - Are excluded from execution and API responses
 - Still count toward cooldowns (prevents gaming)
-- Can be reactivated if they re-qualify on a subsequent hourly run
+- **Stay deactivated** even if they re-qualify on subsequent hourly runs (operator decision is respected)
 
 ### Veto Handling
 
-When overlays block a directional trade, the system emits `OVERLAY_VETO`:
+When overlays block a directional trade, the system emits `OVERLAY_VETO` in the `no_trade_reasons` field. However:
 
-- Vetoed `NO_TRADE` rows are persisted so the system knows "today has a veto"
-- Execution commands and API endpoints check for vetoes on the latest date
-- If today is vetoed, stale older trades are not executed
+- `NO_TRADE` rows are **not persisted** — only tradeable signals are stored
+- If a tradeable signal fires later in the day, any stale `NO_TRADE` rows are deactivated
+- Execution commands and API endpoints check for active tradeable signals, not veto rows
 
 ```bash
-# This will error if today has an OVERLAY_VETO
+# Execute the highest-priority signal for today
 python manage.py execute_deribit --latest
-# Error: Latest date 2026-05-23 has OVERLAY_VETO — execution blocked
+
+# Execute a specific signal type on multi-signal days
+python manage.py execute_deribit --latest --type IRON_CONDOR
 ```
 
 ---
@@ -814,7 +816,7 @@ sudo systemctl restart gunicorn
 0 * * * * python manage.py reconcile --all
 ```
 
-> **Note:** Hourly signal generation allows the system to catch signals that qualify later in the day. Once tradeable signals fire, subsequent runs only refresh market context.
+> **Note:** Hourly signal generation allows the system to catch signals that qualify later in the day. New signal types can fire at any hour — the system is additive, not locked after first fire.
 
 ---
 

@@ -404,3 +404,43 @@ class ExecutionEvent(models.Model):
 
     def __str__(self):
         return f"{self.event_type} @ {self.created_at}"
+
+
+class TradeSetupSnapshot(models.Model):
+    """
+    Persisted snapshot of a trade setup at generation time.
+    Captures what was recommended, independent of whether it was executed.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    signal = models.OneToOneField(
+        'signals.DailySignal',
+        on_delete=models.CASCADE,
+        related_name='trade_setup'
+    )
+    
+    # Core setup data as JSON (from TradeSetup.to_dict())
+    setup_data = models.JSONField(help_text="Full trade setup snapshot")
+    
+    # Denormalized fields for querying
+    signal_date = models.DateField(db_index=True)
+    signal_type = models.CharField(max_length=30)
+    direction = models.CharField(max_length=10)
+    spot_price = models.DecimalField(max_digits=12, decimal_places=2)
+    net_debit = models.DecimalField(max_digits=12, decimal_places=2)
+    max_profit = models.DecimalField(max_digits=12, decimal_places=2)
+    max_loss = models.DecimalField(max_digits=12, decimal_places=2)
+    contracts = models.IntegerField()
+    validation_passed = models.BooleanField()
+    
+    # Tracking
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'trade_setup_snapshot'
+        ordering = ['-signal_date']
+        indexes = [
+            models.Index(fields=['signal_date', 'signal_type']),
+        ]
+    
+    def __str__(self):
+        return f"{self.signal_date} | {self.signal_type} | {self.direction}"

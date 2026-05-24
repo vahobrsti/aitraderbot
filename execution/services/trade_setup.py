@@ -274,9 +274,9 @@ class TradeSetup:
             f"*Market:* BTC @ `${self.spot_price:,.0f}`",
             f"*Expiry:* {self.expiry} ({self.dte} DTE)",
             "",
-            "━━━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━",
             "*TRADE: Bear Put Spread*" if self.direction == "SHORT" else "*TRADE: Bull Call Spread*" if self.direction == "LONG" else "*TRADE: Iron Condor*",
-            "━━━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━",
             "",
         ]
         
@@ -317,9 +317,9 @@ class TradeSetup:
         
         lines.extend([
             "",
-            "━━━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━",
             "*METRICS*",
-            "━━━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━",
             f"Width: `${self.spread_width:,.0f}` ({self.spread_width_pct*100:.1f}%)",
             f"Net Debit: `${self.net_debit:,.2f}`",
             f"Max Profit: `${self.max_profit:,.2f}`",
@@ -328,16 +328,16 @@ class TradeSetup:
             f"Breakeven: `${self.breakeven:,.0f}`",
             f"Net Edge: `{self.net_edge_pct*100:.1f}%`",
             "",
-            "━━━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━",
             "*POSITION*",
-            "━━━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━",
             f"Contracts: `{self.contracts}`",
             f"Total Risk: `${self.total_risk:,.2f}`",
             f"Total Max Profit: `${self.total_max_profit:,.2f}`",
             "",
-            "━━━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━",
             "*EXIT RULES*",
-            "━━━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━",
         ])
         
         if self.direction == "NEUTRAL" and self.short_leg:
@@ -397,9 +397,9 @@ class TradeSetup:
         if self.path_profile and (self.path_profile.is_shakeout_heavy or self.path_profile.is_invalidation_heavy):
             lines.extend([
                 "",
-                "━━━━━━━━━━━━━━━━━━━━━━",
+                "━━━━━━━━━━",
                 "⚡ *PATH PROFILE*",
-                "━━━━━━━━━━━━━━━━━━━━━━",
+                "━━━━━━━━━━",
             ])
             if self.path_profile.is_shakeout_heavy:
                 lines.append(f"🔄 Shakeout Rate: `{self.path_profile.shakeout_pct*100:.0f}%` of winners")
@@ -412,9 +412,9 @@ class TradeSetup:
         
         lines.extend([
             "",
-            "━━━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━",
             "*ORDER ENTRY*",
-            "━━━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━",
         ])
         
         if self.direction == "NEUTRAL" and self.extra_legs:
@@ -435,6 +435,42 @@ class TradeSetup:
                 lines.append(f"3\\. Limit: `${self.net_debit:,.2f}` debit")
         
         return "\n".join(lines)
+    
+    def save_to_db(self, signal=None):
+        """
+        Persist this setup to the database.
+        
+        Args:
+            signal: DailySignal instance (optional, will lookup if not provided)
+        
+        Returns:
+            TradeSetupSnapshot instance
+        """
+        from execution.models import TradeSetupSnapshot
+        from signals.models import DailySignal
+        
+        if signal is None:
+            signal = DailySignal.objects.get(
+                date=self.signal_date,
+                trade_decision=self.signal_type
+            )
+        
+        snapshot, created = TradeSetupSnapshot.objects.update_or_create(
+            signal=signal,
+            defaults={
+                'setup_data': self.to_dict(),
+                'signal_date': self.signal_date,
+                'signal_type': self.signal_type,
+                'direction': self.direction,
+                'spot_price': self.spot_price,
+                'net_debit': self.net_debit,
+                'max_profit': self.max_profit,
+                'max_loss': self.max_loss,
+                'contracts': self.contracts,
+                'validation_passed': self.validation_passed,
+            }
+        )
+        return snapshot
 
 
 class TradeSetupBuilder:

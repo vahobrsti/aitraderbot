@@ -74,8 +74,8 @@ Add these lines:
 # ============================================
 # AI Trader Bot - Hourly Signal Pipeline (UTC)
 # ============================================
-# Signals are re-evaluated hourly until tradeable signals fire.
-# Once fired, subsequent runs only refresh market context.
+# Signals are re-evaluated hourly. New signal types can fire at any hour.
+# Existing signals are updated only if meaningfully changed (no spam).
 
 # :05 - Refresh Google Sheet
 5 * * * * cd /var/www/app && /var/www/app/venv/bin/python manage.py refresh_sheet >> /var/www/app/logs/cron.log 2>&1
@@ -548,7 +548,7 @@ python manage.py execute_deribit --latest --type MVRV_SHORT --dry-run
 
 ### Reactivating a Deactivated Signal
 
-Signals can be manually deactivated by operators. If conditions re-qualify, the hourly cron will reactivate them:
+Signals can be manually deactivated by operators. **Deactivated signals stay deactivated** even if conditions re-qualify — the operator's decision is respected. To reactivate manually:
 
 ```bash
 # Manual reactivation

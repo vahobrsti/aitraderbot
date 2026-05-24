@@ -295,6 +295,8 @@ class TelegramNotifier:
                 builder = TradeSetupBuilder()
                 setup = builder.build_setup(daily_signal.date, signal_type=daily_signal.trade_decision)
                 if setup:
+                    # Persist setup to database
+                    setup.save_to_db(signal=daily_signal)
                     setup_result = self.send_trade_setup(setup)
                     result = result and setup_result
             except Exception as e:
