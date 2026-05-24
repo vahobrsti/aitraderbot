@@ -18,9 +18,10 @@ from signals.fusion import (
 from signals.options import (
     get_strategy, format_recommendation, generate_trade_signal
 )
-from signals.overlays import apply_long_overlays, apply_overlays, get_size_multiplier
+from signals.overlays import apply_long_overlays, apply_overlays, get_size_multiplier, compute_efb_veto
 from signals.tactical_puts import tactical_put_inside_bull, TacticalPutStrategy
 from signals.condor_gate import evaluate_condor_gate, DEFAULT_SCORE_THRESHOLD
+from signals.mvrv_short import check_mvrv_short_signal
 
 # Trade decision priority (matches DailySignal.DECISION_PRIORITY)
 # Lower number = higher priority when multiple signals fire on same day
@@ -199,6 +200,9 @@ class Command(BaseCommand):
         condor_eligible_count = 0
         condor_vetoed_count = 0
         
+        # MVRV short stats
+        mvrv_short_count = 0
+        
         # Post-overlay trade counts
         long_trades_after = 0
         short_trades_after = 0
@@ -269,6 +273,11 @@ class Command(BaseCommand):
                     condor_count += 1
                 elif condor_result.veto_reasons:
                     condor_vetoed_count += 1
+            
+            # Track MVRV short (bear market tactical short)
+            mvrv_short_signal = check_mvrv_short_signal(row)
+            if mvrv_short_signal.active:
+                mvrv_short_count += 1
 
         total = len(df)
         
@@ -333,6 +342,9 @@ class Command(BaseCommand):
         self.stdout.write(f"Eligible (score >= {DEFAULT_SCORE_THRESHOLD}, no vetoes): {condor_eligible_count} ({condor_eligible_count/years:.1f}/year)")
         self.stdout.write(f"Vetoed (hard veto active):        {condor_vetoed_count}")
         
+        self.stdout.write(f"\n--- MVRV SHORT (Bear Market Tactical) ---")
+        self.stdout.write(f"Active (bear mode + MVRV thresholds): {mvrv_short_count} ({mvrv_short_count/years:.1f}/year)")
+        
         # === TACTICAL PUTS LIST ===
         self.stdout.write("\n" + "=" * 60)
         self.stdout.write("TACTICAL PUTS (Puts Inside Bull Regimes)")
@@ -390,6 +402,7 @@ class Command(BaseCommand):
         for idx, row in df.iterrows():
             result = fuse_signals(row)
             overlay = apply_overlays(result, row)
+            size_mult = get_size_multiplier(overlay)
             date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
             
             # Determine trade_decision based on fusion state (matches services.py logic)
@@ -401,8 +414,8 @@ class Command(BaseCommand):
                           MarketState.LATE_DISTRIBUTION_SHORT}
             
             if result.state in long_states:
-                # Check overlay veto
-                if not overlay.long_veto_active or overlay.long_veto_strength < 2:
+                # Check overlay veto (size_mult > 0 required for execution)
+                if size_mult > 0:
                     trade_signals.append({
                         'date': date_str,
                         'state': result.state.value,
@@ -412,21 +425,22 @@ class Command(BaseCommand):
                         'priority': DECISION_PRIORITY['CALL'],
                     })
                 
-                # Also check for tactical puts in bull states
-                tactical_result = tactical_put_inside_bull(result, row)
-                if tactical_result.active:
-                    trade_signals.append({
-                        'date': date_str,
-                        'state': result.state.value,
-                        'confidence': result.confidence.value,
-                        'score': result.score,
-                        'type': 'TACTICAL_PUT',
-                        'priority': DECISION_PRIORITY['TACTICAL_PUT'],
-                    })
+                # Also check for tactical puts in bull states (requires size_mult > 0)
+                if size_mult > 0:
+                    tactical_result = tactical_put_inside_bull(result, row)
+                    if tactical_result.active:
+                        trade_signals.append({
+                            'date': date_str,
+                            'state': result.state.value,
+                            'confidence': result.confidence.value,
+                            'score': result.score,
+                            'type': 'TACTICAL_PUT',
+                            'priority': DECISION_PRIORITY['TACTICAL_PUT'],
+                        })
             
             elif result.state in short_states:
-                # Check overlay veto
-                if not overlay.short_veto_active or overlay.short_veto_strength < 2:
+                # Check overlay veto (size_mult > 0 required for execution)
+                if size_mult > 0:
                     trade_signals.append({
                         'date': date_str,
                         'state': result.state.value,
@@ -436,8 +450,8 @@ class Command(BaseCommand):
                         'priority': DECISION_PRIORITY['PUT'],
                     })
             
-            # Option signals (tracked independently of fusion state)
-            if int(row.get('signal_option_call', 0)) == 1:
+            # Option CALL (requires size_mult > 0)
+            if int(row.get('signal_option_call', 0)) == 1 and size_mult > 0:
                 trade_signals.append({
                     'date': date_str,
                     'state': result.state.value,
@@ -446,15 +460,19 @@ class Command(BaseCommand):
                     'type': 'OPTION_CALL',
                     'priority': DECISION_PRIORITY['OPTION_CALL'],
                 })
-            if int(row.get('signal_option_put', 0)) == 1:
-                trade_signals.append({
-                    'date': date_str,
-                    'state': result.state.value,
-                    'confidence': result.confidence.value,
-                    'score': result.score,
-                    'type': 'OPTION_PUT',
-                    'priority': DECISION_PRIORITY['OPTION_PUT'],
-                })
+            
+            # Option PUT (requires size_mult > 0 AND passes EFB veto)
+            if int(row.get('signal_option_put', 0)) == 1 and size_mult > 0:
+                efb_veto, _ = compute_efb_veto(row)
+                if efb_veto < 1:  # No EFB veto
+                    trade_signals.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'confidence': result.confidence.value,
+                        'score': result.score,
+                        'type': 'OPTION_PUT',
+                        'priority': DECISION_PRIORITY['OPTION_PUT'],
+                    })
             
             # Iron condor (only on NO_TRADE/TRANSITION_CHOP states)
             if result.state in {MarketState.NO_TRADE, MarketState.TRANSITION_CHOP}:
@@ -469,6 +487,20 @@ class Command(BaseCommand):
                         'priority': DECISION_PRIORITY['IRON_CONDOR'],
                         'condor_score': condor_result.score,
                     })
+            
+            # MVRV Short (bear market tactical short)
+            mvrv_short_signal = check_mvrv_short_signal(row)
+            if mvrv_short_signal.active:
+                trade_signals.append({
+                    'date': date_str,
+                    'state': result.state.value,
+                    'confidence': result.confidence.value,
+                    'score': result.score,
+                    'type': 'MVRV_SHORT',
+                    'priority': DECISION_PRIORITY['MVRV_SHORT'],
+                    'mvrv_7d': mvrv_short_signal.mvrv_7d,
+                    'mvrv_60d': mvrv_short_signal.mvrv_60d,
+                })
         
         self.stdout.write(f"\nTotal trade signals: {len(trade_signals)}")
         
@@ -480,9 +512,14 @@ class Command(BaseCommand):
                 'OPTION_CALL': '📗',
                 'OPTION_PUT': '📕',
                 'IRON_CONDOR': '🦅',
+                'MVRV_SHORT': '🐻',
             }.get(sig['type'], '⚪')
             type_label = f"[{sig['type']:12s}]"
-            extra = f" (cscore={sig['condor_score']:.0f})" if sig['type'] == 'IRON_CONDOR' else ""
+            extra = ""
+            if sig['type'] == 'IRON_CONDOR':
+                extra = f" (cscore={sig['condor_score']:.0f})"
+            elif sig['type'] == 'MVRV_SHORT':
+                extra = f" (7d={sig['mvrv_7d']:.3f}, 60d={sig['mvrv_60d']:.3f})"
             self.stdout.write(f"  {sig['date']} {type_emoji} {type_label} {sig['state']:20s} | {sig['confidence']:6s} | score: {sig['score']:+d}{extra}")
         
         if len(trade_signals) > 50:
@@ -1348,6 +1385,8 @@ class Command(BaseCommand):
         """
         Show multi-signal day analysis: all signals that would fire per date
         with priority ranking, aligned with DailySignal.DECISION_PRIORITY.
+        
+        Applies execution gates (size_mult > 0, EFB veto) to match production behavior.
         """
         from collections import defaultdict
         
@@ -1370,32 +1409,31 @@ class Command(BaseCommand):
         for idx, row in df.iterrows():
             result = fuse_signals(row)
             overlay = apply_overlays(result, row)
+            size_mult = get_size_multiplier(overlay)
             date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
             
-            # CALL (from long fusion states)
-            if result.state in long_states:
-                if not overlay.long_veto_active or overlay.long_veto_strength < 2:
-                    signals_by_date[date_str].append({
-                        'type': 'CALL',
-                        'priority': DECISION_PRIORITY['CALL'],
-                        'state': result.state.value,
-                        'score': result.score,
-                        'confidence': result.confidence.value,
-                    })
+            # CALL (from long fusion states, requires size_mult > 0)
+            if result.state in long_states and size_mult > 0:
+                signals_by_date[date_str].append({
+                    'type': 'CALL',
+                    'priority': DECISION_PRIORITY['CALL'],
+                    'state': result.state.value,
+                    'score': result.score,
+                    'confidence': result.confidence.value,
+                })
             
-            # PUT (from short fusion states)
-            if result.state in short_states:
-                if not overlay.short_veto_active or overlay.short_veto_strength < 2:
-                    signals_by_date[date_str].append({
-                        'type': 'PUT',
-                        'priority': DECISION_PRIORITY['PUT'],
-                        'state': result.state.value,
-                        'score': result.score,
-                        'confidence': result.confidence.value,
-                    })
+            # PUT (from short fusion states, requires size_mult > 0)
+            if result.state in short_states and size_mult > 0:
+                signals_by_date[date_str].append({
+                    'type': 'PUT',
+                    'priority': DECISION_PRIORITY['PUT'],
+                    'state': result.state.value,
+                    'score': result.score,
+                    'confidence': result.confidence.value,
+                })
             
-            # TACTICAL_PUT (in bull states with tactical put conditions)
-            if result.state in long_states:
+            # TACTICAL_PUT (in bull states with tactical put conditions, requires size_mult > 0)
+            if result.state in long_states and size_mult > 0:
                 tactical_result = tactical_put_inside_bull(result, row)
                 if tactical_result.active:
                     signals_by_date[date_str].append({
@@ -1407,8 +1445,8 @@ class Command(BaseCommand):
                         'strength': 'FULL' if tactical_result.strength == 2 else 'PARTIAL',
                     })
             
-            # OPTION_CALL (rule-based)
-            if int(row.get('signal_option_call', 0)) == 1:
+            # OPTION_CALL (rule-based, requires size_mult > 0)
+            if int(row.get('signal_option_call', 0)) == 1 and size_mult > 0:
                 signals_by_date[date_str].append({
                     'type': 'OPTION_CALL',
                     'priority': DECISION_PRIORITY['OPTION_CALL'],
@@ -1417,15 +1455,17 @@ class Command(BaseCommand):
                     'confidence': result.confidence.value,
                 })
             
-            # OPTION_PUT (rule-based)
-            if int(row.get('signal_option_put', 0)) == 1:
-                signals_by_date[date_str].append({
-                    'type': 'OPTION_PUT',
-                    'priority': DECISION_PRIORITY['OPTION_PUT'],
-                    'state': result.state.value,
-                    'score': result.score,
-                    'confidence': result.confidence.value,
-                })
+            # OPTION_PUT (rule-based, requires size_mult > 0 AND passes EFB veto)
+            if int(row.get('signal_option_put', 0)) == 1 and size_mult > 0:
+                efb_veto, _ = compute_efb_veto(row)
+                if efb_veto < 1:  # No EFB veto
+                    signals_by_date[date_str].append({
+                        'type': 'OPTION_PUT',
+                        'priority': DECISION_PRIORITY['OPTION_PUT'],
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                    })
             
             # IRON_CONDOR (only on NO_TRADE/TRANSITION_CHOP)
             if result.state in {MarketState.NO_TRADE, MarketState.TRANSITION_CHOP}:
@@ -1439,6 +1479,19 @@ class Command(BaseCommand):
                         'confidence': result.confidence.value,
                         'condor_score': condor_result.score,
                     })
+            
+            # MVRV_SHORT (bear market tactical short)
+            mvrv_short_signal = check_mvrv_short_signal(row)
+            if mvrv_short_signal.active:
+                signals_by_date[date_str].append({
+                    'type': 'MVRV_SHORT',
+                    'priority': DECISION_PRIORITY['MVRV_SHORT'],
+                    'state': result.state.value,
+                    'score': result.score,
+                    'confidence': result.confidence.value,
+                    'mvrv_7d': mvrv_short_signal.mvrv_7d,
+                    'mvrv_60d': mvrv_short_signal.mvrv_60d,
+                })
         
         # Filter to multi-signal days only
         multi_signal_days = {d: sigs for d, sigs in signals_by_date.items() if len(sigs) > 1}
@@ -1490,12 +1543,15 @@ class Command(BaseCommand):
                     'OPTION_CALL': '📗',
                     'OPTION_PUT': '📕',
                     'IRON_CONDOR': '🦅',
+                    'MVRV_SHORT': '🐻',
                 }.get(sig['type'], '⚪')
                 extra = ""
                 if sig['type'] == 'TACTICAL_PUT':
                     extra = f" [{sig.get('strength', '')}]"
                 elif sig['type'] == 'IRON_CONDOR':
                     extra = f" [cscore={sig.get('condor_score', 0):.0f}]"
+                elif sig['type'] == 'MVRV_SHORT':
+                    extra = f" [7d={sig.get('mvrv_7d', 0):.3f}, 60d={sig.get('mvrv_60d', 0):.3f}]"
                 self.stdout.write(
                     f"  {type_emoji} P{sig['priority']} {sig['type']:12s} | "
                     f"{sig['state']:20s} | {sig['confidence']:6s} | score: {sig['score']:+d}{extra} {winner}"
