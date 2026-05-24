@@ -435,6 +435,42 @@ class TradeSetup:
                 lines.append(f"3\\. Limit: `${self.net_debit:,.2f}` debit")
         
         return "\n".join(lines)
+    
+    def save_to_db(self, signal=None):
+        """
+        Persist this setup to the database.
+        
+        Args:
+            signal: DailySignal instance (optional, will lookup if not provided)
+        
+        Returns:
+            TradeSetupSnapshot instance
+        """
+        from execution.models import TradeSetupSnapshot
+        from signals.models import DailySignal
+        
+        if signal is None:
+            signal = DailySignal.objects.get(
+                date=self.signal_date,
+                trade_decision=self.signal_type
+            )
+        
+        snapshot, created = TradeSetupSnapshot.objects.update_or_create(
+            signal=signal,
+            defaults={
+                'setup_data': self.to_dict(),
+                'signal_date': self.signal_date,
+                'signal_type': self.signal_type,
+                'direction': self.direction,
+                'spot_price': self.spot_price,
+                'net_debit': self.net_debit,
+                'max_profit': self.max_profit,
+                'max_loss': self.max_loss,
+                'contracts': self.contracts,
+                'validation_passed': self.validation_passed,
+            }
+        )
+        return snapshot
 
 
 class TradeSetupBuilder:
