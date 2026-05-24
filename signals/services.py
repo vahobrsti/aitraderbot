@@ -775,26 +775,18 @@ class SignalService:
         """
         Convenience method to generate and persist in one call.
 
-        Uses the full multi-signal flow (generate_all_signals + persist_all_signals)
-        to ensure proper handling of inactive rows and day-is-done rules.
-        Returns the highest-priority signal.
+        Uses the full multi-signal flow (generate_all_signals + persist_all_signals).
+        Returns the highest-priority signal, or None if only NO_TRADE.
 
         Args:
             target_date: Specific date to score, or None for latest.
 
         Returns:
-            DailySignal model instance (highest priority), or None if only ordinary NO_TRADE.
+            DailySignal model instance (highest priority), or None if no tradeable signals.
         """
         results = self.generate_all_signals(target_date)
         persisted = self.persist_all_signals(results)
         if not persisted:
-            # No tradeable or vetoed signals persisted — check if we have a vetoed NO_TRADE
-            # Only persist vetoed NO_TRADE, not ordinary NO_TRADE
-            for result in results:
-                if result.trade_decision == "NO_TRADE" and "OVERLAY_VETO" in (result.no_trade_reasons or []):
-                    signal, _ = self.persist_signal(result)
-                    return signal
-            # Ordinary NO_TRADE — don't persist, return None
             return None
         # Return highest priority signal
         signals = [s for s, _ in persisted]
@@ -1093,6 +1085,13 @@ class SignalService:
               results and notify (first fire of the day).
 
         Wrapped in a transaction with row lock for race safety.
+
+        Logic:
+            - For each tradeable signal: persist if new, skip if already exists
+            - NO_TRADE / TRANSITION_CHOP: ignore completely (don't persist, don't deactivate)
+            - New signal types can fire at any hour throughout the day
+            - Operator-deactivated signals (is_active=False) stay deactivated
+            - When tradeable signals are persisted, deactivate any stale NO_TRADE rows
         """
         from django.db import transaction
 
@@ -1102,122 +1101,48 @@ class SignalService:
 
         with transaction.atomic():
             # Lock a guaranteed row to serialize concurrent hourly runs for the same date.
-            # RawDailyData always has a row for the evaluated date (it's the data source).
             lock_row = RawDailyData.objects.select_for_update().filter(date=signal_date).first()
             if lock_row is None:
                 raise ValueError(
                     f"No RawDailyData for {signal_date} — cannot safely serialize signal persistence"
                 )
 
-            # Check if today already has any tradeable signals (active OR inactive).
-            # If any exist, the day is "done" — we only refresh/reactivate, not create new types.
-            # This prevents operator deactivation from reopening the day for different signals.
-            existing_tradeable = list(
-                DailySignal.objects.filter(
-                    date=signal_date
-                ).exclude(trade_decision="NO_TRADE")
-            )
-            existing_active = [s for s in existing_tradeable if s.is_active]
+            # Get ALL existing signals for this date (active and inactive)
+            existing_signals = {
+                s.trade_decision: s
+                for s in DailySignal.objects.filter(date=signal_date)
+            }
 
             persisted = []
 
-            if existing_tradeable:
-                # Day is done — update existing active rows to keep data fresh.
-                # Also reactivate any inactive rows that re-qualify.
-                existing_by_decision = {s.trade_decision: s for s in existing_active}
-                all_decisions = {s.trade_decision for s in existing_tradeable}
-                updated_decisions = set()
-                for result in results:
-                    if result.trade_decision == "NO_TRADE":
+            for result in results:
+                # Skip NO_TRADE entirely — don't persist, don't affect existing signals
+                if result.trade_decision == "NO_TRADE":
+                    continue
+
+                existing = existing_signals.get(result.trade_decision)
+
+                if existing is not None:
+                    if not existing.is_active:
+                        # Operator deactivated this signal — respect that decision, skip
                         continue
-                    if result.trade_decision in existing_by_decision:
-                        # Active signal exists — check for meaningful changes before refresh
-                        existing = existing_by_decision[result.trade_decision]
-                        changed = _signal_changed(existing, result)
+                    # Signal exists and is active — check for meaningful changes
+                    changed = _signal_changed(existing, result)
+                    if changed:
+                        # Update with fresh data
                         signal, _ = self.persist_signal(result)
-                        persisted.append((signal, changed))
-                        updated_decisions.add(result.trade_decision)
-                    else:
-                        # Not in active set — check if there's an inactive row to reactivate
-                        inactive_row = DailySignal.objects.filter(
-                            date=result.date, trade_decision=result.trade_decision, is_active=False
-                        ).first()
-                        if inactive_row:
-                            # Reactivate: set is_active=True before persist_signal updates it
-                            inactive_row.is_active = True
-                            inactive_row.save(update_fields=['is_active'])
-                            signal, _ = self.persist_signal(result)
-                            # Treat reactivation as new for notification
-                            persisted.append((signal, True))
-                            updated_decisions.add(result.trade_decision)
-                        # else: no inactive row exists, and we don't create new signals
-                        # after day is done — this is intentional
-                # For existing active signals not in current results, refresh market-context
-                # fields (probabilities, fusion, scores) so API/execution see current data
-                for s in existing_active:
-                    if s.trade_decision not in updated_decisions:
-                        # Use any result's shared market fields (all share same date/row)
-                        ref = results[0]
-                        s.p_long = ref.p_long
-                        s.p_short = ref.p_short
-                        s.fusion_state = ref.fusion_state
-                        s.fusion_confidence = ref.fusion_confidence
-                        s.fusion_score = ref.fusion_score
-                        s.score_components = ref.score_components
-                        from django.utils import timezone
-                        s.updated_at = timezone.now()
-                        s.save(update_fields=[
-                            'p_long', 'p_short', 'fusion_state',
-                            'fusion_confidence', 'fusion_score', 'score_components',
-                            'updated_at',
-                        ])
-                        persisted.append((s, False))
-                # Deactivate any stale NO_TRADE rows for this date
-                # (tradeable signals exist, NO_TRADE is contradictory)
+                        persisted.append((signal, False))  # False = not new, just updated
+                    # else: no meaningful change, skip entirely (no notification)
+                else:
+                    # Truly new signal type for this date — persist and mark as new
+                    signal, created = self.persist_signal(result)
+                    persisted.append((signal, True))  # True = new signal, notify
+
+            # If any tradeable signals were persisted, deactivate stale NO_TRADE rows
+            # (prevents old OVERLAY_VETO from blocking API/execution)
+            if persisted:
                 DailySignal.objects.filter(
                     date=signal_date, trade_decision="NO_TRADE", is_active=True
                 ).update(is_active=False)
-            else:
-                # First fire of the day — persist all qualifying signals
-                tradeable_persisted = False
-                vetoed_no_trade = None
-
-                for result in results:
-                    if result.trade_decision == "NO_TRADE":
-                        # Check if this is a vetoed NO_TRADE (worth persisting for notifications)
-                        if "OVERLAY_VETO" in (result.no_trade_reasons or []):
-                            vetoed_no_trade = result
-                        continue
-                    # Check for existing inactive row (operator deactivated, now re-qualifies)
-                    inactive_row = DailySignal.objects.filter(
-                        date=result.date, trade_decision=result.trade_decision, is_active=False
-                    ).first()
-                    if inactive_row:
-                        # Reactivate: set is_active=True before persist_signal updates it
-                        inactive_row.is_active = True
-                        inactive_row.save(update_fields=['is_active'])
-                    signal, created = self.persist_signal(result)
-                    # Treat reactivation as a new signal for notification purposes
-                    is_new = created or (inactive_row is not None)
-                    persisted.append((signal, is_new))
-                    tradeable_persisted = True
-
-                # If we persisted tradeable signals, deactivate any stale NO_TRADE for this date
-                # (NO_TRADE from earlier hourly run is now superseded by real signals)
-                if tradeable_persisted:
-                    DailySignal.objects.filter(
-                        date=signal_date, trade_decision="NO_TRADE", is_active=True
-                    ).update(is_active=False)
-                elif vetoed_no_trade:
-                    # No tradeable signals, but we have a vetoed NO_TRADE — persist it
-                    # so notify_signal can find it and avoid notifying stale older trades
-                    signal, created = self.persist_signal(vetoed_no_trade)
-                    persisted.append((signal, created))
-                else:
-                    # No tradeable signals and no veto — deactivate any stale vetoed NO_TRADE
-                    # (veto lifted, day is now ordinary NO_TRADE)
-                    DailySignal.objects.filter(
-                        date=signal_date, trade_decision="NO_TRADE", is_active=True
-                    ).update(is_active=False)
 
         return persisted
