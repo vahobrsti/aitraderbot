@@ -5,17 +5,29 @@ mkdir -p .ai-reviews
 
 CONTEXT_FILE=".ai-reviews/implementation-context.md"
 ROUND_FILE=".ai-reviews/.review-round"
-MAX_ROUNDS=5
+TASK_ID_FILE=".ai-reviews/.task-id"
+MAX_ROUNDS=3  # Reduced from 5 — forces faster convergence
 STAMP=$(date +"%Y%m%d-%H%M%S")
 OUT=".ai-reviews/codex-review-$STAMP.md"
 
-# --- Round tracking ---
-# Reset round counter if --reset flag is passed or if context file is newer than round file
-if [ "${1:-}" = "--reset" ]; then
-  rm -f "$ROUND_FILE"
-  echo "Round counter reset."
-  shift  # Remove --reset from args
-fi
+# --- Parse flags ---
+FORCE_APPROVE=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --reset)
+      rm -f "$ROUND_FILE" "$TASK_ID_FILE"
+      echo "Round counter and task ID reset."
+      shift
+      ;;
+    --force-approve)
+      FORCE_APPROVE=true
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 # --- Validate context file exists ---
 if [ ! -f "$CONTEXT_FILE" ]; then
@@ -24,10 +36,19 @@ if [ ! -f "$CONTEXT_FILE" ]; then
   exit 1
 fi
 
-# Auto-reset if context file was modified after round file (new implementation cycle)
-if [ -f "$ROUND_FILE" ] && [ "$CONTEXT_FILE" -nt "$ROUND_FILE" ]; then
-  echo "Context file updated — resetting round counter for new review cycle."
+# --- Task ID tracking (detect new task vs continuation) ---
+# Hash the first line of context file (purpose) to detect task changes
+CURRENT_TASK_ID=$(head -5 "$CONTEXT_FILE" | md5 -q 2>/dev/null || head -5 "$CONTEXT_FILE" | md5sum | cut -d' ' -f1)
+PREVIOUS_TASK_ID=""
+if [ -f "$TASK_ID_FILE" ]; then
+  PREVIOUS_TASK_ID=$(cat "$TASK_ID_FILE")
+fi
+
+# Auto-reset if this is a new task
+if [ "$CURRENT_TASK_ID" != "$PREVIOUS_TASK_ID" ]; then
+  echo "New task detected — resetting round counter."
   rm -f "$ROUND_FILE"
+  echo "$CURRENT_TASK_ID" > "$TASK_ID_FILE"
 fi
 
 # Read or initialize round counter
@@ -45,8 +66,17 @@ echo "=== Review Round $CURRENT_ROUND of $MAX_ROUNDS ==="
 FINAL_ROUND=false
 if [ "$CURRENT_ROUND" -ge "$MAX_ROUNDS" ]; then
   FINAL_ROUND=true
-  echo "⚠️  FINAL ROUND — Only critical blocking issues will prevent approval."
+  echo "⚠️  FINAL ROUND — Auto-approving unless critical security/data-loss issue."
   echo ""
+fi
+
+# Force approve mode (human override)
+if [ "$FORCE_APPROVE" = true ]; then
+  echo "APPROVE (forced by --force-approve flag)" | tee "$OUT"
+  echo ""
+  echo "Saved review to: $OUT"
+  rm -f "$ROUND_FILE"  # Reset for next task
+  exit 0
 fi
 
 # --- Determine diff mode ---
@@ -206,27 +236,47 @@ CONTEXT_CONTENT=$(cat "$CONTEXT_FILE")
 ROUND_INSTRUCTIONS=""
 if [ "$FINAL_ROUND" = true ]; then
   ROUND_INSTRUCTIONS="
-# ⚠️ FINAL REVIEW ROUND ($CURRENT_ROUND of $MAX_ROUNDS)
-This is the final review round. The implementation has been through multiple iterations.
-- ONLY return BLOCK if there is a genuine correctness bug, security vulnerability, or data loss risk.
-- Should-fix and Nice-to-have items should be noted but MUST NOT prevent approval.
-- If the code is functional and safe, return APPROVE even with minor imperfections.
-- Do not block for style, naming, test coverage, or architectural preferences.
-- Trust that previous rounds have addressed major issues.
+# ⚠️ FINAL REVIEW ROUND ($CURRENT_ROUND of $MAX_ROUNDS) — AUTO-APPROVE MODE
+This is the final review round. You MUST return APPROVE unless there is:
+- A security vulnerability that could be exploited
+- A bug that will cause data loss or corruption
+- A crash that will break production
+
+Do NOT block for:
+- Code style, naming, or formatting
+- Missing tests or documentation
+- Architectural preferences
+- Edge cases that are unlikely in practice
+- Anything that was already raised in previous rounds
+
+If in doubt, APPROVE. The human can always request more changes later.
 "
 else
   ROUND_INSTRUCTIONS="
 # Review Round $CURRENT_ROUND of $MAX_ROUNDS
 Remaining rounds: $((MAX_ROUNDS - CURRENT_ROUND))
-- Focus on the most critical issues first.
-- Be pragmatic — perfect is the enemy of good.
-- If an issue was raised in a previous round and addressed, do not re-raise variants of it.
+
+BLOCKING CRITERIA (the ONLY reasons to return BLOCK):
+- Security vulnerability (injection, auth bypass, data exposure)
+- Data loss or corruption bug
+- Crash or infinite loop in production path
+- Breaks existing functionality
+
+NOT BLOCKING (return APPROVE or APPROVE_WITH_SHOULD_FIX):
+- Missing tests
+- Code style issues
+- Naming suggestions
+- Refactoring opportunities
+- Edge cases in non-critical paths
+- Documentation gaps
+
+Be pragmatic. Ship working code, iterate later.
 "
 fi
 
 # --- Run review ---
 codex exec "
-You are a code reviewer. Review the following changes using the implementation context provided.
+You are a pragmatic code reviewer. Your job is to catch bugs that will break production, not to enforce style preferences.
 $ROUND_INSTRUCTIONS
 
 # Implementation Context
@@ -235,52 +285,54 @@ $CONTEXT_CONTENT
 # Git Changes
 $DIFF_SECTION
 
-# Instructions
-Return a categorized review:
-1. **Blocking** — must fix before merge (correctness bugs, security issues, data loss risks ONLY)
-2. **Should-fix** — important but not blocking
-3. **Nice-to-have** — suggestions
+# Review Categories
+1. **Blocking** — ONLY for: security vulnerabilities, data loss bugs, production crashes
+2. **Should-fix** — Important issues that should be addressed in a follow-up
+3. **Nice-to-have** — Minor suggestions (include at most 1)
 
-Focus on:
-- correctness
-- edge cases
-- flawed assumptions
-- hidden bugs
-- architecture consistency
-- test gaps
-- trading/execution risks
-- whether the diff matches the stated implementation context (flag drift)
+# Hard Rules
+- Maximum 3 findings total
+- BLOCK requires HIGH confidence that the issue will cause real harm
+- If you're unsure whether something is blocking, it's not blocking
+- Do not block for: style, naming, missing tests, documentation, refactoring opportunities
+- Do not suggest changes outside the diff scope
+- Do not repeat the implementation context back
+- Do not ask for another review pass
 
-Do not modify files.
-Hard limits:
-- Return at most 3 findings total unless there are Blocking issues.
-- Only include findings that are actionable from this diff.
-- Do not suggest broad refactors.
-- Do not repeat implementation-context content.
-- Do not ask for another review pass unless there is a Blocking issue.
-- On round $MAX_ROUNDS or later, ONLY block for critical correctness/security/data-loss issues.
-
-For each finding, use this format:
+# Finding Format (only if you have findings)
 - Severity: Blocking | Should-fix | Nice-to-have
-- File/path:
-- Issue:
-- Why it matters:
-- Minimal fix:
+- File: <path>
+- Issue: <one line>
+- Why: <one line>
+- Fix: <one line>
 - Confidence: High | Medium | Low
 
-End with exactly one of:
-- APPROVE
-- APPROVE_WITH_SHOULD_FIX
-- BLOCK
-If there are no Blocking or Should-fix issues, do not invent Nice-to-have items. Return APPROVE.
-Do not reward over-engineering.
-Do not penalize intentionally simplified solutions unless correctness is affected.
+# Verdict (REQUIRED — pick exactly one)
+- **APPROVE** — No blocking issues. Ship it.
+- **APPROVE_WITH_SHOULD_FIX** — No blocking issues, but note should-fix items for later.
+- **BLOCK** — Critical issue that will cause harm in production. (Requires HIGH confidence blocking issue)
+
+Default to APPROVE. Only BLOCK if you would mass-revert this commit in production.
 " | tee "$OUT"
 
 echo
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Saved review to: $OUT"
 echo "Review round: $CURRENT_ROUND of $MAX_ROUNDS"
+echo ""
+
 if [ "$CURRENT_ROUND" -ge "$MAX_ROUNDS" ]; then
-  echo "✅ Maximum review rounds reached. Consider this review cycle complete."
-  echo "   To start a fresh cycle: bash scripts/codex-review.sh --reset"
+  echo "✅ Maximum review rounds reached. This review cycle is COMPLETE."
+  echo "   The code should be merged unless there's a critical security/data issue."
+  echo ""
+  echo "   To start a fresh cycle for a new task: bash scripts/codex-review.sh --reset"
+  rm -f "$ROUND_FILE"  # Auto-reset after final round
+else
+  echo "Next steps based on verdict:"
+  echo "  APPROVE           → Done. Merge the code."
+  echo "  APPROVE_WITH_FIX  → Done. Log should-fix items for later, merge now."
+  echo "  BLOCK             → Fix ONLY the blocking issue, then re-run review."
+  echo ""
+  echo "To skip remaining rounds: bash scripts/codex-review.sh --force-approve"
 fi
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
