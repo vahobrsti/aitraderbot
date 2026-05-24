@@ -423,9 +423,10 @@ class TestAnalyzeFusionDirection(SimpleTestCase):
         self.assertIn('OPTION_CALL', out)
 
     def test_direction_all_shows_both(self):
-        """--direction all shows both LONG and SHORT setups."""
+        """--direction all shows both CALL and PUT setups."""
         out, _ = _call(['--direction', 'all', '--latest', '50'])
-        self.assertIn('LONG', out)
+        # Changed from LONG to CALL to align with DECISION_PRIORITY naming
+        self.assertIn('CALL', out)
 
     def test_direction_short_counts_nonzero(self):
         """--direction short OPTION_PUT count is non-zero when signals exist."""
@@ -443,17 +444,33 @@ class TestAnalyzeFusionDirection(SimpleTestCase):
 
 
 class TestAnalyzeFusionTradeSignals(SimpleTestCase):
-    """Trade signals list must show all non-NO_TRADE states."""
+    """Trade signals list must show all tradeable decisions."""
 
     def test_all_tradeable_states_appear(self):
-        """All 7 tradeable states appear in the trade signals list."""
+        """Tradeable fusion states appear as CALL/PUT in trade signals list.
+        
+        Note: transition_chop is a NO_TRADE state that only becomes tradeable
+        via IRON_CONDOR (if condor gate passes). The trade signals list now
+        shows actual trade decisions (CALL, PUT, etc.) not raw fusion states.
+        """
         out, _ = _call(['--full'])
         trade_section = out[out.find('ALL TRADE SIGNALS'):]
-        for state in MarketState:
-            if state == MarketState.NO_TRADE:
-                continue
-            self.assertIn(state.value, trade_section,
-                          f"{state.value} missing from trade signals")
+        
+        # Long states should appear as CALL
+        long_states = {'strong_bullish', 'early_recovery', 'momentum', 'bull_probe',
+                       'bear_exhaustion_long', 'bear_rally_long'}
+        # Short states should appear as PUT
+        short_states = {'distribution_risk', 'bear_continuation', 'bear_probe',
+                        'bear_continuation_short', 'late_distribution_short'}
+        
+        # Verify CALL and PUT appear (the actual trade decisions)
+        self.assertIn('CALL', trade_section, "CALL missing from trade signals")
+        self.assertIn('PUT', trade_section, "PUT missing from trade signals")
+        
+        # Verify the underlying fusion states are shown in the state column
+        for state in long_states | short_states:
+            self.assertIn(state, trade_section,
+                          f"{state} missing from trade signals")
 
     def test_option_signals_tracked(self):
         """OPTION_CALL and OPTION_PUT appear in trade signals."""

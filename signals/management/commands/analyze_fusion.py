@@ -3,6 +3,9 @@
 Django command to analyze signal fusion on feature data.
 Shows market state distribution, confidence levels, and sample trade signals.
 Includes tactical puts analysis for puts inside bull regimes.
+
+Multi-signal aware: Shows all signals that would fire per date with priority ranking,
+aligned with DailySignal.DECISION_PRIORITY for consistent naming.
 """
 
 from django.core.management.base import BaseCommand
@@ -17,6 +20,20 @@ from signals.options import (
 )
 from signals.overlays import apply_long_overlays, apply_overlays, get_size_multiplier
 from signals.tactical_puts import tactical_put_inside_bull, TacticalPutStrategy
+from signals.condor_gate import evaluate_condor_gate, DEFAULT_SCORE_THRESHOLD
+
+# Trade decision priority (matches DailySignal.DECISION_PRIORITY)
+# Lower number = higher priority when multiple signals fire on same day
+DECISION_PRIORITY = {
+    "CALL": 1,
+    "PUT": 2,
+    "TACTICAL_PUT": 3,
+    "OPTION_CALL": 4,
+    "OPTION_PUT": 5,
+    "MVRV_SHORT": 6,
+    "IRON_CONDOR": 7,
+    "NO_TRADE": 99,
+}
 
 
 class Command(BaseCommand):
@@ -81,6 +98,11 @@ class Command(BaseCommand):
             action="store_true",
             help="Filter to bear-market window (cycle_days_since_halving 540-900)",
         )
+        parser.add_argument(
+            "--multi",
+            action="store_true",
+            help="Show multi-signal day analysis: all signals per date with priority ranking",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["csv"])
@@ -133,6 +155,11 @@ class Command(BaseCommand):
             self._show_stats(df, options["stats"])
             return
         
+        # Multi-signal analysis mode
+        if options.get("multi"):
+            self._show_multi_signal_analysis(df, latest_n)
+            return
+        
         # If direction specified, show filtered setups and exit
         if direction:
             self._show_direction_setups(df, direction, latest_n)
@@ -168,12 +195,17 @@ class Command(BaseCommand):
         tactical_put_full = 0
         tactical_put_partial = 0
         
+        # Iron condor stats
+        condor_eligible_count = 0
+        condor_vetoed_count = 0
+        
         # Post-overlay trade counts
         long_trades_after = 0
         short_trades_after = 0
         tactical_put_count = 0
         option_call_count = 0
         option_put_count = 0
+        condor_count = 0
 
         for idx, row in df.iterrows():
             result = fuse_signals(row)
@@ -228,6 +260,15 @@ class Command(BaseCommand):
                 option_call_count += 1
             if int(row.get('signal_option_put', 0)) == 1:
                 option_put_count += 1
+            
+            # Track iron condor eligibility (only on NO_TRADE/TRANSITION_CHOP states)
+            if result.state in {MarketState.NO_TRADE, MarketState.TRANSITION_CHOP}:
+                condor_result = evaluate_condor_gate(row, fusion_state=result.state.value)
+                if condor_result.eligible:
+                    condor_eligible_count += 1
+                    condor_count += 1
+                elif condor_result.veto_reasons:
+                    condor_vetoed_count += 1
 
         total = len(df)
         
@@ -288,6 +329,10 @@ class Command(BaseCommand):
         self.stdout.write(f"OPTION_CALL (MVRV cheap + fear):  {option_call_count} ({option_call_count/years:.1f}/year)")
         self.stdout.write(f"OPTION_PUT  (MVRV hot + greed):   {option_put_count} ({option_put_count/years:.1f}/year)")
         
+        self.stdout.write(f"\n--- IRON CONDOR (Range Gate) ---")
+        self.stdout.write(f"Eligible (score >= {DEFAULT_SCORE_THRESHOLD}, no vetoes): {condor_eligible_count} ({condor_eligible_count/years:.1f}/year)")
+        self.stdout.write(f"Vetoed (hard veto active):        {condor_vetoed_count}")
+        
         # === TACTICAL PUTS LIST ===
         self.stdout.write("\n" + "=" * 60)
         self.stdout.write("TACTICAL PUTS (Puts Inside Bull Regimes)")
@@ -344,18 +389,54 @@ class Command(BaseCommand):
         trade_signals = []
         for idx, row in df.iterrows():
             result = fuse_signals(row)
+            overlay = apply_overlays(result, row)
             date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
             
-            if result.state != MarketState.NO_TRADE:
-                trade_signals.append({
-                    'date': date_str,
-                    'state': result.state.value,
-                    'confidence': result.confidence.value,
-                    'score': result.score,
-                    'type': 'fusion',
-                })
+            # Determine trade_decision based on fusion state (matches services.py logic)
+            long_states = {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, 
+                          MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE, 
+                          MarketState.BEAR_EXHAUSTION_LONG, MarketState.BEAR_RALLY_LONG}
+            short_states = {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, 
+                          MarketState.BEAR_PROBE, MarketState.BEAR_CONTINUATION_SHORT, 
+                          MarketState.LATE_DISTRIBUTION_SHORT}
             
-            # Option signals (tracked independently)
+            if result.state in long_states:
+                # Check overlay veto
+                if not overlay.long_veto_active or overlay.long_veto_strength < 2:
+                    trade_signals.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'confidence': result.confidence.value,
+                        'score': result.score,
+                        'type': 'CALL',
+                        'priority': DECISION_PRIORITY['CALL'],
+                    })
+                
+                # Also check for tactical puts in bull states
+                tactical_result = tactical_put_inside_bull(result, row)
+                if tactical_result.active:
+                    trade_signals.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'confidence': result.confidence.value,
+                        'score': result.score,
+                        'type': 'TACTICAL_PUT',
+                        'priority': DECISION_PRIORITY['TACTICAL_PUT'],
+                    })
+            
+            elif result.state in short_states:
+                # Check overlay veto
+                if not overlay.short_veto_active or overlay.short_veto_strength < 2:
+                    trade_signals.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'confidence': result.confidence.value,
+                        'score': result.score,
+                        'type': 'PUT',
+                        'priority': DECISION_PRIORITY['PUT'],
+                    })
+            
+            # Option signals (tracked independently of fusion state)
             if int(row.get('signal_option_call', 0)) == 1:
                 trade_signals.append({
                     'date': date_str,
@@ -363,6 +444,7 @@ class Command(BaseCommand):
                     'confidence': result.confidence.value,
                     'score': result.score,
                     'type': 'OPTION_CALL',
+                    'priority': DECISION_PRIORITY['OPTION_CALL'],
                 })
             if int(row.get('signal_option_put', 0)) == 1:
                 trade_signals.append({
@@ -371,21 +453,37 @@ class Command(BaseCommand):
                     'confidence': result.confidence.value,
                     'score': result.score,
                     'type': 'OPTION_PUT',
+                    'priority': DECISION_PRIORITY['OPTION_PUT'],
                 })
+            
+            # Iron condor (only on NO_TRADE/TRANSITION_CHOP states)
+            if result.state in {MarketState.NO_TRADE, MarketState.TRANSITION_CHOP}:
+                condor_result = evaluate_condor_gate(row, fusion_state=result.state.value)
+                if condor_result.eligible:
+                    trade_signals.append({
+                        'date': date_str,
+                        'state': result.state.value,
+                        'confidence': result.confidence.value,
+                        'score': result.score,
+                        'type': 'IRON_CONDOR',
+                        'priority': DECISION_PRIORITY['IRON_CONDOR'],
+                        'condor_score': condor_result.score,
+                    })
         
         self.stdout.write(f"\nTotal trade signals: {len(trade_signals)}")
         
         for sig in trade_signals[-50:]:
-            if sig['type'] == 'OPTION_CALL':
-                dir_emoji = "📗"
-            elif sig['type'] == 'OPTION_PUT':
-                dir_emoji = "📕"
-            elif sig['state'] in ['strong_bullish', 'early_recovery', 'momentum', 'bull_probe']:
-                dir_emoji = "🟢"
-            else:
-                dir_emoji = "🔴"
-            type_label = f"[{sig['type']:12s}]" if sig['type'] != 'fusion' else " " * 14
-            self.stdout.write(f"  {sig['date']} {dir_emoji} {type_label} {sig['state']:20s} | {sig['confidence']:6s} | score: {sig['score']:+d}")
+            type_emoji = {
+                'CALL': '🟢',
+                'PUT': '🔴',
+                'TACTICAL_PUT': '🔻',
+                'OPTION_CALL': '📗',
+                'OPTION_PUT': '📕',
+                'IRON_CONDOR': '🦅',
+            }.get(sig['type'], '⚪')
+            type_label = f"[{sig['type']:12s}]"
+            extra = f" (cscore={sig['condor_score']:.0f})" if sig['type'] == 'IRON_CONDOR' else ""
+            self.stdout.write(f"  {sig['date']} {type_emoji} {type_label} {sig['state']:20s} | {sig['confidence']:6s} | score: {sig['score']:+d}{extra}")
         
         if len(trade_signals) > 50:
             self.stdout.write(f"  ... (showing last 50 of {len(trade_signals)})")
@@ -669,7 +767,11 @@ class Command(BaseCommand):
             )
 
     def _show_direction_setups(self, df, direction: str, n: int):
-        """Show last N setups filtered by direction after overlay filter."""
+        """Show last N setups filtered by direction after overlay filter.
+        
+        Uses consistent trade_decision naming from DECISION_PRIORITY:
+        CALL, PUT, TACTICAL_PUT, OPTION_CALL, OPTION_PUT, IRON_CONDOR
+        """
         from signals.overlays import apply_overlays
         
         long_states = {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE, MarketState.BEAR_EXHAUSTION_LONG, MarketState.BEAR_RALLY_LONG}
@@ -695,7 +797,8 @@ class Command(BaseCommand):
                         'score': result.score,
                         'confidence': result.confidence.value,
                         'overlay': overlay_status,
-                        'type': 'long',
+                        'type': 'CALL',
+                        'priority': DECISION_PRIORITY['CALL'],
                     })
                 
                 # Also check for tactical puts
@@ -707,7 +810,8 @@ class Command(BaseCommand):
                         'score': result.score,
                         'confidence': result.confidence.value,
                         'overlay': f"TACTICAL PUT: {tactical_result.reason[:30]}",
-                        'type': 'tactical_put',
+                        'type': 'TACTICAL_PUT',
+                        'priority': DECISION_PRIORITY['TACTICAL_PUT'],
                     })
                 
                 # Option call signals
@@ -719,10 +823,11 @@ class Command(BaseCommand):
                         'confidence': result.confidence.value,
                         'overlay': 'MVRV cheap + fear',
                         'type': 'OPTION_CALL',
+                        'priority': DECISION_PRIORITY['OPTION_CALL'],
                     })
             
             elif direction == "short" and result.state in short_states:
-                # PRIMARY_SHORT: Keep if not hard vetoed
+                # PUT: Keep if not hard vetoed
                 if not overlay.short_veto_active or 'SOFT' in overlay.reason:
                     overlay_status = "Clean"
                     if overlay.short_veto_active:
@@ -733,7 +838,8 @@ class Command(BaseCommand):
                         'score': result.score,
                         'confidence': result.confidence.value,
                         'overlay': overlay_status,
-                        'type': 'PRIMARY_SHORT',
+                        'type': 'PUT',
+                        'priority': DECISION_PRIORITY['PUT'],
                     })
             
             elif direction == "short" and result.state in long_states:
@@ -748,6 +854,7 @@ class Command(BaseCommand):
                         'confidence': result.confidence.value,
                         'overlay': f"{str_label}: {tactical_result.reason[tactical_result.reason.find('MVRV'):][:35]}",
                         'type': 'TACTICAL_PUT',
+                        'priority': DECISION_PRIORITY['TACTICAL_PUT'],
                     })
             
             if direction == "short":
@@ -760,6 +867,7 @@ class Command(BaseCommand):
                         'confidence': result.confidence.value,
                         'overlay': 'MVRV hot + greed',
                         'type': 'OPTION_PUT',
+                        'priority': DECISION_PRIORITY['OPTION_PUT'],
                     })
             
             elif direction == "all":
@@ -775,7 +883,8 @@ class Command(BaseCommand):
                         'score': result.score,
                         'confidence': result.confidence.value,
                         'overlay': overlay_status,
-                        'type': 'LONG',
+                        'type': 'CALL',
+                        'priority': DECISION_PRIORITY['CALL'],
                     })
                     
                     # Also check tactical puts
@@ -789,6 +898,7 @@ class Command(BaseCommand):
                             'confidence': result.confidence.value,
                             'overlay': f"{str_label}",
                             'type': 'TACTICAL_PUT',
+                            'priority': DECISION_PRIORITY['TACTICAL_PUT'],
                         })
                         
                 elif is_short and (not overlay.short_veto_active or 'SOFT' in overlay.reason):
@@ -799,8 +909,23 @@ class Command(BaseCommand):
                         'score': result.score,
                         'confidence': result.confidence.value,
                         'overlay': overlay_status,
-                        'type': 'PRIMARY_SHORT',
+                        'type': 'PUT',
+                        'priority': DECISION_PRIORITY['PUT'],
                     })
+                
+                # Iron condor (only on NO_TRADE/TRANSITION_CHOP)
+                if result.state in {MarketState.NO_TRADE, MarketState.TRANSITION_CHOP}:
+                    condor_result = evaluate_condor_gate(row, fusion_state=result.state.value)
+                    if condor_result.eligible:
+                        setups.append({
+                            'date': date_str,
+                            'state': result.state.value,
+                            'score': result.score,
+                            'confidence': result.confidence.value,
+                            'overlay': f"cscore={condor_result.score:.0f}",
+                            'type': 'IRON_CONDOR',
+                            'priority': DECISION_PRIORITY['IRON_CONDOR'],
+                        })
                 
                 # Option signals (tracked for all states)
                 if int(row.get('signal_option_call', 0)) == 1:
@@ -811,6 +936,7 @@ class Command(BaseCommand):
                         'confidence': result.confidence.value,
                         'overlay': 'MVRV cheap + fear',
                         'type': 'OPTION_CALL',
+                        'priority': DECISION_PRIORITY['OPTION_CALL'],
                     })
                 if int(row.get('signal_option_put', 0)) == 1:
                     setups.append({
@@ -820,14 +946,16 @@ class Command(BaseCommand):
                         'confidence': result.confidence.value,
                         'overlay': 'MVRV hot + greed',
                         'type': 'OPTION_PUT',
+                        'priority': DECISION_PRIORITY['OPTION_PUT'],
                     })
         
-        # Count by type
-        primary_short_count = sum(1 for s in setups if s['type'] == 'PRIMARY_SHORT')
+        # Count by type (using consistent DECISION_PRIORITY names)
+        call_count = sum(1 for s in setups if s['type'] == 'CALL')
+        put_count = sum(1 for s in setups if s['type'] == 'PUT')
         tactical_put_count = sum(1 for s in setups if s['type'] == 'TACTICAL_PUT')
-        long_count = sum(1 for s in setups if s['type'] in ('LONG', 'long'))
         option_call_count = sum(1 for s in setups if s['type'] == 'OPTION_CALL')
         option_put_count = sum(1 for s in setups if s['type'] == 'OPTION_PUT')
+        condor_count = sum(1 for s in setups if s['type'] == 'IRON_CONDOR')
         
         # Print results
         dir_emoji = "🟢" if direction == "long" else "🔴" if direction == "short" else "⚪"
@@ -835,26 +963,34 @@ class Command(BaseCommand):
         self.stdout.write("=" * 80)
         
         if direction == "short":
-            self.stdout.write(f"\nPRIMARY_SHORT (from short states): {primary_short_count}")
+            self.stdout.write(f"\nPUT (from short states):           {put_count}")
             self.stdout.write(f"TACTICAL_PUT (from bull states):   {tactical_put_count}")
             self.stdout.write(f"OPTION_PUT (rule-based):           {option_put_count}")
             self.stdout.write(f"TOTAL SHORT-RELATED ACTIONS:       {len(setups)}")
         elif direction == "long":
-            self.stdout.write(f"\nTotal long setups: {long_count}")
+            self.stdout.write(f"\nCALL (from long states): {call_count}")
             if tactical_put_count > 0:
                 self.stdout.write(f"(also {tactical_put_count} tactical puts shown)")
             if option_call_count > 0:
                 self.stdout.write(f"OPTION_CALL (rule-based): {option_call_count}")
         else:
             self.stdout.write(f"\nTotal setups: {len(setups)}")
-            self.stdout.write(f"  LONG: {long_count} | PRIMARY_SHORT: {primary_short_count} | TACTICAL_PUT: {tactical_put_count}")
-            self.stdout.write(f"  OPTION_CALL: {option_call_count} | OPTION_PUT: {option_put_count}")
+            self.stdout.write(f"  CALL: {call_count} | PUT: {put_count} | TACTICAL_PUT: {tactical_put_count}")
+            self.stdout.write(f"  OPTION_CALL: {option_call_count} | OPTION_PUT: {option_put_count} | IRON_CONDOR: {condor_count}")
         
         self.stdout.write("")
         
         for sig in setups[-n:]:
+            type_emoji = {
+                'CALL': '🟢',
+                'PUT': '🔴',
+                'TACTICAL_PUT': '🔻',
+                'OPTION_CALL': '📗',
+                'OPTION_PUT': '📕',
+                'IRON_CONDOR': '🦅',
+            }.get(sig['type'], '⚪')
             type_label = f"[{sig['type']:12s}]"
-            self.stdout.write(f"  {sig['date']} | {type_label} | {sig['state']:20s} | score: {sig['score']:+d} | {sig['confidence']:6s} | {sig['overlay']}")
+            self.stdout.write(f"  {sig['date']} {type_emoji} {type_label} | {sig['state']:20s} | score: {sig['score']:+d} | {sig['confidence']:6s} | {sig['overlay']}")
         
         self.stdout.write("\nDone.\n")
 
@@ -1206,5 +1342,167 @@ class Command(BaseCommand):
             if signal.whale_campaign:
                 self.stdout.write(f"  🐋 Whale Campaign Active!")
 
+        self.stdout.write("\nDone.\n")
+
+    def _show_multi_signal_analysis(self, df: pd.DataFrame, n: int):
+        """
+        Show multi-signal day analysis: all signals that would fire per date
+        with priority ranking, aligned with DailySignal.DECISION_PRIORITY.
+        """
+        from collections import defaultdict
+        
+        self.stdout.write("\n" + "=" * 70)
+        self.stdout.write("MULTI-SIGNAL DAY ANALYSIS")
+        self.stdout.write("=" * 70)
+        self.stdout.write("\nShows all signals that would fire per date with priority ranking.")
+        self.stdout.write("Priority: CALL(1) > PUT(2) > TACTICAL_PUT(3) > OPTION_CALL(4) > OPTION_PUT(5) > MVRV_SHORT(6) > IRON_CONDOR(7)\n")
+        
+        long_states = {MarketState.STRONG_BULLISH, MarketState.EARLY_RECOVERY, 
+                      MarketState.MOMENTUM_CONTINUATION, MarketState.BULL_PROBE, 
+                      MarketState.BEAR_EXHAUSTION_LONG, MarketState.BEAR_RALLY_LONG}
+        short_states = {MarketState.DISTRIBUTION_RISK, MarketState.BEAR_CONTINUATION, 
+                      MarketState.BEAR_PROBE, MarketState.BEAR_CONTINUATION_SHORT, 
+                      MarketState.LATE_DISTRIBUTION_SHORT}
+        
+        # Collect all signals per date
+        signals_by_date = defaultdict(list)
+        
+        for idx, row in df.iterrows():
+            result = fuse_signals(row)
+            overlay = apply_overlays(result, row)
+            date_str = str(idx)[:10] if hasattr(idx, 'strftime') else str(idx)
+            
+            # CALL (from long fusion states)
+            if result.state in long_states:
+                if not overlay.long_veto_active or overlay.long_veto_strength < 2:
+                    signals_by_date[date_str].append({
+                        'type': 'CALL',
+                        'priority': DECISION_PRIORITY['CALL'],
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                    })
+            
+            # PUT (from short fusion states)
+            if result.state in short_states:
+                if not overlay.short_veto_active or overlay.short_veto_strength < 2:
+                    signals_by_date[date_str].append({
+                        'type': 'PUT',
+                        'priority': DECISION_PRIORITY['PUT'],
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                    })
+            
+            # TACTICAL_PUT (in bull states with tactical put conditions)
+            if result.state in long_states:
+                tactical_result = tactical_put_inside_bull(result, row)
+                if tactical_result.active:
+                    signals_by_date[date_str].append({
+                        'type': 'TACTICAL_PUT',
+                        'priority': DECISION_PRIORITY['TACTICAL_PUT'],
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'strength': 'FULL' if tactical_result.strength == 2 else 'PARTIAL',
+                    })
+            
+            # OPTION_CALL (rule-based)
+            if int(row.get('signal_option_call', 0)) == 1:
+                signals_by_date[date_str].append({
+                    'type': 'OPTION_CALL',
+                    'priority': DECISION_PRIORITY['OPTION_CALL'],
+                    'state': result.state.value,
+                    'score': result.score,
+                    'confidence': result.confidence.value,
+                })
+            
+            # OPTION_PUT (rule-based)
+            if int(row.get('signal_option_put', 0)) == 1:
+                signals_by_date[date_str].append({
+                    'type': 'OPTION_PUT',
+                    'priority': DECISION_PRIORITY['OPTION_PUT'],
+                    'state': result.state.value,
+                    'score': result.score,
+                    'confidence': result.confidence.value,
+                })
+            
+            # IRON_CONDOR (only on NO_TRADE/TRANSITION_CHOP)
+            if result.state in {MarketState.NO_TRADE, MarketState.TRANSITION_CHOP}:
+                condor_result = evaluate_condor_gate(row, fusion_state=result.state.value)
+                if condor_result.eligible:
+                    signals_by_date[date_str].append({
+                        'type': 'IRON_CONDOR',
+                        'priority': DECISION_PRIORITY['IRON_CONDOR'],
+                        'state': result.state.value,
+                        'score': result.score,
+                        'confidence': result.confidence.value,
+                        'condor_score': condor_result.score,
+                    })
+        
+        # Filter to multi-signal days only
+        multi_signal_days = {d: sigs for d, sigs in signals_by_date.items() if len(sigs) > 1}
+        single_signal_days = {d: sigs for d, sigs in signals_by_date.items() if len(sigs) == 1}
+        no_signal_days = len(df) - len(signals_by_date)
+        
+        # Summary stats
+        self.stdout.write("=" * 70)
+        self.stdout.write("SUMMARY")
+        self.stdout.write("=" * 70)
+        self.stdout.write(f"Total days analyzed:     {len(df)}")
+        self.stdout.write(f"Days with NO signals:    {no_signal_days} ({no_signal_days/len(df)*100:.1f}%)")
+        self.stdout.write(f"Days with 1 signal:      {len(single_signal_days)} ({len(single_signal_days)/len(df)*100:.1f}%)")
+        self.stdout.write(f"Days with 2+ signals:    {len(multi_signal_days)} ({len(multi_signal_days)/len(df)*100:.1f}%)")
+        
+        # Count signal combinations
+        combo_counts = defaultdict(int)
+        for date, sigs in multi_signal_days.items():
+            types = tuple(sorted(s['type'] for s in sigs))
+            combo_counts[types] += 1
+        
+        if combo_counts:
+            self.stdout.write("\n" + "-" * 70)
+            self.stdout.write("MULTI-SIGNAL COMBINATIONS (frequency)")
+            self.stdout.write("-" * 70)
+            for combo, count in sorted(combo_counts.items(), key=lambda x: -x[1]):
+                combo_str = " + ".join(combo)
+                self.stdout.write(f"  {combo_str:40s} {count:4d} days")
+        
+        # Show last N multi-signal days with priority ranking
+        self.stdout.write("\n" + "-" * 70)
+        self.stdout.write(f"LAST {n} MULTI-SIGNAL DAYS (with priority ranking)")
+        self.stdout.write("-" * 70)
+        
+        sorted_dates = sorted(multi_signal_days.keys())[-n:]
+        
+        for date in sorted_dates:
+            sigs = multi_signal_days[date]
+            # Sort by priority (lower = higher priority)
+            sigs_sorted = sorted(sigs, key=lambda s: s['priority'])
+            
+            self.stdout.write(f"\n{date} ({len(sigs)} signals)")
+            for i, sig in enumerate(sigs_sorted):
+                winner = "★ WINNER" if i == 0 else ""
+                type_emoji = {
+                    'CALL': '🟢',
+                    'PUT': '🔴',
+                    'TACTICAL_PUT': '🔻',
+                    'OPTION_CALL': '📗',
+                    'OPTION_PUT': '📕',
+                    'IRON_CONDOR': '🦅',
+                }.get(sig['type'], '⚪')
+                extra = ""
+                if sig['type'] == 'TACTICAL_PUT':
+                    extra = f" [{sig.get('strength', '')}]"
+                elif sig['type'] == 'IRON_CONDOR':
+                    extra = f" [cscore={sig.get('condor_score', 0):.0f}]"
+                self.stdout.write(
+                    f"  {type_emoji} P{sig['priority']} {sig['type']:12s} | "
+                    f"{sig['state']:20s} | {sig['confidence']:6s} | score: {sig['score']:+d}{extra} {winner}"
+                )
+        
+        if not sorted_dates:
+            self.stdout.write("\n  (No multi-signal days found in dataset)")
+        
         self.stdout.write("\nDone.\n")
 
