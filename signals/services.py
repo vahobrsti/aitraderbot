@@ -776,21 +776,23 @@ class SignalService:
         Convenience method to generate and persist in one call.
 
         Uses the full multi-signal flow (generate_all_signals + persist_all_signals).
-        Returns the highest-priority signal, or None if only NO_TRADE.
+        Returns the highest-priority tradeable signal, or None if only NO_TRADE.
 
         Args:
             target_date: Specific date to score, or None for latest.
 
         Returns:
-            DailySignal model instance (highest priority), or None if no tradeable signals.
+            DailySignal model instance (highest priority tradeable), or None if no tradeable signals.
         """
         results = self.generate_all_signals(target_date)
         persisted = self.persist_all_signals(results)
         if not persisted:
             return None
-        # Return highest priority signal
-        signals = [s for s, _ in persisted]
-        return DailySignal.pick_highest_priority(signals) or signals[0]
+        # Filter to tradeable signals only, return highest priority
+        tradeable_signals = [s for s, _ in persisted if s.trade_decision != "NO_TRADE"]
+        if not tradeable_signals:
+            return None
+        return DailySignal.pick_highest_priority(tradeable_signals) or tradeable_signals[0]
 
     def generate_all_signals(self, target_date: Optional[date] = None) -> list[SignalResult]:
         """
