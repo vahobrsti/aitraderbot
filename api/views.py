@@ -31,8 +31,10 @@ class DailySignalLatestView(APIView):
     """
     GET /api/v1/signals/latest/
     
-    Get the most recent signal.
-    Returns full detail view. If latest date has a veto, returns 404.
+    Get the most recent signal for the latest date.
+    Returns the highest-priority tradeable signal if one exists.
+    If only NO_TRADE exists, returns the NO_TRADE signal (shows market state).
+    If latest date has an OVERLAY_VETO, returns 404.
     """
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
@@ -45,7 +47,7 @@ class DailySignalLatestView(APIView):
                 raise DailySignal.DoesNotExist
             latest_date = latest_active.date
             
-            # Check if latest date has a veto
+            # Check if latest date has an OVERLAY_VETO (hard block)
             veto_row = DailySignal.active().filter(
                 date=latest_date, trade_decision="NO_TRADE"
             ).first()
@@ -57,11 +59,16 @@ class DailySignalLatestView(APIView):
                         status=status.HTTP_404_NOT_FOUND
                     )
             
-            # Get tradeable signal for latest date
+            # Get tradeable signal for latest date (preferred)
             candidates = DailySignal.tradeable().filter(date=latest_date)
             signal = DailySignal.pick_highest_priority(candidates)
+            
+            # If no tradeable signal, return the NO_TRADE signal (shows market state)
             if signal is None:
-                raise DailySignal.DoesNotExist
+                signal = DailySignal.active().filter(date=latest_date).first()
+                if signal is None:
+                    raise DailySignal.DoesNotExist
+            
             serializer = DailySignalSerializer(signal)
             return Response(serializer.data)
         except DailySignal.DoesNotExist:
