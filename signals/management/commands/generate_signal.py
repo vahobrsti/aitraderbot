@@ -112,9 +112,9 @@ class Command(BaseCommand):
             persisted = service.persist_all_signals(results)
 
             if not persisted:
-                # All results were NO_TRADE (not persisted)
+                # No changes to persist (all signals unchanged or operator-deactivated)
                 self.stdout.write(
-                    f"OK: {results[0].date} | {results[0].fusion_state} | NO_TRADE (no signals qualify)"
+                    f"OK: {results[0].date} | {results[0].fusion_state} | {results[0].trade_decision} (unchanged)"
                 )
                 return
 

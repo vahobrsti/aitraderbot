@@ -776,21 +776,23 @@ class SignalService:
         Convenience method to generate and persist in one call.
 
         Uses the full multi-signal flow (generate_all_signals + persist_all_signals).
-        Returns the highest-priority signal, or None if only NO_TRADE.
+        Returns the highest-priority tradeable signal, or None if only NO_TRADE.
 
         Args:
             target_date: Specific date to score, or None for latest.
 
         Returns:
-            DailySignal model instance (highest priority), or None if no tradeable signals.
+            DailySignal model instance (highest priority tradeable), or None if no tradeable signals.
         """
         results = self.generate_all_signals(target_date)
         persisted = self.persist_all_signals(results)
         if not persisted:
             return None
-        # Return highest priority signal
-        signals = [s for s, _ in persisted]
-        return DailySignal.pick_highest_priority(signals) or signals[0]
+        # Filter to tradeable signals only, return highest priority
+        tradeable_signals = [s for s, _ in persisted if s.trade_decision != "NO_TRADE"]
+        if not tradeable_signals:
+            return None
+        return DailySignal.pick_highest_priority(tradeable_signals) or tradeable_signals[0]
 
     def generate_all_signals(self, target_date: Optional[date] = None) -> list[SignalResult]:
         """
@@ -1079,19 +1081,16 @@ class SignalService:
         Persist signals for the day. Returns list of (signal, is_new) tuples.
 
         Rules:
-            - If the date already has active tradeable signals, the day is done.
-              Only update those existing rows (keep fresh). No new signals created.
-            - If no tradeable signals exist for the date yet, persist all qualifying
-              results and notify (first fire of the day).
+            - All signals are persisted, including NO_TRADE (for visibility/audit)
+            - When a tradeable signal fires, any existing NO_TRADE for that date is deactivated
+            - Operator-deactivated signals (is_active=False) stay deactivated
 
         Wrapped in a transaction with row lock for race safety.
 
         Logic:
-            - For each tradeable signal: persist if new, skip if already exists
-            - NO_TRADE / TRANSITION_CHOP: ignore completely (don't persist, don't deactivate)
-            - New signal types can fire at any hour throughout the day
-            - Operator-deactivated signals (is_active=False) stay deactivated
-            - When tradeable signals are persisted, deactivate any stale NO_TRADE rows
+            - For each signal (including NO_TRADE): persist if new, update if changed
+            - When tradeable signals are persisted, deactivate stale NO_TRADE rows
+            - NO_TRADE signals don't trigger notifications (handled in command)
         """
         from django.db import transaction
 
@@ -1114,11 +1113,12 @@ class SignalService:
             }
 
             persisted = []
+            has_tradeable = False
 
             for result in results:
-                # Skip NO_TRADE entirely — don't persist, don't affect existing signals
-                if result.trade_decision == "NO_TRADE":
-                    continue
+                is_tradeable = result.trade_decision != "NO_TRADE"
+                if is_tradeable:
+                    has_tradeable = True
 
                 existing = existing_signals.get(result.trade_decision)
 
@@ -1139,8 +1139,8 @@ class SignalService:
                     persisted.append((signal, True))  # True = new signal, notify
 
             # If any tradeable signals were persisted, deactivate stale NO_TRADE rows
-            # (prevents old OVERLAY_VETO from blocking API/execution)
-            if persisted:
+            # (prevents old NO_TRADE from blocking API/execution)
+            if has_tradeable and persisted:
                 DailySignal.objects.filter(
                     date=signal_date, trade_decision="NO_TRADE", is_active=True
                 ).update(is_active=False)
