@@ -41,11 +41,26 @@ Rules:
 - Don't pad with obvious observations.
 - If there's nothing risky, say so in one line and move on.
 
+### What Blocks a Review
+
+A review should return **BLOCK** only for:
+
+1. **Logic errors** — Code that produces incorrect results, wrong calculations, flipped conditions, off-by-one errors, or any bug that will manifest during normal execution.
+2. **Downstream breakage** — Changes that break callers, consumers, or dependent modules. If something downstream will fail because of this change, it's a blocker.
+3. **Failing unit tests** — All existing tests must pass. If the change breaks a test, it's a blocker.
+
+### What Does NOT Block
+
+- **Unlikely edge cases** — e.g., "what if the DB insert fails here?" or "what if the network times out mid-write?" These should be noted in feedback with a clear statement: *"This is unlikely to occur in practice and is non-blocking."* Do not require try/catch or defensive handling for low-probability failure paths unless the failure would cause data corruption or security issues.
+- **Style preferences** — Naming, formatting, import order.
+- **Future-proofing** — Abstractions, extra validation, or defensive code for scenarios that don't exist yet.
+
 ### Review Response Rules
+
 When a review returns:
 - **APPROVE** — Done. No further action.
 - **APPROVE_WITH_SHOULD_FIX** — Done for this task. Log should-fix items for future work but do not act on them now.
-- **BLOCK** — Fix only the blocking issues. Do not fix should-fix or nice-to-have items in the same pass.
+- **BLOCK** — Fix only the blocking issues (logic errors, downstream breakage, failing tests). Do not fix should-fix or nice-to-have items in the same pass.
 
 **Critical: One review cycle per task.** After addressing BLOCK items once, the task is complete regardless of the next review result. Endless iteration is worse than shipping imperfect code.
 
