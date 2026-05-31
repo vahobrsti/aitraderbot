@@ -189,12 +189,12 @@ class Command(BaseCommand):
         """List all available signal types with descriptions."""
         policy = get_policy()
         
-        self.stdout.write("\n" + "="*100)
+        self.stdout.write("\n" + "="*60)
         self.stdout.write("AVAILABLE SIGNAL TYPES")
-        self.stdout.write("="*100)
+        self.stdout.write("="*60)
         
         self.stdout.write("\n📈 LONG SIGNALS:")
-        self.stdout.write("-"*80)
+        self.stdout.write("-"*60)
         for sig in ["CALL", "BULL_PROBE", "OPTION_CALL"]:
             exit_cfg = policy.get_exit_params(sig)
             spread_width = policy.get_spread_width(sig)
@@ -207,7 +207,7 @@ class Command(BaseCommand):
                 )
         
         self.stdout.write("\n📉 SHORT SIGNALS:")
-        self.stdout.write("-"*80)
+        self.stdout.write("-"*60)
         for sig in ["PUT", "BEAR_PROBE", "OPTION_PUT", "TACTICAL_PUT", "MVRV_SHORT"]:
             exit_cfg = policy.get_exit_params(sig)
             spread_width = policy.get_spread_width(sig)
@@ -220,7 +220,7 @@ class Command(BaseCommand):
                 )
         
         self.stdout.write("\n🟡 NEUTRAL SIGNALS:")
-        self.stdout.write("-"*80)
+        self.stdout.write("-"*60)
         for sig in ["IRON_CONDOR"]:
             exit_cfg = policy.get_exit_params(sig)
             spread_width = policy.get_spread_width(sig)
@@ -232,9 +232,9 @@ class Command(BaseCommand):
                     f"Stop: {exit_cfg.stop_loss_pct*100:.1f}% | R:R: 1:{rr:.2f}"
                 )
         
-        self.stdout.write("\n" + "="*100)
+        self.stdout.write("\n" + "="*60)
         self.stdout.write("Usage: python manage.py manual_setup --signal <SIGNAL_TYPE>")
-        self.stdout.write("="*100 + "\n")
+        self.stdout.write("="*60 + "\n")
 
     def _get_spot_price(self, target_date, override_spot):
         """Get spot price from DB or override."""
@@ -801,6 +801,7 @@ class Command(BaseCommand):
                 "ratio": real_rr,
                 "ratio_formatted": f"1:{real_rr:.2f}" if real_rr else "N/A",
                 "policy_ratio": policy_rr,
+                "policy_ratio_formatted": f"1:{policy_rr:.2f}" if policy_rr else "N/A",
                 "risk_pct": exit_cfg.stop_loss_pct if exit_cfg else None,
                 "risk_usd": snapshot_spot * exit_cfg.stop_loss_pct if exit_cfg else None,
             },
@@ -1055,9 +1056,9 @@ class Command(BaseCommand):
         direction = setup["direction"]
         emoji = "🟢" if direction == "LONG" else "🔴" if direction == "SHORT" else "🟡"
         
-        self.stdout.write("\n" + "="*100)
+        self.stdout.write("\n" + "="*60)
         self.stdout.write(f"{emoji} {setup['signal_type']} SETUP (REAL OPTION CHAIN)")
-        self.stdout.write("="*100)
+        self.stdout.write("="*60)
         
         self.stdout.write(f"\n📅 Signal Date: {setup['signal_date']}")
         self.stdout.write(f"🕐 Snapshot: {setup['snapshot_timestamp']}")
@@ -1078,7 +1079,7 @@ class Command(BaseCommand):
         # Option legs
         if setup.get("long_leg"):
             long = setup["long_leg"]
-            self.stdout.write(f"\n{'─'*100}")
+            self.stdout.write(f"\n{'─'*60}")
             self.stdout.write(self.style.SUCCESS(f"📗 LONG LEG (BUY)"))
             self.stdout.write(f"   Symbol:  {long['symbol']}")
             self.stdout.write(f"   Strike:  ${long['strike']:,.0f}")
@@ -1091,7 +1092,7 @@ class Command(BaseCommand):
         
         if setup.get("short_leg"):
             short = setup["short_leg"]
-            self.stdout.write(f"\n{'─'*100}")
+            self.stdout.write(f"\n{'─'*60}")
             self.stdout.write(self.style.ERROR(f"📕 SHORT LEG (SELL)"))
             self.stdout.write(f"   Symbol:  {short['symbol']}")
             self.stdout.write(f"   Strike:  ${short['strike']:,.0f}")
@@ -1104,7 +1105,7 @@ class Command(BaseCommand):
         
         # Iron condor legs
         if setup.get("short_call"):
-            self.stdout.write(f"\n{'─'*100}")
+            self.stdout.write(f"\n{'─'*60}")
             sc = setup["short_call"]
             self.stdout.write(self.style.ERROR(f"📕 SHORT CALL (SELL)"))
             self.stdout.write(f"   Symbol:  {sc['symbol']}")
@@ -1116,7 +1117,7 @@ class Command(BaseCommand):
         
         if setup.get("short_put"):
             sp = setup["short_put"]
-            self.stdout.write(f"\n{'─'*100}")
+            self.stdout.write(f"\n{'─'*60}")
             self.stdout.write(self.style.ERROR(f"📕 SHORT PUT (SELL)"))
             self.stdout.write(f"   Symbol:  {sp['symbol']}")
             self.stdout.write(f"   Strike:  ${sp['strike']:,.0f} (-{sp['distance_pct']:.1f}% from spot)")
@@ -1128,7 +1129,7 @@ class Command(BaseCommand):
         # Spread metrics
         if setup.get("spread"):
             spread = setup["spread"]
-            self.stdout.write(f"\n{'─'*100}")
+            self.stdout.write(f"\n{'─'*60}")
             self.stdout.write(f"📐 SPREAD METRICS")
             self.stdout.write(f"   Width:      ${spread['width_usd']:,.0f} ({spread['width_pct']*100:.1f}%)")
             self.stdout.write(f"   Net Debit:  ${spread['net_debit']:,.2f}")
@@ -1138,7 +1139,7 @@ class Command(BaseCommand):
         
         # R:R
         rr = setup["risk_reward"]
-        self.stdout.write(f"\n{'─'*100}")
+        self.stdout.write(f"\n{'─'*60}")
         self.stdout.write(f"⚖️  RISK:REWARD")
         self.stdout.write(f"   Actual R:R:  {rr['ratio_formatted']}")
         if rr.get('policy_ratio'):
@@ -1151,7 +1152,7 @@ class Command(BaseCommand):
         # Exit rules
         if setup.get("exit_rules"):
             exit_r = setup["exit_rules"]
-            self.stdout.write(f"\n{'─'*100}")
+            self.stdout.write(f"\n{'─'*60}")
             self.stdout.write(f"🚪 EXIT RULES")
             if exit_r.get('stop_loss_spot'):
                 self.stdout.write(f"   Stop Loss:    {exit_r['stop_loss_pct']*100:.1f}% → ${exit_r['stop_loss_spot']:,.0f}")
@@ -1172,7 +1173,7 @@ class Command(BaseCommand):
         # Position sizing
         if setup.get("position"):
             pos = setup["position"]
-            self.stdout.write(f"\n{'─'*100}")
+            self.stdout.write(f"\n{'─'*60}")
             self.stdout.write(f"💼 POSITION SIZING")
             self.stdout.write(f"   Risk Budget:     ${pos['risk_budget']:,.0f}")
             self.stdout.write(f"   Contracts:       {pos.get('contracts', 'N/A')}")
@@ -1184,7 +1185,7 @@ class Command(BaseCommand):
         # Path profile
         if setup.get("path_profile"):
             path = setup["path_profile"]
-            self.stdout.write(f"\n{'─'*100}")
+            self.stdout.write(f"\n{'─'*60}")
             self.stdout.write(f"📈 PATH PROFILE")
             self.stdout.write(f"   Shakeout:     {path['shakeout_pct']*100:.0f}%")
             self.stdout.write(f"   Invalidation: {path['invalidation_pct']*100:.0f}%")
@@ -1195,7 +1196,7 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.WARNING("   ⚠️  HIGH INVALIDATION: Use scaled entry"))
         
         # Expected edge
-        self.stdout.write(f"\n{'─'*100}")
+        self.stdout.write(f"\n{'─'*60}")
         self.stdout.write(f"📊 Expected Edge: {setup['expected_edge_pct']*100:.1f}%")
         
         # Rationale
@@ -1204,10 +1205,10 @@ class Command(BaseCommand):
         
         # Option chain (if requested)
         if show_chain and setup.get("option_chain"):
-            self.stdout.write(f"\n{'─'*100}")
+            self.stdout.write(f"\n{'─'*60}")
             self.stdout.write(f"📋 OPTION CHAIN CANDIDATES")
             self.stdout.write(f"{'Symbol':<30} | {'Strike':>10} | {'Delta':>8} | {'IV':>6} | {'Bid':>10} | {'Ask':>10} | {'OI':>8}")
-            self.stdout.write("-"*100)
+            self.stdout.write("-"*60)
             for opt in setup["option_chain"]:
                 delta_str = f"{opt['delta']:.4f}" if opt['delta'] else "N/A"
                 iv_str = f"{opt['iv']*100:.1f}%" if opt['iv'] else "N/A"
@@ -1217,16 +1218,16 @@ class Command(BaseCommand):
                     f"{opt['symbol']:<30} | ${opt['strike']:>9,.0f} | {delta_str:>8} | {iv_str:>6} | {bid_str:>10} | {ask_str:>10} | {opt['oi']:>8,}"
                 )
         
-        self.stdout.write("\n" + "="*100)
+        self.stdout.write("\n" + "="*60)
 
     def _print_theoretical_setup(self, setup: dict):
         """Print THEORETICAL setup in human-readable format."""
         direction = setup["direction"]
         emoji = "🟢" if direction == "LONG" else "🔴" if direction == "SHORT" else "🟡"
         
-        self.stdout.write("\n" + "="*100)
+        self.stdout.write("\n" + "="*60)
         self.stdout.write(f"{emoji} {setup['signal_type']} SETUP (THEORETICAL)")
-        self.stdout.write("="*100)
+        self.stdout.write("="*60)
         
         self.stdout.write(f"\n📅 Date: {setup['signal_date']}")
         self.stdout.write(f"💰 Spot: ${setup['spot_price']:,.0f}")
@@ -1297,4 +1298,4 @@ class Command(BaseCommand):
         if setup.get("rationale"):
             self.stdout.write(f"\n💡 Rationale: {setup['rationale'][:80]}...")
         
-        self.stdout.write("\n" + "="*100)
+        self.stdout.write("\n" + "="*60)
