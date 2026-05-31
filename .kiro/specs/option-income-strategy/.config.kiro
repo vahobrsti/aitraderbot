@@ -1,0 +1,7 @@
+{
+  "version": "1.0",
+  "name": "Option Income Strategy Module",
+  "description": "Income-generating BTC option strategies with strict safety constraints",
+  "created": "2026-05-25",
+  "status": "draft"
+}
