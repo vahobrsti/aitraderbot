@@ -1,7 +1,1 @@
-{
-  "version": "1.0",
-  "name": "Option Income Strategy Module",
-  "description": "Income-generating BTC option strategies with strict safety constraints",
-  "created": "2026-05-25",
-  "status": "draft"
-}
+{"specId": "e3e108d2-5f3c-43b7-98c7-389dca97aed9", "workflowType": "fast-task", "specType": "feature"}
