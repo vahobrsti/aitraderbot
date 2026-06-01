@@ -429,6 +429,52 @@ DECISION_STRATEGY_MAP["IRON_CONDOR"] = {
     "take_profit_pct": _IRON_CONDOR_SPREAD.take_profit_pct,
 }
 
+# Bull Put Spread: Income strategy in bullish regimes
+# Sell put spread below MVRV-60D cost basis floor
+_BULL_PUT_SPREAD = SpreadGuidance(
+    width_pct=0.05,        # 5% spread width target
+    take_profit_pct=0.50,  # Take profit at 50% of max credit
+    max_hold_days=18,
+    stop_loss_pct=0.02,    # Exit if spot moves 2% toward short strike
+    scale_down_day=12,     # Scale down on day 12
+)
+
+DECISION_STRATEGY_MAP["BULL_PUT_SPREAD"] = {
+    "primary_structures": "short_put_spread",
+    "strike_guidance": "Short put at 0.20 delta OTM, long put 3-8% below. Short strike at or below MVRV-60D cost basis.",
+    "dte_range": "9-21d (tactical) or 21-45d (income)",
+    "rationale": "Income: bullish regime + whale sponsorship + MDIA inflow. Sell premium below support.",
+    "stop_loss": format_stop_loss_string(_BULL_PUT_SPREAD),
+    "stop_loss_pct": _BULL_PUT_SPREAD.stop_loss_pct,
+    "scale_down_day": _BULL_PUT_SPREAD.scale_down_day,
+    "max_hold_days": _BULL_PUT_SPREAD.max_hold_days,
+    "spread_width_pct": _BULL_PUT_SPREAD.width_pct,
+    "take_profit_pct": _BULL_PUT_SPREAD.take_profit_pct,
+}
+
+# Bear Call Spread: Income strategy in bearish regimes
+# Sell call spread above MVRV Composite P90 ceiling
+_BEAR_CALL_SPREAD = SpreadGuidance(
+    width_pct=0.05,        # 5% spread width target
+    take_profit_pct=0.50,  # Take profit at 50% of max credit
+    max_hold_days=18,
+    stop_loss_pct=0.02,    # Exit if spot moves 2% toward short strike
+    scale_down_day=12,     # Scale down on day 12
+)
+
+DECISION_STRATEGY_MAP["BEAR_CALL_SPREAD"] = {
+    "primary_structures": "short_call_spread",
+    "strike_guidance": "Short call at 0.20 delta OTM, long call 3-8% above. Short strike at or above MVRV Composite P90 ceiling.",
+    "dte_range": "9-21d (tactical) or 21-45d (income)",
+    "rationale": "Income: bearish regime + whale distribution + no MDIA inflow. Sell premium above resistance.",
+    "stop_loss": format_stop_loss_string(_BEAR_CALL_SPREAD),
+    "stop_loss_pct": _BEAR_CALL_SPREAD.stop_loss_pct,
+    "scale_down_day": _BEAR_CALL_SPREAD.scale_down_day,
+    "max_hold_days": _BEAR_CALL_SPREAD.max_hold_days,
+    "spread_width_pct": _BEAR_CALL_SPREAD.width_pct,
+    "take_profit_pct": _BEAR_CALL_SPREAD.take_profit_pct,
+}
+
 # ============================================================
 # MVRV-BASED CONDOR STRIKE SELECTION
 # ============================================================
