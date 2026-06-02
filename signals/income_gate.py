@@ -589,20 +589,21 @@ def select_spread(
         short_dte = int(short_row["dte"])
         short_delta = float(short_row["delta"])
 
-        # Find long leg: same side, further OTM, within width range
+        # Find long leg: same side, same expiry, further OTM, within width range
+        same_expiry = side_chain[side_chain["dte"] == short_dte]
         if side == "put":
             # Long put is below short put
-            long_candidates = side_chain[
-                (side_chain["strike"] < short_strike)
-                & (side_chain["strike"] >= short_strike - max_width)
-                & (side_chain["strike"] <= short_strike - min_width)
+            long_candidates = same_expiry[
+                (same_expiry["strike"] < short_strike)
+                & (same_expiry["strike"] >= short_strike - max_width)
+                & (same_expiry["strike"] <= short_strike - min_width)
             ]
         else:
             # Long call is above short call
-            long_candidates = side_chain[
-                (side_chain["strike"] > short_strike)
-                & (side_chain["strike"] <= short_strike + max_width)
-                & (side_chain["strike"] >= short_strike + min_width)
+            long_candidates = same_expiry[
+                (same_expiry["strike"] > short_strike)
+                & (same_expiry["strike"] <= short_strike + max_width)
+                & (same_expiry["strike"] >= short_strike + min_width)
             ]
 
         if long_candidates.empty:
