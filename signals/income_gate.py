@@ -581,7 +581,10 @@ def select_spread(
     max_width = spot_price * config.max_spread_width_pct
 
     # Long leg candidates: same side, from full chain
-    side_chain = full_chain[full_chain["side"] == side]
+    side_chain = full_chain[full_chain["side"] == side].copy()
+    # Round DTE to integer for same-expiry matching (hourly snapshots
+    # produce fractional DTE like 14.37, 14.41 for the same expiry)
+    side_chain["dte_int"] = side_chain["dte"].astype(int)
 
     for _, short_row in filtered_chain.iterrows():
         short_strike = float(short_row["strike"])
@@ -590,7 +593,7 @@ def select_spread(
         short_delta = float(short_row["delta"])
 
         # Find long leg: same side, same expiry, further OTM, within width range
-        same_expiry = side_chain[side_chain["dte"] == short_dte]
+        same_expiry = side_chain[side_chain["dte_int"] == short_dte]
         if side == "put":
             # Long put is below short put
             long_candidates = same_expiry[
