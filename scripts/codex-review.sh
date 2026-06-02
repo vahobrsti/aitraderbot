@@ -286,7 +286,7 @@ $CONTEXT_CONTENT
 $DIFF_SECTION
 
 # Review Categories
-1. **Blocking** — ONLY for: security vulnerabilities, data loss bugs, production crashes
+1. **Blocking** — ONLY for: security vulnerabilities, data loss bugs, production crashes and if the logic implemented in the code doesn't match the intent. 
 2. **Should-fix** — Important issues that should be addressed in a follow-up
 3. **Nice-to-have** — Minor suggestions (include at most 1)
 
