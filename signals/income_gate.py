@@ -35,9 +35,15 @@ class IncomeGateConfig:
     min_delta: float = 0.15
     max_delta: float = 0.30
     max_bid_ask_spread_pct: float = 0.15
-    min_credit_pct: float = 0.25  # credit / spread_width minimum
+    min_credit_pct: float = 0.25  # credit / spread_width maximum (aggressive setups)
+    min_credit_pct_floor: float = 0.15  # absolute minimum credit (excellent setups)
     min_spread_width_pct: float = 0.03  # spread_width / spot minimum
     max_spread_width_pct: float = 0.08  # spread_width / spot maximum
+    min_otm_pct: float = 0.04  # short strike must be at least 4% OTM
+
+    # MVRV floor/ceiling validity
+    min_mvrv_for_bull_put: float = 1.0  # MVRV-60d must be >= this for bull puts
+    mvrv_strong_floor_threshold: float = 1.03  # MVRV above this = strong floor
 
     # DTE windows
     tactical_min_dte: int = 9
@@ -281,6 +287,24 @@ def check_bull_put_vetoes(
 
     vetoes = []
 
+    # MVRV floor invalid — no cost-basis support below spot
+    # Reject when MVRV-60d is missing, NaN, non-positive, or below threshold
+    mvrv_60d = row.get("mvrv_60d", row.get("mvrv_usd_60d"))
+    mvrv_60d_valid = False
+    if mvrv_60d is not None:
+        try:
+            mvrv_val = float(mvrv_60d)
+            if mvrv_val != mvrv_val:  # NaN check
+                mvrv_60d_valid = False
+            elif mvrv_val <= 0:
+                mvrv_60d_valid = False
+            elif mvrv_val >= config.min_mvrv_for_bull_put:
+                mvrv_60d_valid = True
+        except (ValueError, TypeError):
+            mvrv_60d_valid = False
+    if not mvrv_60d_valid:
+        vetoes.append("MVRV_FLOOR_INVALID")
+
     # Directional signal conflict
     if row.get("signal_option_put", 0) == 1:
         vetoes.append("OPTION_PUT_ACTIVE")
@@ -422,6 +446,42 @@ def check_bear_call_vetoes(
 
     vetoes = []
 
+    # MVRV ceiling invalid — no resistance anchor above spot
+    # Uses mvrv_composite_pct (current composite value) and mvrv_comp_max_180d
+    # (180-day max). If current composite is at or above the 180d max, there's
+    # no historical resistance overhead to anchor the short call against.
+    # Falls back to mvrv_composite / mvrv_composite_p90_180d if available.
+    mvrv_composite_pct = row.get("mvrv_composite_pct")
+    mvrv_comp_max_180d = row.get("mvrv_comp_max_180d")
+    mvrv_composite = row.get("mvrv_composite")
+    mvrv_composite_p90 = row.get("mvrv_composite_p90_180d")
+
+    ceiling_valid = True  # assume valid unless proven otherwise
+    if mvrv_composite is not None and mvrv_composite_p90 is not None:
+        # Primary path: raw composite values
+        try:
+            mvrv_c = float(mvrv_composite)
+            p90 = float(mvrv_composite_p90)
+            if mvrv_c == mvrv_c and p90 == p90 and mvrv_c > 0 and p90 > 0:
+                if p90 <= mvrv_c:
+                    ceiling_valid = False
+        except (ValueError, TypeError):
+            pass
+    elif mvrv_composite_pct is not None and mvrv_comp_max_180d is not None:
+        # Fallback: composite pct vs 180d max
+        # If composite_pct >= comp_max_180d, we're at or above the ceiling
+        try:
+            comp_pct = float(mvrv_composite_pct)
+            comp_max = float(mvrv_comp_max_180d)
+            if comp_pct == comp_pct and comp_max == comp_max:
+                if comp_pct >= comp_max:
+                    ceiling_valid = False
+        except (ValueError, TypeError):
+            pass
+
+    if not ceiling_valid:
+        vetoes.append("MVRV_CEILING_INVALID")
+
     # Directional signal conflict
     if row.get("signal_option_call", 0) == 1:
         vetoes.append("OPTION_CALL_ACTIVE")
@@ -516,6 +576,13 @@ def filter_option_chain(
     else:
         df = df[df["strike"] > spot_price]
 
+    # 2b. Minimum OTM distance — reject strikes too close to spot
+    min_otm_distance = spot_price * config.min_otm_pct
+    if side == "put":
+        df = df[df["strike"] <= spot_price - min_otm_distance]
+    else:
+        df = df[df["strike"] >= spot_price + min_otm_distance]
+
     # 3. MVRV boundary filter (soft — fall back if eliminates all)
     if strike_boundary is not None and not df.empty:
         if side == "put":
@@ -556,13 +623,21 @@ def select_spread(
     side: str,
     spot_price: float,
     config: IncomeGateConfig,
+    mvrv_60d: Optional[float] = None,
+    strike_boundary: Optional[float] = None,
 ) -> Optional[SpreadCandidate]:
     """
     Select the best spread from filtered chain candidates.
 
     Iterates short leg candidates from filtered_chain, finds a matching
     long leg from full_chain at the correct width, and validates
-    credit/spread_width ratio.
+    credit/spread_width ratio using adaptive thresholds.
+
+    The credit threshold flexes based on placement quality:
+    - Strong setup (MVRV constructive, strike below/above boundary, low delta):
+      min credit ~15-18%
+    - Normal setup: min credit ~20-22%
+    - Aggressive setup (high delta, close to spot): min credit 25%
 
     Args:
         filtered_chain: Pre-filtered chain for short leg candidates.
@@ -570,6 +645,8 @@ def select_spread(
         side: "put" or "call".
         spot_price: Current BTC spot price.
         config: Gate configuration.
+        mvrv_60d: MVRV-60d value (used for adaptive credit on puts).
+        strike_boundary: MVRV-derived floor/ceiling price.
 
     Returns:
         SpreadCandidate if a valid spread is found, None otherwise.
@@ -632,8 +709,19 @@ def select_spread(
         if spread_width <= 0:
             continue
 
+        # Adaptive credit threshold based on placement quality
+        required_credit_pct = _compute_required_credit_pct(
+            side=side,
+            short_strike=short_strike,
+            short_delta=short_delta,
+            spot_price=spot_price,
+            mvrv_60d=mvrv_60d,
+            strike_boundary=strike_boundary,
+            config=config,
+        )
+
         credit_ratio = credit / spread_width
-        if credit_ratio < config.min_credit_pct:
+        if credit_ratio < required_credit_pct:
             continue
 
         max_loss = spread_width - credit
@@ -649,6 +737,62 @@ def select_spread(
         )
 
     return None
+
+
+def _compute_required_credit_pct(
+    side: str,
+    short_strike: float,
+    short_delta: float,
+    spot_price: float,
+    mvrv_60d: Optional[float],
+    strike_boundary: Optional[float],
+    config: IncomeGateConfig,
+) -> float:
+    """
+    Compute the minimum required credit/width ratio based on placement quality.
+
+    Starts at config.min_credit_pct (25%) and reduces when conditions are safer:
+    - MVRV is constructive (>1.03 for puts): -5%
+    - Short strike is behind the MVRV boundary: -0% (already reflected by MVRV bonus)
+    - Delta is low (<0.22): -4%
+    - Strike is well OTM (>5%): -3%
+
+    Never goes below config.min_credit_pct_floor (15%).
+    """
+    required = config.min_credit_pct  # 0.25
+
+    # Compute OTM distance
+    if side == "put":
+        otm_pct = (spot_price - short_strike) / spot_price
+    else:
+        otm_pct = (short_strike - spot_price) / spot_price
+
+    # MVRV quality bonus
+    if side == "put" and mvrv_60d is not None:
+        if mvrv_60d >= config.mvrv_strong_floor_threshold:
+            # Strong floor: reduce threshold
+            required -= 0.05
+            # Additional: strike below MVRV floor = extra safe
+            if strike_boundary is not None and short_strike <= strike_boundary:
+                required -= 0.00  # already captured by MVRV bonus
+    elif side == "call":
+        # For bear calls: ceiling validity is handled by veto,
+        # but if ceiling is well above spot, that's constructive
+        if strike_boundary is not None and short_strike >= strike_boundary:
+            required -= 0.05
+
+    # Low delta bonus (more OTM = safer)
+    if short_delta < 0.22:
+        required -= 0.04
+
+    # Well OTM bonus
+    if otm_pct > 0.05:
+        required -= 0.03
+
+    # Floor: never below absolute minimum
+    required = max(config.min_credit_pct_floor, required)
+
+    return required
 
 
 # ============================================================
@@ -779,7 +923,11 @@ def evaluate_bull_put_gate(
         )
 
     # Select spread
-    candidate = select_spread(filtered, normalized, "put", spot_price, config)
+    candidate = select_spread(
+        filtered, normalized, "put", spot_price, config,
+        mvrv_60d=float(mvrv_60d) if mvrv_60d else None,
+        strike_boundary=floor_price,
+    )
 
     if candidate is None:
         return IncomeGateResult(
@@ -920,7 +1068,11 @@ def evaluate_bear_call_gate(
         )
 
     # Select spread
-    candidate = select_spread(filtered, normalized, "call", spot_price, config)
+    candidate = select_spread(
+        filtered, normalized, "call", spot_price, config,
+        mvrv_60d=None,  # not used for calls
+        strike_boundary=ceiling_price,
+    )
 
     if candidate is None:
         return IncomeGateResult(
