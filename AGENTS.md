@@ -80,6 +80,14 @@ Do not:
 - Expand scope to "fix it properly"
 - Add defensive code to satisfy a reviewer
 
+## Environment Setup
+
+- Before running any Python command (`python`, `pip`, `pytest`, `manage.py`, etc.), always activate the virtual environment first:
+  ```
+  source venv/bin/activate
+  ```
+- If the virtual environment doesn't exist, create it with `python3 -m venv venv` and install dependencies with `pip install -r requirements.txt` before proceeding.
+
 ## General Rules
 
 - Do not modify files outside the scope of the current task unless explicitly asked.
