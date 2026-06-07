@@ -18,6 +18,9 @@ from signals.fusion import fuse_signals, add_fusion_features, MarketState
 from signals.overlays import apply_overlays, get_size_multiplier, compute_efb_veto
 from signals.tactical_puts import tactical_put_inside_bull
 from signals.condor_gate import compute_range_score, check_hard_vetoes, DEFAULT_SCORE_THRESHOLD, CONDOR_COOLDOWN_DAYS, compute_vol_metrics
+from signals.income_gate import (
+    evaluate_bull_put_gate, evaluate_bear_call_gate, IncomeGateConfig,
+)
 
 
 class Command(BaseCommand):
@@ -168,6 +171,7 @@ class Command(BaseCommand):
         tactical_cooldown_days = TACTICAL_PUT_COOLDOWN_DAYS
         option_cooldown_days = OPTION_SIGNAL_COOLDOWN_DAYS
         mvrv_short_cooldown_days = MVRV_SHORT_COOLDOWN_DAYS
+        income_cooldown_days = IncomeGateConfig().cooldown_days  # default 5
 
         # Collect all trades with hit status
         all_trades = []
@@ -209,6 +213,8 @@ class Command(BaseCommand):
             last_option_put_date = None
             last_mvrv_short_date = None
             last_condor_date = None
+            last_bull_put_date = None
+            last_bear_call_date = None
 
             for date, row in df_year.iterrows():
                 result = fuse_signals(row)
@@ -432,6 +438,66 @@ class Command(BaseCommand):
                             })
                             last_condor_date = date
 
+                # === INCOME GATES: BULL PUT SPREAD / BEAR CALL SPREAD ===
+                # Only when fusion = chop, no other signal fired, and condor did NOT pass
+                condor_passed = has_condor_data and fusion_no_signal and 'last_condor_date' in dir() and last_condor_date == date
+                if fusion_no_signal and not option_call_fired and not option_put_fired and not condor_passed:
+                    # Determine higher priority active
+                    higher_priority = fusion_traded or option_call_fired or option_put_fired
+                    atr_r_income = float(atr_ratio_series.loc[date]) if has_condor_data and date in atr_ratio_series.index and pd.notna(atr_ratio_series.loc[date]) else None
+
+                    # Bull put spread (regime-only, no chain in backtest)
+                    bull_put_cooldown_ok = no_cooldown or last_bull_put_date is None or (date - last_bull_put_date).days > income_cooldown_days
+                    if bull_put_cooldown_ok:
+                        bull_result = evaluate_bull_put_gate(
+                            row, chain_df=None, spot_price=0,
+                            atr_ratio=atr_r_income,
+                            fusion_state=result.state.value,
+                            higher_priority_active=higher_priority,
+                            condor_eligible=condor_passed,
+                        )
+                        if bull_result.regime_eligible:
+                            hit = int(row.get("label_good_move_long", 0))
+                            all_trades.append({
+                                "date": date_str,
+                                "year": year,
+                                "type": "BULL_PUT_SPREAD",
+                                "direction": "LONG",
+                                "state": result.state.value,
+                                "score": int(bull_result.score),
+                                "source": "income_gate",
+                                "hit": hit,
+                                "p_long": row["p_long"],
+                                "p_short": row["p_short"],
+                            })
+                            last_bull_put_date = date
+
+                    # Bear call spread (regime-only, no chain in backtest)
+                    bear_call_cooldown_ok = no_cooldown or last_bear_call_date is None or (date - last_bear_call_date).days > income_cooldown_days
+                    if bear_call_cooldown_ok:
+                        bear_result = evaluate_bear_call_gate(
+                            row, chain_df=None, spot_price=0,
+                            atr_ratio=atr_r_income,
+                            fusion_state=result.state.value,
+                            higher_priority_active=higher_priority,
+                            condor_eligible=condor_passed,
+                        )
+                        if bear_result.regime_eligible:
+                            hit = int(row.get("label_good_move_short", 0))
+                            all_trades.append({
+                                "date": date_str,
+                                "year": year,
+                                "type": "BEAR_CALL_SPREAD",
+                                "direction": "SHORT",
+                                "state": result.state.value,
+                                "score": int(bear_result.score),
+                                "source": "income_gate",
+                                "hit": hit,
+                                "p_long": row["p_long"],
+                                "p_short": row["p_short"],
+                            })
+                            last_bear_call_date = date
+
         # === PRINT RESULTS ===
         if not all_trades:
             self.stdout.write("No trades found.")
@@ -481,7 +547,7 @@ class Command(BaseCommand):
         self.stdout.write("HIT RATE BY TRADE TYPE")
         self.stdout.write(f"{'=' * 100}")
 
-        for trade_type in ["LONG", "BULL_PROBE", "PRIMARY_SHORT", "BEAR_PROBE", "TACTICAL_PUT", "OPTION_CALL", "OPTION_PUT", "MVRV_SHORT", "IRON_CONDOR"]:
+        for trade_type in ["LONG", "BULL_PROBE", "PRIMARY_SHORT", "BEAR_PROBE", "TACTICAL_PUT", "OPTION_CALL", "OPTION_PUT", "MVRV_SHORT", "IRON_CONDOR", "BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"]:
             type_df = trades_df[trades_df["type"] == trade_type]
             if len(type_df) > 0:
                 t_total = len(type_df)

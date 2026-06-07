@@ -40,6 +40,8 @@ Think of it as: **MDIA = ignition, Whales = fuel, MVRV-LS = terrain**
 │  ├── overlays.py    → Edge/veto modifiers for execution         │
 │  ├── tactical_puts.py → Hedging logic inside bull regimes       │
 │  ├── options.py     → Option strategy, strikes, DTE & spreads   │
+│  ├── condor_gate.py → Iron condor range gate (chop monetization)│
+│  ├── income_gate.py → Bull put / bear call spread income gates  │
 │  ├── services.py    → SignalService for scoring + persistence   │
 │  └── models.py      → DailySignal model for DB storage          │
 └─────────────────────────────────────────────────────────────────┘
@@ -350,6 +352,8 @@ Hit rates from 5% target, 14-day horizon, 345 trades (with overlays and cooldown
 | LONG | 🟢 Long | 1.0x | 79 | **70.9%** |
 | MVRV_SHORT | 🔴 Short | 0.75x | 22 | **68.2%** |
 | IRON_CONDOR | 🟡 Neutral | 0.50x | 84 | **63.1%** |
+| BULL_PUT_SPREAD | 🟢 Long | 0.50x | — | *pending* |
+| BEAR_CALL_SPREAD | 🔴 Short | 0.50x | — | *pending* |
 | BEAR_PROBE | 🔴 Short | 0.35-0.60x | 15 | **53.3%** |
 | TACTICAL_PUT | 🔴 Put | 0.4-0.6x | 24 | **50.0%** |
 
@@ -686,6 +690,81 @@ short_put  = min(spot × 0.90, cost_basis × (mvrv - 1.5 × drift))
 
 ---
 
+## Income Spread Gates (Bull Put / Bear Call)
+
+Directional credit spreads that monetize regime conviction by selling premium on the side the market is unlikely to move toward. They sit below the iron condor in the signal hierarchy.
+
+**How it works:** Each gate scores on-chain conditions 0–100, applies hard vetoes, then filters the live option chain for tradable spreads. Two-layer evaluation: regime eligibility (on-chain) is independent of chain quality (market microstructure).
+
+**Key principle:** These are NOT directional bets. They're income strategies that profit when price does NOT move against you. Bull put = "price won't fall below X." Bear call = "price won't rally above Y."
+
+### Strike Boundaries (MVRV-Derived)
+
+| Strategy | MVRV Used | Boundary | Rationale |
+|----------|-----------|----------|-----------|
+| Bull Put Spread | MVRV-60D | `floor = spot / mvrv_60d` | Cost basis of recent buyers = sell exhaustion level |
+| Bear Call Spread | MVRV Composite | `ceiling = (spot / mvrv_composite) × P90_180d` | Broad profit-taking pressure caps upside |
+
+### Scoring Components
+
+**Bull Put Spread (sells puts below support in bullish regime):**
+
+| Component | Condition | Points |
+|-----------|-----------|--------|
+| MDIA inflow | Fresh capital entering | +25 |
+| Whale sponsored | Strategic accum (100-10K BTC) | +20 |
+| MVRV macro bullish | Call confirm / recovery / trend | +20 |
+| No option put signal | No conflicting bearish signal | +15 |
+| Sentiment safe | Not extreme greed | +10 |
+| Whale not distributing | No active selling | +10 |
+
+**Bear Call Spread (sells calls above resistance in bearish regime):**
+
+| Component | Condition | Points |
+|-----------|-----------|--------|
+| No MDIA inflow / aging | No fresh capital | +25 |
+| Whale distribution | Smart money selling | +20 |
+| MVRV macro bearish | Put confirm / bear continuation | +20 |
+| No option call signal | No conflicting bullish signal | +15 |
+| Sentiment greed/flat | Crowd complacent | +10 |
+| Whale not accumulating | No buying pressure | +10 |
+
+**Threshold:** 70/100 + no hard vetoes → regime eligible.
+
+### Option Chain Filters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Delta | 0.15–0.30 | Short leg probability range |
+| DTE | 9–21 (tactical) / 21–45 (income) | Time windows |
+| Bid/ask spread | ≤ 15% | Liquidity filter |
+| Credit/width | ≥ 15%* | Minimum premium collected |
+| Spread width | 3–8% of spot | Position sizing |
+
+*Default in code is 25%, but live BTC chains typically offer 14–18% at target deltas. Recommend 15% for production.
+
+### Priority & Conflicts
+
+```
+Directional (CALL/PUT/TACTICAL_PUT/MVRV_SHORT) > IRON_CONDOR > Income Spreads
+```
+
+Income gates only fire when fusion = NO_TRADE / TRANSITION_CHOP, no directional signals, and condor did NOT pass.
+
+### Usage
+
+```bash
+# Analyze hit rates for income strategies
+python manage.py analyze_hit_rate --type BULL_PUT_SPREAD
+python manage.py analyze_hit_rate --type BEAR_CALL_SPREAD
+
+# Path diagnostics
+python manage.py analyze_path_stats --type BULL_PUT_SPREAD
+python manage.py analyze_path_stats --type BEAR_CALL_SPREAD
+```
+
+---
+
 ## MVRV Short Signal
 
 A tactical short signal for bear market conditions (cycle days 540-900 post-halving). See [docs/mvrv_short_signal.md](docs/mvrv_short_signal.md) for full documentation.
@@ -715,6 +794,8 @@ python manage.py analyze_mvrv_short --today
 | OPTION_CALL / OPTION_PUT | 5 days |
 | MVRV_SHORT | 5 days |
 | IRON_CONDOR | 5 days |
+| BULL_PUT_SPREAD | 5 days |
+| BEAR_CALL_SPREAD | 5 days |
 
 ### Environment Variables
 
@@ -749,6 +830,7 @@ BYBIT_API_SECRET=your_api_secret
 | `signals/overlays.py` | Edge amplifiers and veto gates |
 | `signals/options.py` | Option strategy, strikes, DTE, spread guidance |
 | `signals/services.py` | SignalService for scoring + persistence |
+| `signals/income_gate.py` | **Bull put spread & bear call spread income gates** |
 | `signals/management/commands/manual_setup.py` | **Manual trade setup for any signal type** |
 | `execution/services/policy.py` | Data-driven policy engine |
 | `execution/services/trade_setup.py` | Automated trade construction |

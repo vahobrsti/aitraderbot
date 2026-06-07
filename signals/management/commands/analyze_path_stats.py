@@ -20,6 +20,9 @@ from signals.fusion import MarketState, add_fusion_features, fuse_signals
 from signals.overlays import apply_overlays, compute_efb_veto, get_size_multiplier
 from signals.tactical_puts import tactical_put_inside_bull
 from signals.condor_gate import compute_range_score, check_hard_vetoes, DEFAULT_SCORE_THRESHOLD, CONDOR_COOLDOWN_DAYS
+from signals.income_gate import (
+    evaluate_bull_put_gate, evaluate_bear_call_gate, IncomeGateConfig,
+)
 
 
 class Command(BaseCommand):
@@ -200,6 +203,8 @@ class Command(BaseCommand):
             last_option_put_date = None
             last_mvrv_short_date = None
             last_condor_date = None
+            last_bull_put_date = None
+            last_bear_call_date = None
 
             for date, row in year_df.iterrows():
                 result = fuse_signals(row)
@@ -370,6 +375,60 @@ class Command(BaseCommand):
                                 }
                             )
                             last_condor_date = date
+
+                # === INCOME GATES: BULL PUT SPREAD / BEAR CALL SPREAD ===
+                # Only when fusion = chop, no other signal fired, and condor did NOT pass
+                condor_passed = has_condor_data and fusion_no_signal and last_condor_date == date
+                income_cooldown_days = IncomeGateConfig().cooldown_days
+                if fusion_no_signal and not option_call_fired and not option_put_fired and not condor_passed:
+                    higher_priority = False  # No higher-priority signal fired at this point
+                    atr_r_income = float(atr_ratio_series.loc[date]) if has_condor_data and date in atr_ratio_series.index and pd.notna(atr_ratio_series.loc[date]) else None
+
+                    # Bull put spread (regime-only, no chain in backtest)
+                    bull_put_cooldown_ok = no_cooldown or last_bull_put_date is None or (date - last_bull_put_date).days > income_cooldown_days
+                    if bull_put_cooldown_ok:
+                        bull_result = evaluate_bull_put_gate(
+                            row, chain_df=None, spot_price=0,
+                            atr_ratio=atr_r_income,
+                            fusion_state=result.state.value,
+                            higher_priority_active=higher_priority,
+                            condor_eligible=condor_passed,
+                        )
+                        if bull_result.regime_eligible:
+                            all_trades.append(
+                                {
+                                    "date": pd.Timestamp(date).normalize(),
+                                    "year": year,
+                                    "type": "BULL_PUT_SPREAD",
+                                    "direction": "LONG",
+                                    "source": "income_gate",
+                                    "state": result.state.value,
+                                }
+                            )
+                            last_bull_put_date = date
+
+                    # Bear call spread (regime-only, no chain in backtest)
+                    bear_call_cooldown_ok = no_cooldown or last_bear_call_date is None or (date - last_bear_call_date).days > income_cooldown_days
+                    if bear_call_cooldown_ok:
+                        bear_result = evaluate_bear_call_gate(
+                            row, chain_df=None, spot_price=0,
+                            atr_ratio=atr_r_income,
+                            fusion_state=result.state.value,
+                            higher_priority_active=higher_priority,
+                            condor_eligible=condor_passed,
+                        )
+                        if bear_result.regime_eligible:
+                            all_trades.append(
+                                {
+                                    "date": pd.Timestamp(date).normalize(),
+                                    "year": year,
+                                    "type": "BEAR_CALL_SPREAD",
+                                    "direction": "SHORT",
+                                    "source": "income_gate",
+                                    "state": result.state.value,
+                                }
+                            )
+                            last_bear_call_date = date
 
         return pd.DataFrame(all_trades)
 
