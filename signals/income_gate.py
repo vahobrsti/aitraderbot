@@ -1042,12 +1042,33 @@ def evaluate_bear_call_gate(
         )
 
     # Compute MVRV ceiling
-    mvrv_composite = row.get("mvrv_composite")
+    # Primary: raw mvrv_composite + mvrv_composite_p90_180d
+    # Fallback: mvrv_composite_pct + mvrv_comp_max_180d (feature CSV naming)
+    # Formula: ceiling = (spot / mvrv_composite) * mvrv_composite_max_or_p90
+    mvrv_composite_raw = row.get("mvrv_composite")
     mvrv_composite_p90 = row.get("mvrv_composite_p90_180d")
+    mvrv_composite_pct = row.get("mvrv_composite_pct")
+    mvrv_comp_max_180d = row.get("mvrv_comp_max_180d")
+
     ceiling_price = None
-    if mvrv_composite and float(mvrv_composite) > 0 and mvrv_composite_p90:
-        cost_basis = spot_price / float(mvrv_composite)
+    if mvrv_composite_raw and float(mvrv_composite_raw) > 0 and mvrv_composite_p90:
+        # Primary path: raw values
+        cost_basis = spot_price / float(mvrv_composite_raw)
         ceiling_price = cost_basis * float(mvrv_composite_p90)
+    elif mvrv_composite_pct is not None and mvrv_comp_max_180d is not None:
+        # Fallback: convert from pct format
+        # mvrv_composite_pct = (raw - 1) * 100 → raw = 1 + pct/100
+        # mvrv_comp_max_180d is also in pct format → raw_max = 1 + max/100
+        try:
+            comp_pct = float(mvrv_composite_pct)
+            comp_max = float(mvrv_comp_max_180d)
+            raw_composite = 1.0 + comp_pct / 100.0
+            raw_max = 1.0 + comp_max / 100.0
+            if raw_composite > 0 and raw_max > 0:
+                cost_basis = spot_price / raw_composite
+                ceiling_price = cost_basis * raw_max
+        except (ValueError, TypeError):
+            pass
 
     # Filter chain
     filtered = filter_option_chain(
