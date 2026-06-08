@@ -48,6 +48,11 @@ class Command(BaseCommand):
             default=0.04,
             help="Invalidation threshold against signal (default 0.04)",
         )
+        parser.add_argument(
+            "--include-income",
+            action="store_true",
+            help="Include BULL_PUT_SPREAD/BEAR_CALL_SPREAD (disabled by default — hit label is incorrect for credit spreads)",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["csv"])
@@ -377,10 +382,11 @@ class Command(BaseCommand):
                             last_condor_date = date
 
                 # === INCOME GATES: BULL PUT SPREAD / BEAR CALL SPREAD ===
-                # Only when fusion = chop, no other signal fired, and condor did NOT pass
+                # Only included when --include-income flag is passed (hit label is incorrect for credit spreads)
+                include_income = options.get("include_income", False)
                 condor_passed = has_condor_data and fusion_no_signal and last_condor_date == date
                 income_cooldown_days = IncomeGateConfig().cooldown_days
-                if fusion_no_signal and not option_call_fired and not option_put_fired and not condor_passed:
+                if include_income and fusion_no_signal and not option_call_fired and not option_put_fired and not condor_passed:
                     higher_priority = False  # No higher-priority signal fired at this point
                     atr_r_income = float(atr_ratio_series.loc[date]) if has_condor_data and date in atr_ratio_series.index and pd.notna(atr_ratio_series.loc[date]) else None
 

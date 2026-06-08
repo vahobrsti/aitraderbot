@@ -39,6 +39,10 @@ from signals.options import (
     CONDOR_TRAILING_DAYS
 )
 from signals.fusion import MarketState
+from signals.income_gate import (
+    evaluate_bull_put_gate, evaluate_bear_call_gate, IncomeGateConfig,
+    compute_bull_put_score, compute_bear_call_score,
+)
 
 
 # All available signal types
@@ -54,6 +58,9 @@ SIGNAL_TYPES = [
     "TACTICAL_PUT",
     "MVRV_SHORT",
     "IRON_CONDOR",
+    # Income spread signals
+    "BULL_PUT_SPREAD",
+    "BEAR_CALL_SPREAD",
 ]
 
 # Signal to MarketState mapping (for fusion-based signals)
@@ -170,7 +177,7 @@ class Command(BaseCommand):
                 )
                 if setup:
                     results.append(setup)
-                    if not options["json"]:
+                    if not options["json"] and signal_type not in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"):
                         self._print_real_setup(setup, show_chain=options.get("show_chain", False))
                 else:
                     # Fall back to theoretical if no option data
@@ -231,6 +238,17 @@ class Command(BaseCommand):
                     f"  {sig:<15} | DTE: {dte_cfg.min_dte}-{dte_cfg.max_dte}d | "
                     f"Stop: {exit_cfg.stop_loss_pct*100:.1f}% | R:R: 1:{rr:.2f}"
                 )
+
+        self.stdout.write("\n💰 INCOME SPREADS:")
+        self.stdout.write("-"*60)
+        self.stdout.write(
+            f"  {'BULL_PUT_SPREAD':<15} | DTE: 9-21d (tactical) / 21-45d (income) | "
+            f"Credit spread below MVRV floor"
+        )
+        self.stdout.write(
+            f"  {'BEAR_CALL_SPREAD':<15} | DTE: 9-21d (tactical) / 21-45d (income) | "
+            f"Credit spread above MVRV ceiling"
+        )
         
         self.stdout.write("\n" + "="*60)
         self.stdout.write("Usage: python manage.py manual_setup --signal <SIGNAL_TYPE>")
@@ -277,6 +295,9 @@ class Command(BaseCommand):
         elif signal_type == "IRON_CONDOR":
             direction = "NEUTRAL"
             option_type = "condor"
+        elif signal_type in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"):
+            direction = "INCOME"
+            option_type = "income"
         else:
             direction = "SHORT"
             option_type = "put"
@@ -284,6 +305,10 @@ class Command(BaseCommand):
         # For iron condor, handle separately
         if option_type == "condor":
             return self._generate_condor_setup(signal_type, spot, signal_date, policy)
+
+        # For income spreads, handle separately
+        if signal_type in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"):
+            return self._generate_income_spread_setup(signal_type, spot, signal_date)
         
         # Find latest option snapshot timestamp for the date
         # Try signal_date first, then look for most recent
@@ -854,6 +879,153 @@ class Command(BaseCommand):
             
             "expected_edge_pct": expected_edge,
             "rationale": self._get_rationale(signal_type),
+        }
+
+    def _generate_income_spread_setup(self, signal_type: str, spot: float, signal_date) -> dict:
+        """
+        Generate setup for income spreads (BULL_PUT_SPREAD / BEAR_CALL_SPREAD).
+        Uses the income_gate module with real option chain data.
+        """
+        import pandas as pd
+        from signals.fusion import add_fusion_features, fuse_signals
+
+        # Load features for the date
+        csv_path = "features_14d_5pct.csv"
+        try:
+            df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+            df = add_fusion_features(df)
+            date_str = signal_date.strftime("%Y-%m-%d") if signal_date else df.index[-1].strftime("%Y-%m-%d")
+            if date_str in df.index.strftime("%Y-%m-%d"):
+                row = df.loc[date_str]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
+            else:
+                row = df.iloc[-1]
+                date_str = row.name.strftime("%Y-%m-%d")
+        except FileNotFoundError:
+            self.stderr.write(self.style.ERROR(f"Feature CSV not found: {csv_path}"))
+            return None
+
+        fusion_result = fuse_signals(row)
+
+        # Get option chain
+        from datetime import datetime as dt
+        target = signal_date or dt.now().date()
+        chain_qs = OptionSnapshot.objects.filter(
+            timestamp__date=target, underlying='BTC',
+        ).values('strike', 'option_type', 'delta', 'bid', 'ask', 'dte', 'spread_pct', 'spot_price')
+
+        chain_df = pd.DataFrame.from_records(chain_qs)
+        if len(chain_df) == 0:
+            self.stderr.write(self.style.WARNING(f"No option chain for {target}"))
+            return None
+
+        for col in ['strike', 'delta', 'bid', 'ask', 'dte', 'spread_pct', 'spot_price']:
+            chain_df[col] = chain_df[col].apply(lambda x: float(x) if x is not None else None)
+
+        chain_spot = chain_df['spot_price'].iloc[0]
+        use_spot = spot if spot else chain_spot
+
+        # Evaluate
+        config = IncomeGateConfig(min_credit_pct=0.15)
+        if signal_type == "BULL_PUT_SPREAD":
+            gate_result = evaluate_bull_put_gate(
+                row, chain_df=chain_df, spot_price=use_spot,
+                fusion_state=fusion_result.state.value, config=config,
+            )
+            score_fn = compute_bull_put_score
+            side_label = "BULL PUT SPREAD"
+            direction = "LONG"
+        else:
+            gate_result = evaluate_bear_call_gate(
+                row, chain_df=chain_df, spot_price=use_spot,
+                fusion_state=fusion_result.state.value, config=config,
+            )
+            score_fn = compute_bear_call_score
+            side_label = "BEAR CALL SPREAD"
+            direction = "SHORT"
+
+        # Build output
+        score, components = score_fn(row)
+        mvrv_60d = float(row.get('mvrv_60d', row.get('mvrv_usd_60d', 0)))
+        cost_basis = use_spot / mvrv_60d if mvrv_60d > 0 else 0
+
+        self.stdout.write("\n" + "=" * 70)
+        self.stdout.write(f"  💰 {side_label} — {date_str}")
+        self.stdout.write("=" * 70)
+        self.stdout.write(f"\n  BTC Spot: ${use_spot:,.0f}")
+        self.stdout.write(f"  Fusion:   {fusion_result.state.value}")
+        self.stdout.write(f"  Chain:    {len(chain_df)} contracts\n")
+
+        self.stdout.write("  --- REGIME GATE ---")
+        self.stdout.write(f"  Score: {score:.0f}/100 (threshold: 70)")
+        for k, v in components.items():
+            status = "✅" if v > 0 else "❌"
+            self.stdout.write(f"    {status} {k}: +{v:.0f}")
+        self.stdout.write(f"  Vetoes: {gate_result.veto_reasons if gate_result.veto_reasons else 'None'}")
+        self.stdout.write(f"  Regime Eligible: {gate_result.regime_eligible}\n")
+
+        self.stdout.write("  --- MVRV BOUNDARY ---")
+        self.stdout.write(f"  MVRV-60D: {mvrv_60d:.4f}")
+        self.stdout.write(f"  Cost basis: ${cost_basis:,.0f}")
+        p5 = row.get('mvrv_60d_p5_180d')
+        p95 = row.get('mvrv_60d_p95_180d')
+        if signal_type == "BULL_PUT_SPREAD":
+            if cost_basis <= use_spot:
+                self.stdout.write(f"  Floor: ${cost_basis:,.0f} (cost_basis, {((use_spot-cost_basis)/use_spot*100):.1f}% below)")
+            elif p5:
+                floor = cost_basis * float(p5)
+                self.stdout.write(f"  Floor: ${floor:,.0f} (cost_basis × P5={float(p5):.4f}, {((use_spot-floor)/use_spot*100):.1f}% below)")
+        else:
+            if p95:
+                ceiling = cost_basis * float(p95)
+                self.stdout.write(f"  Ceiling: ${ceiling:,.0f} (cost_basis × P95={float(p95):.4f}, {((ceiling-use_spot)/use_spot*100):.1f}% above)")
+
+        self.stdout.write("")
+
+        if gate_result.eligible:
+            w = abs(gate_result.short_strike - gate_result.long_strike)
+            self.stdout.write("  --- SELECTED SPREAD ---")
+            if signal_type == "BULL_PUT_SPREAD":
+                self.stdout.write(f"  Short Put:  ${gate_result.short_strike:,.0f} ({((use_spot-gate_result.short_strike)/use_spot*100):.1f}% below spot)")
+                self.stdout.write(f"  Long Put:   ${gate_result.long_strike:,.0f} ({((use_spot-gate_result.long_strike)/use_spot*100):.1f}% below spot)")
+            else:
+                self.stdout.write(f"  Short Call: ${gate_result.short_strike:,.0f} ({((gate_result.short_strike-use_spot)/use_spot*100):.1f}% above spot)")
+                self.stdout.write(f"  Long Call:  ${gate_result.long_strike:,.0f} ({((gate_result.long_strike-use_spot)/use_spot*100):.1f}% above spot)")
+            self.stdout.write(f"  Width:      ${w:,.0f}")
+            self.stdout.write(f"  Credit:     ${gate_result.credit:,.2f}")
+            self.stdout.write(f"  Credit/Width: {gate_result.credit/w*100:.1f}%")
+            self.stdout.write(f"  Max Loss:   ${gate_result.max_loss:,.2f}")
+            self.stdout.write(f"  DTE:        {gate_result.dte} days")
+            self.stdout.write(f"  R:R:        1:{gate_result.credit/gate_result.max_loss:.2f}\n")
+            self.stdout.write("  --- EXIT RULES ---")
+            self.stdout.write(f"  Take Profit: 50% of credit = ${gate_result.credit*0.50:,.2f}")
+            self.stdout.write(f"  Stop Loss:   Spot moves 2% toward short strike")
+            self.stdout.write(f"  Scale Down:  Day 12 → reduce to 25%")
+            self.stdout.write(f"  Max Hold:    18 days")
+        elif gate_result.regime_eligible:
+            self.stdout.write(f"  ⚠️  Regime passed but NO TRADABLE SPREAD")
+            self.stdout.write(f"  Chain rejection: {gate_result.chain_rejection_reason}")
+        else:
+            self.stdout.write(f"  ❌ REGIME NOT ELIGIBLE (score {score:.0f} < 70 or vetoed)")
+
+        self.stdout.write("\n" + "=" * 70 + "\n")
+
+        return {
+            "signal_type": signal_type,
+            "date": date_str,
+            "direction": direction,
+            "spot": use_spot,
+            "score": score,
+            "regime_eligible": gate_result.regime_eligible,
+            "eligible": gate_result.eligible,
+            "short_strike": gate_result.short_strike,
+            "long_strike": gate_result.long_strike,
+            "credit": gate_result.credit,
+            "max_loss": gate_result.max_loss,
+            "dte": gate_result.dte,
+            "chain_rejection": gate_result.chain_rejection_reason,
+            "vetoes": gate_result.veto_reasons,
         }
 
     def _get_rationale(self, signal_type: str) -> str:

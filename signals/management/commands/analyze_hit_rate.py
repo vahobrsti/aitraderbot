@@ -79,6 +79,11 @@ class Command(BaseCommand):
             default=None,
             help="Filter by direction: LONG, SHORT, PUT",
         )
+        parser.add_argument(
+            "--include-income",
+            action="store_true",
+            help="Include BULL_PUT_SPREAD/BEAR_CALL_SPREAD (disabled by default — hit label is incorrect for credit spreads)",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["csv"])
@@ -90,6 +95,7 @@ class Command(BaseCommand):
         type_filter = options.get("type")
         source_filter = options.get("source")
         direction_filter = options.get("direction")
+        include_income = options.get("include_income", False)
 
         if not csv_path.exists():
             self.stderr.write(f"CSV not found: {csv_path}")
@@ -439,9 +445,9 @@ class Command(BaseCommand):
                             last_condor_date = date
 
                 # === INCOME GATES: BULL PUT SPREAD / BEAR CALL SPREAD ===
-                # Only when fusion = chop, no other signal fired, and condor did NOT pass
-                condor_passed = has_condor_data and fusion_no_signal and 'last_condor_date' in dir() and last_condor_date == date
-                if fusion_no_signal and not option_call_fired and not option_put_fired and not condor_passed:
+                # Only included when --include-income flag is passed (hit label is incorrect for credit spreads)
+                condor_passed = has_condor_data and fusion_no_signal and last_condor_date == date
+                if include_income and fusion_no_signal and not option_call_fired and not option_put_fired and not condor_passed:
                     # Determine higher priority active
                     higher_priority = fusion_traded or option_call_fired or option_put_fired
                     atr_r_income = float(atr_ratio_series.loc[date]) if has_condor_data and date in atr_ratio_series.index and pd.notna(atr_ratio_series.loc[date]) else None
