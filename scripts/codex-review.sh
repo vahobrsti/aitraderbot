@@ -313,13 +313,13 @@ $DIFF_SECTION
 Default to APPROVE. Only BLOCK if you would mass-revert this commit in production."
 
 # --- Run review via Kiro CLI ---
-# Write prompt to a temp file (avoids shell escaping issues with large diffs)
+# Write prompt to a temp file and pipe via stdin (avoids arg length limits with large diffs)
 PROMPT_FILE=$(mktemp /tmp/kiro-review-prompt.XXXXXX)
 echo "$REVIEW_PROMPT" > "$PROMPT_FILE"
 
 echo "Opening review in Kiro chat..."
 echo ""
-kiro chat --mode ask --add-file "$CONTEXT_FILE" "$(cat "$PROMPT_FILE")"
+cat "$PROMPT_FILE" | kiro chat --mode ask --add-file "$CONTEXT_FILE" -
 
 rm -f "$PROMPT_FILE"
 
