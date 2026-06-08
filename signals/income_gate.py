@@ -42,7 +42,7 @@ class IncomeGateConfig:
     min_otm_pct: float = 0.04  # short strike must be at least 4% OTM
 
     # MVRV floor/ceiling validity
-    min_mvrv_for_bull_put: float = 1.0  # MVRV-60d must be >= this for bull puts
+    min_mvrv_for_bull_put: float = 0.0  # No minimum — P5 fallback handles underwater case
     mvrv_strong_floor_threshold: float = 1.03  # MVRV above this = strong floor
 
     # DTE windows
@@ -171,11 +171,19 @@ def normalize_chain_columns(chain_df: pd.DataFrame) -> Optional[pd.DataFrame]:
 def compute_strike_boundaries(
     spot_price: float,
     mvrv_60d: Optional[float],
-    mvrv_composite: Optional[float],
-    mvrv_composite_p90_180d: Optional[float],
+    mvrv_60d_p5_180d: Optional[float] = None,
+    mvrv_60d_p95_180d: Optional[float] = None,
 ) -> tuple[Optional[float], Optional[float]]:
     """
     Compute MVRV-derived price boundaries for strike selection.
+
+    Floor logic (bull put):
+    - cost_basis = spot / mvrv_60d
+    - If mvrv_60d >= 1 (buyers profitable): floor = cost_basis (below spot)
+    - If mvrv_60d < 1 (buyers underwater): floor = cost_basis × P5
+
+    Ceiling logic (bear call):
+    - ceiling = cost_basis × P95 (where price would be at 6-month MVRV high)
 
     Returns:
         (floor_price, ceiling_price)
@@ -187,11 +195,21 @@ def compute_strike_boundaries(
     ceiling_price = None
 
     if mvrv_60d and mvrv_60d > 0:
-        floor_price = spot_price / mvrv_60d
+        cost_basis = spot_price / mvrv_60d
 
-    if mvrv_composite and mvrv_composite > 0 and mvrv_composite_p90_180d:
-        cost_basis_composite = spot_price / mvrv_composite
-        ceiling_price = cost_basis_composite * mvrv_composite_p90_180d
+        # Floor
+        if cost_basis <= spot_price:
+            # Buyers profitable → cost basis is a natural support
+            floor_price = cost_basis
+        elif mvrv_60d_p5_180d and mvrv_60d_p5_180d > 0:
+            # Buyers underwater → use P5 as tighter anchor
+            floor_price = cost_basis * mvrv_60d_p5_180d
+        else:
+            floor_price = cost_basis
+
+        # Ceiling
+        if mvrv_60d_p95_180d and mvrv_60d_p95_180d > 0:
+            ceiling_price = cost_basis * mvrv_60d_p95_180d
 
     return floor_price, ceiling_price
 
@@ -898,11 +916,25 @@ def evaluate_bull_put_gate(
             chain_rejection_reason="MISSING_COLUMNS",
         )
 
-    # Compute MVRV floor
+    # Compute MVRV floor for bull put spread
+    # Primary: cost_basis = spot / mvrv_60d (where recent buyers break even)
+    # When mvrv_60d >= 1 (buyers profitable): cost_basis < spot → good floor
+    # When mvrv_60d < 1 (buyers underwater): cost_basis > spot → use P5 fallback
     mvrv_60d = row.get("mvrv_60d", row.get("mvrv_usd_60d"))
+    mvrv_60d_p5 = row.get("mvrv_60d_p5_180d")
     floor_price = None
     if mvrv_60d and float(mvrv_60d) > 0:
-        floor_price = spot_price / float(mvrv_60d)
+        cost_basis = spot_price / float(mvrv_60d)
+        if cost_basis <= spot_price:
+            # Normal case: buyers in profit, cost basis is below spot → use it
+            floor_price = cost_basis
+        else:
+            # Underwater case: cost basis above spot → use P5 as tighter anchor
+            if mvrv_60d_p5 and float(mvrv_60d_p5) > 0:
+                floor_price = cost_basis * float(mvrv_60d_p5)
+            else:
+                # No P5 available, use cost basis anyway (soft constraint will fallback)
+                floor_price = cost_basis
 
     # Filter chain
     filtered = filter_option_chain(
@@ -1041,34 +1073,33 @@ def evaluate_bear_call_gate(
             chain_rejection_reason="MISSING_COLUMNS",
         )
 
-    # Compute MVRV ceiling
-    # Primary: raw mvrv_composite + mvrv_composite_p90_180d
-    # Fallback: mvrv_composite_pct + mvrv_comp_max_180d (feature CSV naming)
-    # Formula: ceiling = (spot / mvrv_composite) * mvrv_composite_max_or_p90
-    mvrv_composite_raw = row.get("mvrv_composite")
-    mvrv_composite_p90 = row.get("mvrv_composite_p90_180d")
+    # Compute MVRV ceiling for bear call spread
+    # Primary: cost_basis × P95 = where MVRV-60D at its 95th percentile implies price
+    # When mvrv_60d < 1 (buyers underwater): cost_basis > spot → P95 gives meaningful ceiling above
+    # When mvrv_60d >= 1 (buyers profitable): cost_basis < spot → use cost_basis × p95 / mvrv_60d 
+    #   which simplifies to spot × (p95 / mvrv_60d) — how much more profit can build
+    mvrv_60d = row.get("mvrv_60d", row.get("mvrv_usd_60d"))
+    mvrv_60d_p95 = row.get("mvrv_60d_p95_180d")
     mvrv_composite_pct = row.get("mvrv_composite_pct")
     mvrv_comp_max_180d = row.get("mvrv_comp_max_180d")
 
     ceiling_price = None
-    if mvrv_composite_raw and float(mvrv_composite_raw) > 0 and mvrv_composite_p90:
-        # Primary path: raw values
-        cost_basis = spot_price / float(mvrv_composite_raw)
-        ceiling_price = cost_basis * float(mvrv_composite_p90)
-    elif mvrv_composite_pct is not None and mvrv_comp_max_180d is not None:
-        # Fallback: convert from pct format
-        # mvrv_composite_pct = (raw - 1) * 100 → raw = 1 + pct/100
-        # mvrv_comp_max_180d is also in pct format → raw_max = 1 + max/100
-        try:
-            comp_pct = float(mvrv_composite_pct)
-            comp_max = float(mvrv_comp_max_180d)
-            raw_composite = 1.0 + comp_pct / 100.0
-            raw_max = 1.0 + comp_max / 100.0
-            if raw_composite > 0 and raw_max > 0:
-                cost_basis = spot_price / raw_composite
-                ceiling_price = cost_basis * raw_max
-        except (ValueError, TypeError):
-            pass
+    if mvrv_60d and float(mvrv_60d) > 0:
+        cost_basis = spot_price / float(mvrv_60d)
+        if mvrv_60d_p95 and float(mvrv_60d_p95) > 0:
+            # P95: where price would be if MVRV-60D hits its 6-month high
+            ceiling_price = cost_basis * float(mvrv_60d_p95)
+        elif mvrv_composite_pct is not None and mvrv_comp_max_180d is not None:
+            # Fallback: composite max (pct format)
+            try:
+                comp_pct = float(mvrv_composite_pct)
+                comp_max = float(mvrv_comp_max_180d)
+                raw_composite = 1.0 + comp_pct / 100.0
+                raw_max = 1.0 + comp_max / 100.0
+                if raw_composite > 0 and raw_max > 0:
+                    ceiling_price = (spot_price / raw_composite) * raw_max
+            except (ValueError, TypeError):
+                pass
 
     # Filter chain
     filtered = filter_option_chain(
