@@ -8,7 +8,6 @@ ROUND_FILE=".ai-reviews/.review-round"
 TASK_ID_FILE=".ai-reviews/.task-id"
 MAX_ROUNDS=3  # Reduced from 5 — forces faster convergence
 STAMP=$(date +"%Y%m%d-%H%M%S")
-OUT=".ai-reviews/codex-review-$STAMP.md"
 
 # --- Parse flags ---
 FORCE_APPROVE=false
@@ -274,9 +273,8 @@ Be pragmatic. Ship working code, iterate later.
 "
 fi
 
-# --- Run review ---
-codex exec "
-You are a pragmatic code reviewer. Your job is to catch bugs that will break production, not to enforce style preferences.
+# --- Build review prompt ---
+REVIEW_PROMPT="You are a pragmatic code reviewer. Your job is to catch bugs that will break production, not to enforce style preferences.
 $ROUND_INSTRUCTIONS
 
 # Implementation Context
@@ -286,7 +284,7 @@ $CONTEXT_CONTENT
 $DIFF_SECTION
 
 # Review Categories
-1. **Blocking** — ONLY for: security vulnerabilities, data loss bugs, production crashes and if the logic implemented in the code doesn't match the intent. 
+1. **Blocking** — ONLY for: security vulnerabilities, data loss bugs, production crashes and if the logic implemented in the code doesn't match the intent.
 2. **Should-fix** — Important issues that should be addressed in a follow-up
 3. **Nice-to-have** — Minor suggestions (include at most 1)
 
@@ -312,12 +310,22 @@ $DIFF_SECTION
 - **APPROVE_WITH_SHOULD_FIX** — No blocking issues, but note should-fix items for later.
 - **BLOCK** — Critical issue that will cause harm in production. (Requires HIGH confidence blocking issue)
 
-Default to APPROVE. Only BLOCK if you would mass-revert this commit in production.
-" | tee "$OUT"
+Default to APPROVE. Only BLOCK if you would mass-revert this commit in production."
+
+# --- Run review via Kiro CLI ---
+# Write prompt to a temp file (avoids shell escaping issues with large diffs)
+PROMPT_FILE=$(mktemp /tmp/kiro-review-prompt.XXXXXX)
+echo "$REVIEW_PROMPT" > "$PROMPT_FILE"
+
+echo "Opening review in Kiro chat..."
+echo ""
+kiro chat --mode ask --add-file "$CONTEXT_FILE" "$(cat "$PROMPT_FILE")"
+
+rm -f "$PROMPT_FILE"
 
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Saved review to: $OUT"
+echo "Review opened in Kiro chat panel."
 echo "Review round: $CURRENT_ROUND of $MAX_ROUNDS"
 echo ""
 
@@ -328,7 +336,7 @@ if [ "$CURRENT_ROUND" -ge "$MAX_ROUNDS" ]; then
   echo "   To start a fresh cycle for a new task: bash scripts/codex-review.sh --reset"
   rm -f "$ROUND_FILE"  # Auto-reset after final round
 else
-  echo "Next steps based on verdict:"
+  echo "Next steps based on verdict (check Kiro chat for result):"
   echo "  APPROVE           → Done. Merge the code."
   echo "  APPROVE_WITH_FIX  → Done. Log should-fix items for later, merge now."
   echo "  BLOCK             → Fix ONLY the blocking issue, then re-run review."
