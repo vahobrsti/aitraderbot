@@ -312,21 +312,17 @@ $DIFF_SECTION
 
 Default to APPROVE. Only BLOCK if you would mass-revert this commit in production."
 
-# --- Run review via Kiro CLI ---
-# Write prompt to a temp file and pipe via stdin (avoids arg length limits with large diffs)
-PROMPT_FILE=$(mktemp /tmp/kiro-review-prompt.XXXXXX)
+# --- Write review prompt to file ---
+PROMPT_FILE=".ai-reviews/review-prompt.md"
 echo "$REVIEW_PROMPT" > "$PROMPT_FILE"
-
-echo "Opening review in Kiro chat..."
-echo ""
-cat "$PROMPT_FILE" | kiro chat --mode ask --add-file "$CONTEXT_FILE" -
-
-rm -f "$PROMPT_FILE"
 
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Review opened in Kiro chat panel."
+echo "Review prompt written to: $PROMPT_FILE"
 echo "Review round: $CURRENT_ROUND of $MAX_ROUNDS"
+echo ""
+echo "Next: Open Kiro chat and reference the file with #File → .ai-reviews/review-prompt.md"
+echo "      Or paste: \"Review this: #.ai-reviews/review-prompt.md\""
 echo ""
 
 if [ "$CURRENT_ROUND" -ge "$MAX_ROUNDS" ]; then
@@ -336,7 +332,7 @@ if [ "$CURRENT_ROUND" -ge "$MAX_ROUNDS" ]; then
   echo "   To start a fresh cycle for a new task: bash scripts/codex-review.sh --reset"
   rm -f "$ROUND_FILE"  # Auto-reset after final round
 else
-  echo "Next steps based on verdict (check Kiro chat for result):"
+  echo "Verdicts:"
   echo "  APPROVE           → Done. Merge the code."
   echo "  APPROVE_WITH_FIX  → Done. Log should-fix items for later, merge now."
   echo "  BLOCK             → Fix ONLY the blocking issue, then re-run review."
