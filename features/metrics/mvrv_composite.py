@@ -131,11 +131,13 @@ def calculate(df: pd.DataFrame) -> pd.DataFrame:
     flat_streak = is_flat_day.groupby((is_flat_day != is_flat_day.shift()).cumsum()).cumsum()
     feats["mvrv_60d_flat_streak_7d"] = (flat_streak >= 7).astype(int)
 
-    # (d.3) MVRV-60d P5/P95 over 180 days — for income gate strike boundaries
-    # P5 = floor anchor (worst-case MVRV-60D in 6 months)
-    # P95 = ceiling anchor (best-case MVRV-60D in 6 months)
+    # (d.3) MVRV-60d percentile bands over 180 days — for income gate strike boundaries
+    # P10/P90 = primary boundary anchors (90% of time MVRV-60D is within this band)
+    # P5/P95 = retained for backward compatibility
     feats["mvrv_60d_p5_180d"] = mvrv_60d.rolling(180, min_periods=60).quantile(0.05)
     feats["mvrv_60d_p95_180d"] = mvrv_60d.rolling(180, min_periods=60).quantile(0.95)
+    feats["mvrv_60d_p10_180d"] = mvrv_60d.rolling(180, min_periods=60).quantile(0.10)
+    feats["mvrv_60d_p90_180d"] = mvrv_60d.rolling(180, min_periods=60).quantile(0.90)
 
     # (e) Composite MVRV (Valuation Backbone) - Z-Score Buckets & Relaive Regimes
     z_long = feats["mvrv_comp_z_365d"]

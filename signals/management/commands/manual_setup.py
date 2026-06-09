@@ -968,18 +968,18 @@ class Command(BaseCommand):
         self.stdout.write("  --- MVRV BOUNDARY ---")
         self.stdout.write(f"  MVRV-60D: {mvrv_60d:.4f}")
         self.stdout.write(f"  Cost basis: ${cost_basis:,.0f}")
-        p5 = row.get('mvrv_60d_p5_180d')
-        p95 = row.get('mvrv_60d_p95_180d')
+        p10 = row.get('mvrv_60d_p10_180d')
+        p90 = row.get('mvrv_60d_p90_180d')
         if signal_type == "BULL_PUT_SPREAD":
             if cost_basis <= use_spot:
                 self.stdout.write(f"  Floor: ${cost_basis:,.0f} (cost_basis, {((use_spot-cost_basis)/use_spot*100):.1f}% below)")
-            elif p5:
-                floor = cost_basis * float(p5)
-                self.stdout.write(f"  Floor: ${floor:,.0f} (cost_basis × P5={float(p5):.4f}, {((use_spot-floor)/use_spot*100):.1f}% below)")
+            elif p10:
+                floor = cost_basis * float(p10)
+                self.stdout.write(f"  Floor: ${floor:,.0f} (cost_basis × P10={float(p10):.4f}, {((use_spot-floor)/use_spot*100):.1f}% below)")
         else:
-            if p95:
-                ceiling = cost_basis * float(p95)
-                self.stdout.write(f"  Ceiling: ${ceiling:,.0f} (cost_basis × P95={float(p95):.4f}, {((ceiling-use_spot)/use_spot*100):.1f}% above)")
+            if p90:
+                ceiling = cost_basis * float(p90)
+                self.stdout.write(f"  Ceiling: ${ceiling:,.0f} (cost_basis × P90={float(p90):.4f}, {((ceiling-use_spot)/use_spot*100):.1f}% above)")
 
         self.stdout.write("")
 

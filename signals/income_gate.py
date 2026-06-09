@@ -171,8 +171,8 @@ def normalize_chain_columns(chain_df: pd.DataFrame) -> Optional[pd.DataFrame]:
 def compute_strike_boundaries(
     spot_price: float,
     mvrv_60d: Optional[float],
-    mvrv_60d_p5_180d: Optional[float] = None,
-    mvrv_60d_p95_180d: Optional[float] = None,
+    mvrv_60d_p10_180d: Optional[float] = None,
+    mvrv_60d_p90_180d: Optional[float] = None,
 ) -> tuple[Optional[float], Optional[float]]:
     """
     Compute MVRV-derived price boundaries for strike selection.
@@ -180,10 +180,10 @@ def compute_strike_boundaries(
     Floor logic (bull put):
     - cost_basis = spot / mvrv_60d
     - If mvrv_60d >= 1 (buyers profitable): floor = cost_basis (below spot)
-    - If mvrv_60d < 1 (buyers underwater): floor = cost_basis × P5
+    - If mvrv_60d < 1 (buyers underwater): floor = cost_basis × P10
 
     Ceiling logic (bear call):
-    - ceiling = cost_basis × P95 (where price would be at 6-month MVRV high)
+    - ceiling = cost_basis × P90 (where price would be at 6-month MVRV P90)
 
     Returns:
         (floor_price, ceiling_price)
@@ -201,15 +201,15 @@ def compute_strike_boundaries(
         if cost_basis <= spot_price:
             # Buyers profitable → cost basis is a natural support
             floor_price = cost_basis
-        elif mvrv_60d_p5_180d and mvrv_60d_p5_180d > 0:
-            # Buyers underwater → use P5 as tighter anchor
-            floor_price = cost_basis * mvrv_60d_p5_180d
+        elif mvrv_60d_p10_180d and mvrv_60d_p10_180d > 0:
+            # Buyers underwater → use P10 as tighter anchor
+            floor_price = cost_basis * mvrv_60d_p10_180d
         else:
             floor_price = cost_basis
 
         # Ceiling
-        if mvrv_60d_p95_180d and mvrv_60d_p95_180d > 0:
-            ceiling_price = cost_basis * mvrv_60d_p95_180d
+        if mvrv_60d_p90_180d and mvrv_60d_p90_180d > 0:
+            ceiling_price = cost_basis * mvrv_60d_p90_180d
 
     return floor_price, ceiling_price
 
@@ -322,6 +322,18 @@ def check_bull_put_vetoes(
             mvrv_60d_valid = False
     if not mvrv_60d_valid:
         vetoes.append("MVRV_FLOOR_INVALID")
+
+    # MVRV below P10 band — current MVRV is in extreme low territory,
+    # no valid floor anchor exists within the 90% historical range
+    if mvrv_60d_valid:
+        mvrv_60d_p10 = row.get("mvrv_60d_p10_180d")
+        if mvrv_60d_p10 is not None:
+            try:
+                p10_val = float(mvrv_60d_p10)
+                if p10_val == p10_val and float(mvrv_60d) < p10_val:
+                    vetoes.append("MVRV_BELOW_P10_BAND")
+            except (ValueError, TypeError):
+                pass
 
     # Directional signal conflict
     if row.get("signal_option_put", 0) == 1:
@@ -500,6 +512,19 @@ def check_bear_call_vetoes(
     if not ceiling_valid:
         vetoes.append("MVRV_CEILING_INVALID")
 
+    # MVRV above P90 band — current MVRV is in extreme high territory,
+    # no valid ceiling anchor exists within the 90% historical range
+    mvrv_60d_raw = row.get("mvrv_60d", row.get("mvrv_usd_60d"))
+    mvrv_60d_p90 = row.get("mvrv_60d_p90_180d")
+    if mvrv_60d_raw is not None and mvrv_60d_p90 is not None:
+        try:
+            mvrv_val = float(mvrv_60d_raw)
+            p90_val = float(mvrv_60d_p90)
+            if mvrv_val == mvrv_val and p90_val == p90_val and mvrv_val > p90_val:
+                vetoes.append("MVRV_ABOVE_P90_BAND")
+        except (ValueError, TypeError):
+            pass
+
     # Directional signal conflict
     if row.get("signal_option_call", 0) == 1:
         vetoes.append("OPTION_CALL_ACTIVE")
@@ -601,15 +626,12 @@ def filter_option_chain(
     else:
         df = df[df["strike"] >= spot_price + min_otm_distance]
 
-    # 3. MVRV boundary filter (soft — fall back if eliminates all)
+    # 3. MVRV boundary filter (hard — no fallback, reject if no candidates pass)
     if strike_boundary is not None and not df.empty:
         if side == "put":
-            boundary_filtered = df[df["strike"] <= strike_boundary]
+            df = df[df["strike"] <= strike_boundary]
         else:
-            boundary_filtered = df[df["strike"] >= strike_boundary]
-        # Only apply if it doesn't eliminate everything
-        if not boundary_filtered.empty:
-            df = boundary_filtered
+            df = df[df["strike"] >= strike_boundary]
 
     # 4. Delta filter
     df = df[
@@ -919,9 +941,9 @@ def evaluate_bull_put_gate(
     # Compute MVRV floor for bull put spread
     # Primary: cost_basis = spot / mvrv_60d (where recent buyers break even)
     # When mvrv_60d >= 1 (buyers profitable): cost_basis < spot → good floor
-    # When mvrv_60d < 1 (buyers underwater): cost_basis > spot → use P5 fallback
+    # When mvrv_60d < 1 (buyers underwater): cost_basis > spot → use P10 fallback
     mvrv_60d = row.get("mvrv_60d", row.get("mvrv_usd_60d"))
-    mvrv_60d_p5 = row.get("mvrv_60d_p5_180d")
+    mvrv_60d_p10 = row.get("mvrv_60d_p10_180d")
     floor_price = None
     if mvrv_60d and float(mvrv_60d) > 0:
         cost_basis = spot_price / float(mvrv_60d)
@@ -929,11 +951,11 @@ def evaluate_bull_put_gate(
             # Normal case: buyers in profit, cost basis is below spot → use it
             floor_price = cost_basis
         else:
-            # Underwater case: cost basis above spot → use P5 as tighter anchor
-            if mvrv_60d_p5 and float(mvrv_60d_p5) > 0:
-                floor_price = cost_basis * float(mvrv_60d_p5)
+            # Underwater case: cost basis above spot → use P10 as tighter anchor
+            if mvrv_60d_p10 and float(mvrv_60d_p10) > 0:
+                floor_price = cost_basis * float(mvrv_60d_p10)
             else:
-                # No P5 available, use cost basis anyway (soft constraint will fallback)
+                # No P10 available, use cost basis anyway (hard boundary will reject if no strikes)
                 floor_price = cost_basis
 
     # Filter chain
@@ -1074,21 +1096,21 @@ def evaluate_bear_call_gate(
         )
 
     # Compute MVRV ceiling for bear call spread
-    # Primary: cost_basis × P95 = where MVRV-60D at its 95th percentile implies price
-    # When mvrv_60d < 1 (buyers underwater): cost_basis > spot → P95 gives meaningful ceiling above
-    # When mvrv_60d >= 1 (buyers profitable): cost_basis < spot → use cost_basis × p95 / mvrv_60d 
-    #   which simplifies to spot × (p95 / mvrv_60d) — how much more profit can build
+    # Primary: cost_basis × P90 = where MVRV-60D at its 90th percentile implies price
+    # When mvrv_60d < 1 (buyers underwater): cost_basis > spot → P90 gives meaningful ceiling above
+    # When mvrv_60d >= 1 (buyers profitable): cost_basis < spot → use cost_basis × p90 / mvrv_60d 
+    #   which simplifies to spot × (p90 / mvrv_60d) — how much more profit can build
     mvrv_60d = row.get("mvrv_60d", row.get("mvrv_usd_60d"))
-    mvrv_60d_p95 = row.get("mvrv_60d_p95_180d")
+    mvrv_60d_p90 = row.get("mvrv_60d_p90_180d")
     mvrv_composite_pct = row.get("mvrv_composite_pct")
     mvrv_comp_max_180d = row.get("mvrv_comp_max_180d")
 
     ceiling_price = None
     if mvrv_60d and float(mvrv_60d) > 0:
         cost_basis = spot_price / float(mvrv_60d)
-        if mvrv_60d_p95 and float(mvrv_60d_p95) > 0:
-            # P95: where price would be if MVRV-60D hits its 6-month high
-            ceiling_price = cost_basis * float(mvrv_60d_p95)
+        if mvrv_60d_p90 and float(mvrv_60d_p90) > 0:
+            # P90: where price would be if MVRV-60D hits its 6-month 90th percentile
+            ceiling_price = cost_basis * float(mvrv_60d_p90)
         elif mvrv_composite_pct is not None and mvrv_comp_max_180d is not None:
             # Fallback: composite max (pct format)
             try:
