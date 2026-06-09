@@ -21,6 +21,7 @@ from signals.condor_gate import compute_range_score, check_hard_vetoes, DEFAULT_
 from signals.income_gate import (
     evaluate_bull_put_gate, evaluate_bear_call_gate, IncomeGateConfig,
 )
+from features.metrics.credit_spread_label import calculate as calc_credit_spread_labels
 
 
 class Command(BaseCommand):
@@ -79,6 +80,11 @@ class Command(BaseCommand):
             default=None,
             help="Filter by direction: LONG, SHORT, PUT",
         )
+        parser.add_argument(
+            "--include-income",
+            action="store_true",
+            help="Include BULL_PUT_SPREAD/BEAR_CALL_SPREAD (uses MVRV-derived strike boundary labels)",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["csv"])
@@ -90,6 +96,7 @@ class Command(BaseCommand):
         type_filter = options.get("type")
         source_filter = options.get("source")
         direction_filter = options.get("direction")
+        include_income = options.get("include_income", False)
 
         if not csv_path.exists():
             self.stderr.write(f"CSV not found: {csv_path}")
@@ -140,6 +147,28 @@ class Command(BaseCommand):
             has_condor_data = True
         else:
             has_condor_data = False
+
+        # Pre-compute credit spread labels (MVRV-derived, 14d horizon)
+        # Uses the features CSV which already has mvrv_60d, P5, P95 columns
+        # plus btc_open/high/low/close for forward price path
+        if include_income:
+            if all(c in df.columns for c in ("btc_open", "btc_high", "btc_low", "btc_close")):
+                credit_spread_labels = calc_credit_spread_labels(df)
+                has_credit_labels = True
+            elif has_condor_data and len(raw_ohlc) > 0:
+                # Merge OHLC from DB into df for label computation
+                ohlc_aligned = raw_ohlc.copy()
+                ohlc_aligned.index = pd.to_datetime(ohlc_aligned.index)
+                for col in ("btc_open", "btc_high", "btc_low", "btc_close"):
+                    if col not in df.columns:
+                        df[col] = ohlc_aligned[col].reindex(df.index)
+                credit_spread_labels = calc_credit_spread_labels(df)
+                has_credit_labels = True
+            else:
+                has_credit_labels = False
+                self.stderr.write("WARNING: Cannot compute credit spread labels — missing OHLC data")
+        else:
+            has_credit_labels = False
 
         # Define state categories
         long_states = {
@@ -439,9 +468,9 @@ class Command(BaseCommand):
                             last_condor_date = date
 
                 # === INCOME GATES: BULL PUT SPREAD / BEAR CALL SPREAD ===
-                # Only when fusion = chop, no other signal fired, and condor did NOT pass
-                condor_passed = has_condor_data and fusion_no_signal and 'last_condor_date' in dir() and last_condor_date == date
-                if fusion_no_signal and not option_call_fired and not option_put_fired and not condor_passed:
+                # Only included when --include-income flag is passed (hit label is incorrect for credit spreads)
+                condor_passed = has_condor_data and fusion_no_signal and last_condor_date == date
+                if include_income and fusion_no_signal and not option_call_fired and not option_put_fired and not condor_passed:
                     # Determine higher priority active
                     higher_priority = fusion_traded or option_call_fired or option_put_fired
                     atr_r_income = float(atr_ratio_series.loc[date]) if has_condor_data and date in atr_ratio_series.index and pd.notna(atr_ratio_series.loc[date]) else None
@@ -457,7 +486,12 @@ class Command(BaseCommand):
                             condor_eligible=condor_passed,
                         )
                         if bull_result.regime_eligible:
-                            hit = int(row.get("label_good_move_long", 0))
+                            # Use MVRV-derived credit spread label (price never breached floor)
+                            if has_credit_labels and date in credit_spread_labels.index:
+                                lbl = credit_spread_labels.loc[date, "label_bull_put_safe_14d"]
+                                hit = int(lbl) if pd.notna(lbl) else 0
+                            else:
+                                hit = 0  # No outcome data = conservative miss
                             all_trades.append({
                                 "date": date_str,
                                 "year": year,
@@ -483,7 +517,12 @@ class Command(BaseCommand):
                             condor_eligible=condor_passed,
                         )
                         if bear_result.regime_eligible:
-                            hit = int(row.get("label_good_move_short", 0))
+                            # Use MVRV-derived credit spread label (price never breached ceiling)
+                            if has_credit_labels and date in credit_spread_labels.index:
+                                lbl = credit_spread_labels.loc[date, "label_bear_call_safe_14d"]
+                                hit = int(lbl) if pd.notna(lbl) else 0
+                            else:
+                                hit = 0  # No outcome data = conservative miss
                             all_trades.append({
                                 "date": date_str,
                                 "year": year,

@@ -8,7 +8,7 @@ ROUND_FILE=".ai-reviews/.review-round"
 TASK_ID_FILE=".ai-reviews/.task-id"
 MAX_ROUNDS=3  # Reduced from 5 — forces faster convergence
 STAMP=$(date +"%Y%m%d-%H%M%S")
-OUT=".ai-reviews/codex-review-$STAMP.md"
+OUT=".ai-reviews/ai-review-$STAMP.md"
 
 # --- Parse flags ---
 FORCE_APPROVE=false
@@ -274,9 +274,8 @@ Be pragmatic. Ship working code, iterate later.
 "
 fi
 
-# --- Run review ---
-codex exec "
-You are a pragmatic code reviewer. Your job is to catch bugs that will break production, not to enforce style preferences.
+# --- Build review prompt ---
+REVIEW_PROMPT="You are a pragmatic code reviewer. Your job is to catch bugs that will break production, not to enforce style preferences.
 $ROUND_INSTRUCTIONS
 
 # Implementation Context
@@ -286,7 +285,7 @@ $CONTEXT_CONTENT
 $DIFF_SECTION
 
 # Review Categories
-1. **Blocking** — ONLY for: security vulnerabilities, data loss bugs, production crashes and if the logic implemented in the code doesn't match the intent. 
+1. **Blocking** — ONLY for: security vulnerabilities, data loss bugs, production crashes and if the logic implemented in the code doesn't match the intent.
 2. **Should-fix** — Important issues that should be addressed in a follow-up
 3. **Nice-to-have** — Minor suggestions (include at most 1)
 
@@ -312,8 +311,15 @@ $DIFF_SECTION
 - **APPROVE_WITH_SHOULD_FIX** — No blocking issues, but note should-fix items for later.
 - **BLOCK** — Critical issue that will cause harm in production. (Requires HIGH confidence blocking issue)
 
-Default to APPROVE. Only BLOCK if you would mass-revert this commit in production.
-" | tee "$OUT"
+Default to APPROVE. Only BLOCK if you would mass-revert this commit in production."
+
+# --- Run review via kiro-cli ---
+# Write prompt to file for reference
+echo "$REVIEW_PROMPT" > ".ai-reviews/review-prompt.md"
+
+echo "Running review via kiro-cli..."
+echo ""
+kiro-cli chat --no-interactive --model claude-sonnet-4 --trust-all-tools "$REVIEW_PROMPT" | tee "$OUT"
 
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -325,7 +331,7 @@ if [ "$CURRENT_ROUND" -ge "$MAX_ROUNDS" ]; then
   echo "✅ Maximum review rounds reached. This review cycle is COMPLETE."
   echo "   The code should be merged unless there's a critical security/data issue."
   echo ""
-  echo "   To start a fresh cycle for a new task: bash scripts/codex-review.sh --reset"
+  echo "   To start a fresh cycle for a new task: bash scripts/ai-code-review.sh --reset"
   rm -f "$ROUND_FILE"  # Auto-reset after final round
 else
   echo "Next steps based on verdict:"
@@ -333,6 +339,6 @@ else
   echo "  APPROVE_WITH_FIX  → Done. Log should-fix items for later, merge now."
   echo "  BLOCK             → Fix ONLY the blocking issue, then re-run review."
   echo ""
-  echo "To skip remaining rounds: bash scripts/codex-review.sh --force-approve"
+  echo "To skip remaining rounds: bash scripts/ai-code-review.sh --force-approve"
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

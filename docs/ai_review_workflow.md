@@ -1,6 +1,6 @@
 # AI Review Workflow
 
-Two-agent feedback loop: implementation agent (Claude/Kiro) builds, review agent (Codex) critiques.
+Two-agent feedback loop: implementation agent (Claude/Kiro) builds, review agent (Kiro CLI) critiques.
 
 ## Files
 
@@ -8,24 +8,24 @@ Two-agent feedback loop: implementation agent (Claude/Kiro) builds, review agent
 |------|---------|
 | `AGENTS.md` | Repo-level rules — tells agents to auto-generate context after tasks |
 | `.ai-reviews/implementation-context.md` | Structured handoff: what changed, why, what's risky, and the base commit |
-| `scripts/codex-review.sh` | Computes scoped diff, embeds it + context into prompt, runs Codex review |
+| `scripts/ai-code-review.sh` | Computes scoped diff, embeds it + context into prompt, runs review via kiro-cli |
 
 ## Prerequisites
 
-- [Codex CLI](https://github.com/openai/codex) installed and authenticated
+- [Kiro CLI](https://kiro.dev) installed (`kiro-cli` in PATH)
 - Git repo with changes (staged, unstaged, or committed)
 
 ## Usage
 
 ```bash
-./scripts/codex-review.sh
+./scripts/ai-code-review.sh
 ```
 
 Optionally pass a base ref to override automatic detection:
 
 ```bash
-./scripts/codex-review.sh HEAD~3
-./scripts/codex-review.sh origin/main
+./scripts/ai-code-review.sh HEAD~3
+./scripts/ai-code-review.sh origin/main
 ```
 
 One pass is enough. Only re-run if the review returns **BLOCK**.
@@ -36,7 +36,7 @@ One pass is enough. Only re-run if the review returns **BLOCK**.
 1. Note current HEAD before starting: git rev-parse HEAD
 2. Give task to Claude/Kiro
 3. Agent implements + updates .ai-reviews/implementation-context.md (with BASE_COMMIT)
-4. Run: ./scripts/codex-review.sh
+4. Run: ./scripts/ai-code-review.sh
 5. If BLOCK: paste review back, agent fixes, re-run
 6. If APPROVE or APPROVE_WITH_SHOULD_FIX: done
 ```
@@ -47,7 +47,7 @@ One pass is enough. Only re-run if the review returns **BLOCK**.
 
 The review script determines which changes to review using this priority:
 
-1. **Explicit CLI argument** — `./scripts/codex-review.sh <base-ref>`
+1. **Explicit CLI argument** — `./scripts/ai-code-review.sh <base-ref>`
 2. **`COMMITS:` marker** in `implementation-context.md` — cherry-picked commit hashes (for interleaved work)
 3. **`BASE_COMMIT:` marker** in `implementation-context.md` — contiguous range
 4. **Upstream branch** — tries `origin/main`, `origin/develop`, `origin/master`
@@ -92,5 +92,5 @@ The reviewer also flags **drift** — cases where the diff doesn't match what th
 
 - Keep `implementation-context.md` focused. If it's too long, the reviewer loses signal.
 - Always include `BASE_COMMIT:` or `COMMITS:` — without it, the script guesses.
-- Reviews are gitignored (`.ai-reviews/` is in `.gitignore`).
-- Very large diffs may exceed Codex's context window. Pass a narrower base ref if needed.
+- Reviews are saved to `.ai-reviews/ai-review-*.md` files.
+- Very large diffs may exceed the model's context window. Pass a narrower base ref if needed.

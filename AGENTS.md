@@ -14,7 +14,7 @@
 ### After Implementation
 1. **Declare completion** — Say "Implementation complete" and summarize what changed.
 2. **Update context file** — Write `.ai-reviews/implementation-context.md` (see format below).
-3. **Do not self-review** — The human decides whether to run a review. Do not trigger `codex-review.sh` yourself.
+3. **Do not self-review** — The human decides whether to run a review. Do not trigger `ai-code-review.sh` yourself.
 
 ## Review Workflow
 
@@ -64,7 +64,7 @@ When a review returns:
 
 **Critical: One review cycle per task.** After addressing BLOCK items once, the task is complete regardless of the next review result. Endless iteration is worse than shipping imperfect code.
 
-To run a review: `bash scripts/codex-review.sh`
+To run a review: `bash scripts/ai-code-review.sh`
 
 ## Loop Prevention
 
