@@ -8,6 +8,7 @@ ROUND_FILE=".ai-reviews/.review-round"
 TASK_ID_FILE=".ai-reviews/.task-id"
 MAX_ROUNDS=3  # Reduced from 5 — forces faster convergence
 STAMP=$(date +"%Y%m%d-%H%M%S")
+OUT=".ai-reviews/ai-review-$STAMP.md"
 
 # --- Parse flags ---
 FORCE_APPROVE=false
@@ -312,31 +313,32 @@ $DIFF_SECTION
 
 Default to APPROVE. Only BLOCK if you would mass-revert this commit in production."
 
-# --- Write review prompt to file ---
-PROMPT_FILE=".ai-reviews/review-prompt.md"
-echo "$REVIEW_PROMPT" > "$PROMPT_FILE"
+# --- Run review via kiro-cli ---
+# Write prompt to file for reference
+echo "$REVIEW_PROMPT" > ".ai-reviews/review-prompt.md"
+
+echo "Running review via kiro-cli..."
+echo ""
+kiro-cli chat --no-interactive --model claude-sonnet-4 --trust-all-tools "$REVIEW_PROMPT" | tee "$OUT"
 
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Review prompt written to: $PROMPT_FILE"
+echo "Saved review to: $OUT"
 echo "Review round: $CURRENT_ROUND of $MAX_ROUNDS"
-echo ""
-echo "Next: Open Kiro chat and reference the file with #File → .ai-reviews/review-prompt.md"
-echo "      Or paste: \"Review this: #.ai-reviews/review-prompt.md\""
 echo ""
 
 if [ "$CURRENT_ROUND" -ge "$MAX_ROUNDS" ]; then
   echo "✅ Maximum review rounds reached. This review cycle is COMPLETE."
   echo "   The code should be merged unless there's a critical security/data issue."
   echo ""
-  echo "   To start a fresh cycle for a new task: bash scripts/codex-review.sh --reset"
+  echo "   To start a fresh cycle for a new task: bash scripts/ai-code-review.sh --reset"
   rm -f "$ROUND_FILE"  # Auto-reset after final round
 else
-  echo "Verdicts:"
+  echo "Next steps based on verdict:"
   echo "  APPROVE           → Done. Merge the code."
   echo "  APPROVE_WITH_FIX  → Done. Log should-fix items for later, merge now."
   echo "  BLOCK             → Fix ONLY the blocking issue, then re-run review."
   echo ""
-  echo "To skip remaining rounds: bash scripts/codex-review.sh --force-approve"
+  echo "To skip remaining rounds: bash scripts/ai-code-review.sh --force-approve"
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
