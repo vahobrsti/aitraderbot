@@ -219,6 +219,26 @@ class DailySignal(models.Model):
         help_text="Strike computation metadata: sources, distances, mvrv_60d"
     )
 
+    # Income Spread (Bull Put / Bear Call) risk-tiered setups
+    income_spread_setups = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of risk-tiered spread setups [{risk_tier, short_strike, long_strike, credit, spread_width, dte, max_loss, short_delta, credit_width_pct, otm_pct, risk_reward}]"
+    )
+    income_spread_score = models.FloatField(
+        default=0.0,
+        help_text="Income gate score (0-100)"
+    )
+    income_spread_eligible = models.BooleanField(
+        default=False,
+        help_text="Whether income gate passed (score >= threshold, no vetoes, chain valid)"
+    )
+    income_spread_veto_reasons = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Veto reasons blocking income spread entry"
+    )
+
     class Meta:
         db_table = "daily_signal"
         ordering = ["-date", "-updated_at"]
@@ -241,6 +261,8 @@ class DailySignal(models.Model):
         "OPTION_PUT": 5,
         "MVRV_SHORT": 6,
         "IRON_CONDOR": 7,
+        "BULL_PUT_SPREAD": 8,
+        "BEAR_CALL_SPREAD": 9,
         "NO_TRADE": 99,
     }
 

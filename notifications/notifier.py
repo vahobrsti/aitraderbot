@@ -248,6 +248,63 @@ class TelegramNotifier:
         """
         message = setup.to_telegram_message()
         return asyncio.run(self._send_async(message))
+
+    def send_income_spread_setups(self, signal_date: str, signal_type: str, score: float, setups: list) -> bool:
+        """
+        Send income spread risk-tiered setups to Telegram.
+
+        Args:
+            signal_date: Date string.
+            signal_type: BULL_PUT_SPREAD or BEAR_CALL_SPREAD.
+            score: Income gate score (0-100).
+            setups: List of setup dicts with risk_tier, short_strike, etc.
+
+        Returns:
+            True if sent successfully, False otherwise.
+        """
+        emoji = "🟢" if signal_type == "BULL_PUT_SPREAD" else "🔴"
+        safe_type = signal_type.replace("_", "\\_")
+
+        lines = [
+            f"{emoji} *{safe_type}* Income Signal",
+            f"📅 {signal_date}",
+            f"*Gate Score:* {score:.0f}/100",
+            "",
+        ]
+
+        tier_emojis = {"low": "🟢", "medium": "🟡", "high": "🔴"}
+        tier_labels = {"low": "LOW RISK", "medium": "MEDIUM RISK", "high": "HIGH RISK"}
+
+        for s in setups:
+            tier = s.get("risk_tier", "unknown")
+            t_emoji = tier_emojis.get(tier, "❓")
+            t_label = tier_labels.get(tier, tier.upper())
+            delta = s.get("short_delta", 0)
+            pop = (1 - delta) * 100
+
+            lines.append(f"{t_emoji} *{t_label}* (Δ{delta:.2f}, ~{pop:.0f}% POP)")
+
+            if signal_type == "BULL_PUT_SPREAD":
+                lines.append(f"  Short Put: `${s['short_strike']:,.0f}` ({s['otm_pct']*100:.1f}% OTM)")
+                lines.append(f"  Long Put: `${s['long_strike']:,.0f}`")
+            else:
+                lines.append(f"  Short Call: `${s['short_strike']:,.0f}` ({s['otm_pct']*100:.1f}% OTM)")
+                lines.append(f"  Long Call: `${s['long_strike']:,.0f}`")
+
+            lines.append(f"  Width: `${s['spread_width']:,.0f}`")
+            lines.append(f"  Credit: `${s['credit']:,.2f}` ({s['credit_width_pct']*100:.1f}%)")
+            lines.append(f"  Max Loss: `${s['max_loss']:,.2f}`")
+            lines.append(f"  DTE: {s['dte']}d | R:R: 1:{s['risk_reward']:.2f}")
+            lines.append("")
+
+        lines.append("*Exit Rules (all tiers):*")
+        lines.append("  TP: 50% of credit")
+        lines.append("  SL: Spot moves 2% toward short strike")
+        lines.append("  Scale: Day 12 → 25%")
+        lines.append("  Max Hold: 18 days")
+
+        message = "\n".join(lines)
+        return asyncio.run(self._send_async(message))
     
     def send_from_model(self, daily_signal, include_setup: bool = True) -> bool:
         """
@@ -291,14 +348,26 @@ class TelegramNotifier:
         # Send trade setup if requested and signal is tradeable
         if include_setup and daily_signal.trade_decision != "NO_TRADE" and not overlay_veto:
             try:
-                from execution.services.trade_setup import TradeSetupBuilder
-                builder = TradeSetupBuilder()
-                setup = builder.build_setup(daily_signal.date, signal_type=daily_signal.trade_decision)
-                if setup:
-                    # Persist setup to database
-                    setup.save_to_db(signal=daily_signal)
-                    setup_result = self.send_trade_setup(setup)
-                    result = result and setup_result
+                # Income spreads: send risk-tiered setups directly
+                if daily_signal.trade_decision in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"):
+                    setups = daily_signal.income_spread_setups or []
+                    if setups:
+                        setup_result = self.send_income_spread_setups(
+                            signal_date=str(daily_signal.date),
+                            signal_type=daily_signal.trade_decision,
+                            score=daily_signal.income_spread_score,
+                            setups=setups,
+                        )
+                        result = result and setup_result
+                else:
+                    from execution.services.trade_setup import TradeSetupBuilder
+                    builder = TradeSetupBuilder()
+                    setup = builder.build_setup(daily_signal.date, signal_type=daily_signal.trade_decision)
+                    if setup:
+                        # Persist setup to database
+                        setup.save_to_db(signal=daily_signal)
+                        setup_result = self.send_trade_setup(setup)
+                        result = result and setup_result
             except Exception as e:
                 print(f"Trade setup notification error: {e}")
         

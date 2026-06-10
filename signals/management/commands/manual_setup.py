@@ -927,7 +927,7 @@ class Command(BaseCommand):
         use_spot = spot if spot else chain_spot
 
         # Evaluate
-        config = IncomeGateConfig(min_credit_pct=0.15)
+        config = IncomeGateConfig()
         if signal_type == "BULL_PUT_SPREAD":
             gate_result = evaluate_bull_put_gate(
                 row, chain_df=chain_df, spot_price=use_spot,
@@ -984,22 +984,25 @@ class Command(BaseCommand):
         self.stdout.write("")
 
         if gate_result.eligible:
-            w = abs(gate_result.short_strike - gate_result.long_strike)
-            self.stdout.write("  --- SELECTED SPREAD ---")
-            if signal_type == "BULL_PUT_SPREAD":
-                self.stdout.write(f"  Short Put:  ${gate_result.short_strike:,.0f} ({((use_spot-gate_result.short_strike)/use_spot*100):.1f}% below spot)")
-                self.stdout.write(f"  Long Put:   ${gate_result.long_strike:,.0f} ({((use_spot-gate_result.long_strike)/use_spot*100):.1f}% below spot)")
-            else:
-                self.stdout.write(f"  Short Call: ${gate_result.short_strike:,.0f} ({((gate_result.short_strike-use_spot)/use_spot*100):.1f}% above spot)")
-                self.stdout.write(f"  Long Call:  ${gate_result.long_strike:,.0f} ({((gate_result.long_strike-use_spot)/use_spot*100):.1f}% above spot)")
-            self.stdout.write(f"  Width:      ${w:,.0f}")
-            self.stdout.write(f"  Credit:     ${gate_result.credit:,.2f}")
-            self.stdout.write(f"  Credit/Width: {gate_result.credit/w*100:.1f}%")
-            self.stdout.write(f"  Max Loss:   ${gate_result.max_loss:,.2f}")
-            self.stdout.write(f"  DTE:        {gate_result.dte} days")
-            self.stdout.write(f"  R:R:        1:{gate_result.credit/gate_result.max_loss:.2f}\n")
-            self.stdout.write("  --- EXIT RULES ---")
-            self.stdout.write(f"  Take Profit: 50% of credit = ${gate_result.credit*0.50:,.2f}")
+            self.stdout.write("  --- AVAILABLE SETUPS ---")
+            tier_labels = {"low": "🟢 LOW RISK", "medium": "🟡 MEDIUM RISK", "high": "🔴 HIGH RISK"}
+            for setup in gate_result.setups:
+                label = tier_labels.get(setup.risk_tier, setup.risk_tier.upper())
+                self.stdout.write(f"\n  {label} (delta {setup.short_delta:.2f}, ~{(1-setup.short_delta)*100:.0f}% POP)")
+                if signal_type == "BULL_PUT_SPREAD":
+                    self.stdout.write(f"    Short Put:  ${setup.short_strike:,.0f} ({setup.otm_pct*100:.1f}% below spot)")
+                    self.stdout.write(f"    Long Put:   ${setup.long_strike:,.0f}")
+                else:
+                    self.stdout.write(f"    Short Call: ${setup.short_strike:,.0f} ({setup.otm_pct*100:.1f}% above spot)")
+                    self.stdout.write(f"    Long Call:  ${setup.long_strike:,.0f}")
+                self.stdout.write(f"    Width:      ${setup.spread_width:,.0f}")
+                self.stdout.write(f"    Credit:     ${setup.credit:,.2f} ({setup.credit_width_pct*100:.1f}% of width)")
+                self.stdout.write(f"    Max Loss:   ${setup.max_loss:,.2f}")
+                self.stdout.write(f"    DTE:        {setup.dte} days")
+                self.stdout.write(f"    R:R:        1:{setup.risk_reward:.2f}")
+
+            self.stdout.write("\n  --- EXIT RULES (all tiers) ---")
+            self.stdout.write(f"  Take Profit: 50% of credit received")
             self.stdout.write(f"  Stop Loss:   Spot moves 2% toward short strike")
             self.stdout.write(f"  Scale Down:  Day 12 → reduce to 25%")
             self.stdout.write(f"  Max Hold:    18 days")

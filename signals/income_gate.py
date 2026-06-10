@@ -32,11 +32,11 @@ class IncomeGateConfig:
     score_threshold: float = 70.0
 
     # Option chain filters
-    min_delta: float = 0.15
-    max_delta: float = 0.30
+    min_delta: float = 0.12
+    max_delta: float = 0.35
     max_bid_ask_spread_pct: float = 0.15
-    min_credit_pct: float = 0.25  # credit / spread_width maximum (aggressive setups)
-    min_credit_pct_floor: float = 0.15  # absolute minimum credit (excellent setups)
+    credit_delta_scalar: float = 0.55  # required credit = delta × scalar (P50 line)
+    credit_delta_scalar_floor: float = 0.40  # absolute minimum scalar (excellent setups)
     min_spread_width_pct: float = 0.03  # spread_width / spot minimum
     max_spread_width_pct: float = 0.08  # spread_width / spot maximum
     min_otm_pct: float = 0.04  # short strike must be at least 4% OTM
@@ -73,6 +73,23 @@ class SpreadCandidate:
 
 
 @dataclass
+class SpreadSetup:
+    """A risk-tiered spread setup presented to the human for decision."""
+
+    risk_tier: str  # "low", "medium", "high"
+    short_strike: float
+    long_strike: float
+    credit: float
+    spread_width: float
+    dte: int
+    max_loss: float
+    short_delta: float
+    credit_width_pct: float  # credit / spread_width
+    otm_pct: float  # distance from spot as %
+    risk_reward: float  # credit / max_loss
+
+
+@dataclass
 class IncomeGateResult:
     """Result of an income spread gate evaluation."""
 
@@ -89,6 +106,11 @@ class IncomeGateResult:
     chain_valid: bool = False
     chain_rejection_reason: Optional[str] = None
     spread_guidance: Optional[SpreadGuidance] = None
+
+    # --- Multi-setup output (human picks the risk tier) ---
+    setups: list = field(default_factory=list)  # List[SpreadSetup], up to 3 tiers
+
+    # --- Legacy single-spread fields (populated from best setup for backward compat) ---
     short_strike: Optional[float] = None
     long_strike: Optional[float] = None
     credit: Optional[float] = None
@@ -667,42 +689,119 @@ def select_spread(
     strike_boundary: Optional[float] = None,
 ) -> Optional[SpreadCandidate]:
     """
-    Select the best spread from filtered chain candidates.
+    Select the best spread from filtered chain candidates (single result).
 
-    Iterates short leg candidates from filtered_chain, finds a matching
-    long leg from full_chain at the correct width, and validates
-    credit/spread_width ratio using adaptive thresholds.
-
-    The credit threshold flexes based on placement quality:
-    - Strong setup (MVRV constructive, strike below/above boundary, low delta):
-      min credit ~15-18%
-    - Normal setup: min credit ~20-22%
-    - Aggressive setup (high delta, close to spot): min credit 25%
-
-    Args:
-        filtered_chain: Pre-filtered chain for short leg candidates.
-        full_chain: Full normalized chain for long leg lookup.
-        side: "put" or "call".
-        spot_price: Current BTC spot price.
-        config: Gate configuration.
-        mvrv_60d: MVRV-60d value (used for adaptive credit on puts).
-        strike_boundary: MVRV-derived floor/ceiling price.
+    This is the backward-compatible interface. For multi-tier selection,
+    use select_spread_tiers() instead.
 
     Returns:
         SpreadCandidate if a valid spread is found, None otherwise.
     """
-    if filtered_chain.empty:
+    candidates = _find_all_valid_spreads(
+        filtered_chain, full_chain, side, spot_price, config, mvrv_60d, strike_boundary
+    )
+    if not candidates:
         return None
+    # Return the first (highest-delta = most credit) valid candidate
+    return candidates[0]
+
+
+# Delta boundaries for risk tiers
+_TIER_DELTA_RANGES = {
+    "low": (0.12, 0.20),    # Far OTM, less credit, higher POP
+    "medium": (0.20, 0.28), # Middle ground
+    "high": (0.28, 0.35),   # Closer to ATM, more credit, lower POP
+}
+
+
+def select_spread_tiers(
+    filtered_chain: pd.DataFrame,
+    full_chain: pd.DataFrame,
+    side: str,
+    spot_price: float,
+    config: IncomeGateConfig,
+    mvrv_60d: Optional[float] = None,
+    strike_boundary: Optional[float] = None,
+) -> list:
+    """
+    Select up to 3 spread setups across risk tiers (low/medium/high).
+
+    Each tier targets a different delta range:
+    - Low risk:    delta 0.12-0.20 (far OTM, ~80-88% POP, less credit)
+    - Medium risk: delta 0.20-0.28 (balanced, ~72-80% POP)
+    - High risk:   delta 0.28-0.35 (closer to ATM, ~65-72% POP, more credit)
+
+    The human chooses which tier to trade based on their conviction and
+    risk appetite. All returned setups pass the adaptive credit threshold.
+
+    Returns:
+        List[SpreadSetup] — 0 to 3 setups, one per tier that has a valid spread.
+    """
+    all_candidates = _find_all_valid_spreads(
+        filtered_chain, full_chain, side, spot_price, config, mvrv_60d, strike_boundary
+    )
+    if not all_candidates:
+        return []
+
+    setups = []
+    for tier_name, (d_min, d_max) in _TIER_DELTA_RANGES.items():
+        # Find best candidate in this delta range
+        tier_candidates = [
+            c for c in all_candidates
+            if d_min <= c.short_delta < d_max
+        ]
+        if not tier_candidates:
+            continue
+        # Pick highest credit ratio within the tier
+        best = max(tier_candidates, key=lambda c: c.credit / c.spread_width)
+
+        if side == "put":
+            otm_pct = (spot_price - best.short_strike) / spot_price
+        else:
+            otm_pct = (best.short_strike - spot_price) / spot_price
+
+        setups.append(SpreadSetup(
+            risk_tier=tier_name,
+            short_strike=best.short_strike,
+            long_strike=best.long_strike,
+            credit=best.credit,
+            spread_width=best.spread_width,
+            dte=best.dte,
+            max_loss=best.max_loss,
+            short_delta=best.short_delta,
+            credit_width_pct=best.credit / best.spread_width,
+            otm_pct=otm_pct,
+            risk_reward=best.credit / best.max_loss if best.max_loss > 0 else 0.0,
+        ))
+
+    return setups
+
+
+def _find_all_valid_spreads(
+    filtered_chain: pd.DataFrame,
+    full_chain: pd.DataFrame,
+    side: str,
+    spot_price: float,
+    config: IncomeGateConfig,
+    mvrv_60d: Optional[float] = None,
+    strike_boundary: Optional[float] = None,
+) -> list:
+    """
+    Find all valid spreads from the filtered chain that pass the credit threshold.
+
+    Returns list of SpreadCandidate sorted by delta descending (highest credit first).
+    """
+    if filtered_chain.empty:
+        return []
 
     min_width = spot_price * config.min_spread_width_pct
     max_width = spot_price * config.max_spread_width_pct
 
     # Long leg candidates: same side, from full chain
     side_chain = full_chain[full_chain["side"] == side].copy()
-    # Round DTE to integer for same-expiry matching (hourly snapshots
-    # produce fractional DTE like 14.37, 14.41 for the same expiry)
     side_chain["dte_int"] = side_chain["dte"].astype(int)
 
+    candidates = []
     for _, short_row in filtered_chain.iterrows():
         short_strike = float(short_row["strike"])
         short_bid = float(short_row["bid"])
@@ -712,14 +811,12 @@ def select_spread(
         # Find long leg: same side, same expiry, further OTM, within width range
         same_expiry = side_chain[side_chain["dte_int"] == short_dte]
         if side == "put":
-            # Long put is below short put
             long_candidates = same_expiry[
                 (same_expiry["strike"] < short_strike)
                 & (same_expiry["strike"] >= short_strike - max_width)
                 & (same_expiry["strike"] <= short_strike - min_width)
             ]
         else:
-            # Long call is above short call
             long_candidates = same_expiry[
                 (same_expiry["strike"] > short_strike)
                 & (same_expiry["strike"] <= short_strike + max_width)
@@ -739,17 +836,13 @@ def select_spread(
         long_strike = float(long_row["strike"])
         long_ask = float(long_row["ask"])
 
-        # Compute spread metrics
         spread_width = abs(short_strike - long_strike)
         credit = short_bid - long_ask
 
-        if credit <= 0:
+        if credit <= 0 or spread_width <= 0:
             continue
 
-        if spread_width <= 0:
-            continue
-
-        # Adaptive credit threshold based on placement quality
+        # Adaptive credit threshold
         required_credit_pct = _compute_required_credit_pct(
             side=side,
             short_strike=short_strike,
@@ -765,8 +858,7 @@ def select_spread(
             continue
 
         max_loss = spread_width - credit
-
-        return SpreadCandidate(
+        candidates.append(SpreadCandidate(
             short_strike=short_strike,
             long_strike=long_strike,
             credit=credit,
@@ -774,9 +866,9 @@ def select_spread(
             dte=short_dte,
             max_loss=max_loss,
             short_delta=short_delta,
-        )
+        ))
 
-    return None
+    return candidates
 
 
 def _compute_required_credit_pct(
@@ -789,17 +881,31 @@ def _compute_required_credit_pct(
     config: IncomeGateConfig,
 ) -> float:
     """
-    Compute the minimum required credit/width ratio based on placement quality.
+    Compute minimum required credit/width ratio scaled to delta.
 
-    Starts at config.min_credit_pct (25%) and reduces when conditions are safer:
-    - MVRV is constructive (>1.03 for puts): -5%
-    - Short strike is behind the MVRV boundary: -0% (already reflected by MVRV bonus)
-    - Delta is low (<0.22): -4%
-    - Strike is well OTM (>5%): -3%
+    A real trader demands more credit when closer to ATM (higher risk) and
+    accepts less when further OTM (lower risk). The formula:
 
-    Never goes below config.min_credit_pct_floor (15%).
+        required = short_delta × scalar
+
+    Base scalar is config.credit_delta_scalar (0.55), which targets P50
+    of observed BTC option spreads — selecting the better-than-median half.
+
+    Quality adjustments reduce the scalar when the setup is safer:
+    - MVRV is constructive (>1.03 for puts, strike >= boundary for calls): -0.05
+    - Strike is well behind MVRV boundary (extra cushion): -0.02
+    - Well OTM (>6% from spot): -0.03
+
+    Never goes below config.credit_delta_scalar_floor (0.40) × delta.
+
+    Examples at scalar 0.55:
+        delta 0.15 → require ≥ 8.3% credit/width
+        delta 0.20 → require ≥ 11.0%
+        delta 0.25 → require ≥ 13.8%
+        delta 0.30 → require ≥ 16.5%
+        delta 0.35 → require ≥ 19.3%
     """
-    required = config.min_credit_pct  # 0.25
+    scalar = config.credit_delta_scalar  # 0.55
 
     # Compute OTM distance
     if side == "put":
@@ -807,32 +913,31 @@ def _compute_required_credit_pct(
     else:
         otm_pct = (short_strike - spot_price) / spot_price
 
-    # MVRV quality bonus
+    # MVRV quality bonus — reduce scalar when on-chain anchor is strong
     if side == "put" and mvrv_60d is not None:
         if mvrv_60d >= config.mvrv_strong_floor_threshold:
-            # Strong floor: reduce threshold
-            required -= 0.05
-            # Additional: strike below MVRV floor = extra safe
+            scalar -= 0.05
+            # Additional: strike below MVRV floor = extra cushion
             if strike_boundary is not None and short_strike <= strike_boundary:
-                required -= 0.00  # already captured by MVRV bonus
+                scalar -= 0.02
     elif side == "call":
-        # For bear calls: ceiling validity is handled by veto,
-        # but if ceiling is well above spot, that's constructive
         if strike_boundary is not None and short_strike >= strike_boundary:
-            required -= 0.05
+            scalar -= 0.05
+            # Extra: strike well above ceiling
+            if spot_price > 0:
+                boundary_dist = (short_strike - strike_boundary) / spot_price
+                if boundary_dist > 0.02:
+                    scalar -= 0.02
 
-    # Low delta bonus (more OTM = safer)
-    if short_delta < 0.22:
-        required -= 0.04
+    # Well OTM bonus (>6% from spot = more room to be wrong)
+    if otm_pct > 0.06:
+        scalar -= 0.03
 
-    # Well OTM bonus
-    if otm_pct > 0.05:
-        required -= 0.03
+    # Floor: never below absolute minimum scalar
+    scalar = max(config.credit_delta_scalar_floor, scalar)
 
-    # Floor: never below absolute minimum
-    required = max(config.min_credit_pct_floor, required)
-
-    return required
+    # Required credit = delta × scalar
+    return short_delta * scalar
 
 
 # ============================================================
@@ -976,14 +1081,14 @@ def evaluate_bull_put_gate(
             chain_rejection_reason="NO_CONTRACTS_PASS_FILTERS",
         )
 
-    # Select spread
-    candidate = select_spread(
+    # Select spread tiers (low/medium/high risk)
+    setups = select_spread_tiers(
         filtered, normalized, "put", spot_price, config,
         mvrv_60d=float(mvrv_60d) if mvrv_60d else None,
         strike_boundary=floor_price,
     )
 
-    if candidate is None:
+    if not setups:
         return IncomeGateResult(
             score=score,
             regime_eligible=True,
@@ -996,6 +1101,12 @@ def evaluate_bull_put_gate(
             chain_rejection_reason="NO_ACCEPTABLE_SPREAD",
         )
 
+    # Use medium-risk as the default (fallback to first available)
+    default_setup = next(
+        (s for s in setups if s.risk_tier == "medium"),
+        setups[0]
+    )
+
     return IncomeGateResult(
         score=score,
         regime_eligible=True,
@@ -1006,11 +1117,12 @@ def evaluate_bull_put_gate(
         structure=OptionStructure.SHORT_PUT_SPREAD,
         chain_valid=True,
         spread_guidance=_BULL_PUT_GUIDANCE,
-        short_strike=candidate.short_strike,
-        long_strike=candidate.long_strike,
-        credit=candidate.credit,
-        dte=candidate.dte,
-        max_loss=candidate.max_loss,
+        setups=setups,
+        short_strike=default_setup.short_strike,
+        long_strike=default_setup.long_strike,
+        credit=default_setup.credit,
+        dte=default_setup.dte,
+        max_loss=default_setup.max_loss,
     )
 
 
@@ -1141,14 +1253,14 @@ def evaluate_bear_call_gate(
             chain_rejection_reason="NO_CONTRACTS_PASS_FILTERS",
         )
 
-    # Select spread
-    candidate = select_spread(
+    # Select spread tiers (low/medium/high risk)
+    setups = select_spread_tiers(
         filtered, normalized, "call", spot_price, config,
         mvrv_60d=None,  # not used for calls
         strike_boundary=ceiling_price,
     )
 
-    if candidate is None:
+    if not setups:
         return IncomeGateResult(
             score=score,
             regime_eligible=True,
@@ -1161,6 +1273,12 @@ def evaluate_bear_call_gate(
             chain_rejection_reason="NO_ACCEPTABLE_SPREAD",
         )
 
+    # Use medium-risk as the default (fallback to first available)
+    default_setup = next(
+        (s for s in setups if s.risk_tier == "medium"),
+        setups[0]
+    )
+
     return IncomeGateResult(
         score=score,
         regime_eligible=True,
@@ -1171,9 +1289,10 @@ def evaluate_bear_call_gate(
         structure=OptionStructure.SHORT_CALL_SPREAD,
         chain_valid=True,
         spread_guidance=_BEAR_CALL_GUIDANCE,
-        short_strike=candidate.short_strike,
-        long_strike=candidate.long_strike,
-        credit=candidate.credit,
-        dte=candidate.dte,
-        max_loss=candidate.max_loss,
+        setups=setups,
+        short_strike=default_setup.short_strike,
+        long_strike=default_setup.long_strike,
+        credit=default_setup.credit,
+        dte=default_setup.dte,
+        max_loss=default_setup.max_loss,
     )

@@ -132,6 +132,11 @@ class SignalResult:
     condor_short_put: Optional[float] = None
     condor_cost_basis: Optional[float] = None
     condor_strike_meta: dict = None
+    # Income spread gate
+    income_spread_setups: list = None
+    income_spread_score: float = 0.0
+    income_spread_eligible: bool = False
+    income_spread_veto_reasons: list = None
 
 
 class SignalService:
@@ -767,6 +772,10 @@ class SignalService:
                 'condor_short_put': result.condor_short_put,
                 'condor_cost_basis': result.condor_cost_basis,
                 'condor_strike_meta': result.condor_strike_meta or {},
+                'income_spread_setups': result.income_spread_setups or [],
+                'income_spread_score': result.income_spread_score,
+                'income_spread_eligible': result.income_spread_eligible,
+                'income_spread_veto_reasons': result.income_spread_veto_reasons or [],
             }
         )
         return signal, created
