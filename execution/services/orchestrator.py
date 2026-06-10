@@ -73,6 +73,8 @@ class ExecutionOrchestrator:
             'PUT': ('short', 'put'),
             'OPTION_PUT': ('short', 'put'),
             'TACTICAL_PUT': ('long', 'put'),
+            'BULL_PUT_SPREAD': ('short', 'put'),
+            'BEAR_CALL_SPREAD': ('short', 'call'),
         }
         
         if decision not in decision_map:

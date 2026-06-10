@@ -754,6 +754,8 @@ class TradeSetupBuilder:
             "BEAR_PROBE": ("SHORT", "put"),
             "MVRV_SHORT": ("SHORT", "put"),
             "IRON_CONDOR": ("NEUTRAL", "condor"),  # Special handling in build_setup
+            "BULL_PUT_SPREAD": ("INCOME", "income_put"),  # Handled via income_gate
+            "BEAR_CALL_SPREAD": ("INCOME", "income_call"),  # Handled via income_gate
         }
         return mapping.get(signal_type, (None, None))
     

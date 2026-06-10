@@ -5,8 +5,8 @@ For each date, determines whether a credit spread would have expired safely
 (short strike never breached) over the next N days.
 
 Uses MVRV-derived strike boundaries (same logic as income_gate.py):
-- Bull put floor: spot / mvrv_60d (cost basis), with P5 fallback when underwater
-- Bear call ceiling: (spot / mvrv_60d) * mvrv_60d_p95_180d
+- Bull put floor: spot / mvrv_60d (cost basis), with P10 fallback when underwater
+- Bear call ceiling: (spot / mvrv_60d) * mvrv_60d_p90_180d
 
 Falls back to a fixed minimum OTM distance (4%) when MVRV data is unavailable.
 
@@ -38,8 +38,8 @@ def calculate(
         df: DataFrame with DatetimeIndex. Must contain:
             - btc_close, btc_high, btc_low, btc_open
             - mvrv_60d (or mvrv_usd_60d)
-            - mvrv_60d_p5_180d (optional, for underwater floor)
-            - mvrv_60d_p95_180d (optional, for ceiling)
+            - mvrv_60d_p10_180d (optional, for underwater floor)
+            - mvrv_60d_p90_180d (optional, for ceiling)
         horizon_days: Forward window in rows (default 14).
         min_otm_pct: Minimum OTM distance fallback (default 0.04 = 4%).
 
@@ -65,14 +65,14 @@ def calculate(
     else:
         mvrv_60d = pd.Series(np.nan, index=df.index)
 
-    mvrv_60d_p5 = (
-        df["mvrv_60d_p5_180d"].astype(float)
-        if "mvrv_60d_p5_180d" in df.columns
+    mvrv_60d_p10 = (
+        df["mvrv_60d_p10_180d"].astype(float)
+        if "mvrv_60d_p10_180d" in df.columns
         else pd.Series(np.nan, index=df.index)
     )
-    mvrv_60d_p95 = (
-        df["mvrv_60d_p95_180d"].astype(float)
-        if "mvrv_60d_p95_180d" in df.columns
+    mvrv_60d_p90 = (
+        df["mvrv_60d_p90_180d"].astype(float)
+        if "mvrv_60d_p90_180d" in df.columns
         else pd.Series(np.nan, index=df.index)
     )
 
@@ -87,11 +87,11 @@ def calculate(
     buyers_profitable = cost_basis <= entry_price
 
     # Floor when profitable: cost_basis itself
-    # Floor when underwater: cost_basis * P5 (tighter bound)
+    # Floor when underwater: cost_basis * P10 (tighter bound)
     floor_profitable = cost_basis
-    floor_underwater = cost_basis * mvrv_60d_p5
-    # If P5 is NaN when underwater, fall back to cost_basis anyway
-    floor_underwater = floor_underwater.where(mvrv_60d_p5.notna(), cost_basis)
+    floor_underwater = cost_basis * mvrv_60d_p10
+    # If P10 is NaN when underwater, fall back to cost_basis anyway
+    floor_underwater = floor_underwater.where(mvrv_60d_p10.notna(), cost_basis)
 
     bull_put_floor = pd.Series(np.nan, index=df.index)
     bull_put_floor = bull_put_floor.where(
@@ -107,14 +107,14 @@ def calculate(
     bull_put_floor = bull_put_floor.where(mvrv_valid, fallback_floor)
 
     # --- Bear Call Ceiling ---
-    # ceiling = cost_basis * P95
+    # ceiling = cost_basis * P90
     # Fallback: entry * (1 + min_otm_pct)
-    bear_call_ceiling = cost_basis * mvrv_60d_p95
+    bear_call_ceiling = cost_basis * mvrv_60d_p90
 
-    # Fallback when P95 is missing but MVRV-60d is valid: no ceiling computable
+    # Fallback when P90 is missing but MVRV-60d is valid: no ceiling computable
     # Use fixed OTM fallback
     fallback_ceiling = entry_price * (1 + min_otm_pct)
-    ceiling_valid = mvrv_valid & mvrv_60d_p95.notna() & (mvrv_60d_p95 > 0)
+    ceiling_valid = mvrv_valid & mvrv_60d_p90.notna() & (mvrv_60d_p90 > 0)
     bear_call_ceiling = bear_call_ceiling.where(ceiling_valid, fallback_ceiling)
 
     # --- Labels ---

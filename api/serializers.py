@@ -55,6 +55,11 @@ class DailySignalSerializer(serializers.ModelSerializer):
             'condor_eligible',
             'condor_veto_reasons',
             'condor_score_components',
+            # Income spread gate
+            'income_spread_setups',
+            'income_spread_score',
+            'income_spread_eligible',
+            'income_spread_veto_reasons',
             'created_at',
             'updated_at',
         ]

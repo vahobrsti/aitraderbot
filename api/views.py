@@ -198,6 +198,34 @@ class TradeSetupView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # Income spreads: return stored risk-tiered setups directly
+        if signal_type in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"):
+            setups = signal.income_spread_setups or []
+            if not setups:
+                return Response(
+                    {"error": f"No income spread setups stored for {date}. Signal may not be eligible.",
+                     "signal_type": signal_type,
+                     "income_spread_eligible": signal.income_spread_eligible,
+                     "income_spread_score": signal.income_spread_score,
+                     "income_spread_veto_reasons": signal.income_spread_veto_reasons},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            return Response({
+                "signal_date": signal.date.isoformat(),
+                "signal_type": signal_type,
+                "direction": "INCOME",
+                "income_spread_score": signal.income_spread_score,
+                "income_spread_eligible": signal.income_spread_eligible,
+                "income_spread_veto_reasons": signal.income_spread_veto_reasons,
+                "setups": setups,
+                "exit_rules": {
+                    "take_profit_pct": 0.50,
+                    "stop_loss_spot_pct": 0.02,
+                    "scale_down_day": 12,
+                    "max_hold_days": 18,
+                },
+            })
+        
         # Build setup with optional type override
         setup = builder.build_setup(signal_date, signal_type=signal_type)
         
