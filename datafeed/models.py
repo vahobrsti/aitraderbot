@@ -189,6 +189,20 @@ class OptionTrade(models.Model):
     exchange = models.CharField(max_length=16, default='bybit')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # Spread linkage (for multi-leg strategies like credit spreads)
+    spread_id = models.CharField(
+        max_length=64, null=True, blank=True, db_index=True,
+        help_text="Groups legs of the same spread. Both legs share this ID."
+    )
+    leg_role = models.CharField(
+        max_length=10, blank=True, default="",
+        help_text="Role in spread: 'short' or 'long' (empty for single-leg trades)"
+    )
+    risk_tier = models.CharField(
+        max_length=10, blank=True, default="",
+        help_text="Risk tier chosen by human: 'low', 'medium', 'high' (income spreads only)"
+    )
     
     class Meta:
         db_table = "option_trade"

@@ -66,6 +66,9 @@ class TradeTracker:
         entry_timestamp: Optional[datetime] = None,
         is_paper: bool = True,
         exchange: str = 'bybit',
+        spread_id: Optional[str] = None,
+        leg_role: str = "",
+        risk_tier: str = "",
     ) -> OptionTrade:
         """
         Open a new option trade.
@@ -118,6 +121,9 @@ class TradeTracker:
             notional=notional,
             is_paper=is_paper,
             exchange=exchange,
+            spread_id=spread_id,
+            leg_role=leg_role,
+            risk_tier=risk_tier,
         )
         
         return trade
@@ -279,6 +285,83 @@ class TradeTracker:
     def get_open_trades(self) -> list[OptionTrade]:
         """Get all open trades."""
         return list(OptionTrade.objects.filter(exit_timestamp__isnull=True))
+
+    def open_credit_spread(
+        self,
+        signal_type: str,
+        short_symbol: str,
+        long_symbol: str,
+        qty: Decimal,
+        short_entry_price: Decimal,
+        long_entry_price: Decimal,
+        entry_spot: Decimal,
+        risk_tier: str = "",
+        entry_iv: Optional[Decimal] = None,
+        entry_timestamp: Optional[datetime] = None,
+        is_paper: bool = True,
+        exchange: str = 'bybit',
+    ) -> tuple:
+        """
+        Open a credit spread (both legs atomically with shared spread_id).
+
+        For BULL_PUT_SPREAD: short leg is the sold put, long leg is the bought put.
+        For BEAR_CALL_SPREAD: short leg is the sold call, long leg is the bought call.
+
+        The net credit = short_entry_price - long_entry_price.
+
+        Args:
+            signal_type: BULL_PUT_SPREAD or BEAR_CALL_SPREAD
+            short_symbol: Symbol of the sold option
+            long_symbol: Symbol of the bought option
+            qty: Number of spread contracts
+            short_entry_price: Premium received (bid of short leg)
+            long_entry_price: Premium paid (ask of long leg)
+            entry_spot: BTC spot price at entry
+            risk_tier: Which tier the human chose (low/medium/high)
+            entry_iv: IV at entry (optional)
+            entry_timestamp: Entry time (default: now)
+            is_paper: Paper trade flag
+            exchange: Exchange name
+
+        Returns:
+            Tuple of (short_leg_trade, long_leg_trade)
+        """
+        timestamp = entry_timestamp or datetime.now(timezone.utc)
+        spread_id = f"{signal_type}_{timestamp.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+        short_trade = self.open_trade(
+            signal_type=signal_type,
+            direction="SHORT",
+            symbol=short_symbol,
+            qty=qty,
+            entry_price=short_entry_price,
+            entry_spot=entry_spot,
+            entry_iv=entry_iv,
+            entry_timestamp=timestamp,
+            is_paper=is_paper,
+            exchange=exchange,
+            spread_id=spread_id,
+            leg_role="short",
+            risk_tier=risk_tier,
+        )
+
+        long_trade = self.open_trade(
+            signal_type=signal_type,
+            direction="LONG",
+            symbol=long_symbol,
+            qty=qty,
+            entry_price=long_entry_price,
+            entry_spot=entry_spot,
+            entry_iv=entry_iv,
+            entry_timestamp=timestamp,
+            is_paper=is_paper,
+            exchange=exchange,
+            spread_id=spread_id,
+            leg_role="long",
+            risk_tier=risk_tier,
+        )
+
+        return short_trade, long_trade
     
     def get_trade_summary(self, trade: OptionTrade) -> dict:
         """Get summary dict for a trade."""

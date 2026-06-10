@@ -352,6 +352,28 @@ class TelegramNotifier:
                 if daily_signal.trade_decision in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"):
                     setups = daily_signal.income_spread_setups or []
                     if setups:
+                        # Persist to TradeSetupSnapshot
+                        from execution.models import TradeSetupSnapshot
+                        TradeSetupSnapshot.objects.update_or_create(
+                            signal=daily_signal,
+                            defaults={
+                                'setup_data': {
+                                    'signal_type': daily_signal.trade_decision,
+                                    'direction': 'INCOME',
+                                    'income_spread_score': daily_signal.income_spread_score,
+                                    'setups': setups,
+                                },
+                                'signal_date': daily_signal.date,
+                                'signal_type': daily_signal.trade_decision,
+                                'direction': 'INCOME',
+                                'spot_price': setups[0].get('short_strike', 0) / (1 - max(setups[0].get('otm_pct', 0.05), 0.01)) if setups else 0,
+                                'net_debit': 0,  # Credit spread, no debit
+                                'max_profit': setups[0].get('credit', 0) if setups else 0,
+                                'max_loss': setups[0].get('max_loss', 0) if setups else 0,
+                                'contracts': 1,
+                                'validation_passed': True,
+                            }
+                        )
                         setup_result = self.send_income_spread_setups(
                             signal_date=str(daily_signal.date),
                             signal_type=daily_signal.trade_decision,
