@@ -129,21 +129,18 @@ if [ -z "$DIFF_MODE" ]; then
 fi
 
 if [ -z "$DIFF_MODE" ]; then
-  # Try common upstream branches
-  for candidate in origin/main origin/develop origin/master; do
-    if git rev-parse --verify "$candidate" >/dev/null 2>&1; then
-      DIFF_MODE="range"
-      BASE_REF="$candidate"
-      echo "Using upstream base: $BASE_REF"
-      break
-    fi
-  done
-fi
-
-if [ -z "$DIFF_MODE" ]; then
-  DIFF_MODE="range"
-  BASE_REF="HEAD~1"
-  echo "WARNING: No upstream found. Falling back to HEAD~1"
+  echo "ERROR: No review scope found in $CONTEXT_FILE." >&2
+  echo "" >&2
+  echo "The context file must include one of:" >&2
+  echo "  COMMITS: <hash1> <hash2> ...   (preferred — review specific commits)" >&2
+  echo "  BASE_COMMIT: <hash>            (review contiguous range up to HEAD)" >&2
+  echo "" >&2
+  echo "Per AGENTS.md, the implementation agent must commit changes and record" >&2
+  echo "the commit hashes in $CONTEXT_FILE before requesting review." >&2
+  echo "" >&2
+  echo "To review against an explicit base ref instead:" >&2
+  echo "  bash scripts/ai-code-review.sh <base-ref>" >&2
+  exit 1
 fi
 
 # --- Compute diff based on mode ---

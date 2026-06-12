@@ -12,21 +12,29 @@
 3. **Stop when done** — When the requested change works, stop. Do not refactor adjacent code, add tests unless asked, or "improve" things.
 
 ### After Implementation
-1. **Declare completion** — Say "Implementation complete" and summarize what changed.
-2. **Update context file** — Write `.ai-reviews/implementation-context.md` (see format below).
-3. **Do not self-review** — The human decides whether to run a review. Do not trigger `ai-code-review.sh` yourself.
+1. **Commit your changes first** — Before declaring completion or writing the context file, stage and commit your modifications. The review script reviews commits, not working-tree state. If nothing is committed, the scope is undefined.
+   - Use Conventional Commits format matching this repo's history: `<type>(<scope>): <description>`
+   - Common types: `feat`, `fix`, `chore`, `ci`, `docs`, `refactor`, `test`
+   - Run `git log --oneline --no-merges -10` to mirror existing scope names (e.g., `income_gate`, `signals`, `deploy`, `ai-code-review`)
+   - Subject line: lowercase, imperative, no trailing period, ≤72 chars
+   - Use multiple commits if changes are logically distinct
+   - Do **not** use `git commit --amend` or `git push --force` unless the user explicitly asks
+2. **Declare completion** — Say "Implementation complete" and summarize what changed.
+3. **Update context file** — Write `.ai-reviews/implementation-context.md` with a `COMMITS:` header listing the hashes you just created (see format below).
+4. **Do not self-review** — The human decides whether to run a review. Do not trigger `ai-code-review.sh` yourself.
 
 ## Review Workflow
 
 ### Context File Format
 Update `.ai-reviews/implementation-context.md` with:
 
-1. A **commit scope header** — one of:
-   ```
-   BASE_COMMIT: <hash>
-   ```
+1. A **commit scope header** — REQUIRED. Without it the review script will exit with an error. Prefer `COMMITS:` listing the exact hashes you created:
    ```
    COMMITS: <hash1> <hash2> <hash3>
+   ```
+   Use `BASE_COMMIT:` only when reviewing a contiguous range against a known base:
+   ```
+   BASE_COMMIT: <hash>
    ```
    Run `git log --oneline --no-merges -10` to identify your commits.
 
