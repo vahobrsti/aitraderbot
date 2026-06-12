@@ -16,7 +16,7 @@ jobs:
 
       - name: Deploy via SSH
         run: |
-          ssh -o StrictHostKeyChecking=no -i /tmp/deploy_key -p 422 ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'EOF'
+          ssh -T -o StrictHostKeyChecking=no -i /tmp/deploy_key -p 422 ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'EOF'
           cd /var/www/app
           git pull origin main
           sudo systemctl restart gunicorn
