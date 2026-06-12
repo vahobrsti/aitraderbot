@@ -9,14 +9,19 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      - name: Decode SSH Key
+        run: |
+          echo "${{ secrets.DEPLOY_SSH_KEY_B64 }}" | base64 -d > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: 422
-          script: |
-            cd /var/www/app
-            git pull origin main
-            sudo systemctl restart gunicorn
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/deploy_key -p 422 ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'EOF'
+          cd /var/www/app
+          git pull origin main
+          sudo systemctl restart gunicorn
+          EOF
+
+      - name: Cleanup
+        if: always()
+        run: rm -f /tmp/deploy_key
