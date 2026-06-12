@@ -630,6 +630,59 @@ python manage.py export_options --format csv
 python manage.py train_option_response --horizon-days 1 --walk-forward-splits 5
 ```
 
+### Development Workflow (dev_signal_cycle)
+
+Full signal lifecycle in one command — for testing new signals, validating the pipeline, and paper trading:
+
+```bash
+# Dry run: see what would happen without persisting or notifying
+python manage.py dev_signal_cycle --date 2026-06-10 --dry-run
+
+# Generate + persist + notify Telegram (uses fusion engine output)
+python manage.py dev_signal_cycle --date 2026-06-10 --notify
+
+# Force a specific signal type (bypass fusion decision)
+python manage.py dev_signal_cycle --date 2026-06-10 --force-signal CALL --notify
+
+# Full cycle including paper trade (requires option chain data)
+python manage.py dev_signal_cycle --date 2026-06-10 --force-signal MVRV_SHORT --notify --paper-trade
+
+# Skip trade setup (just signal + notification)
+python manage.py dev_signal_cycle --date 2026-06-10 --force-signal PUT --notify --no-setup
+```
+
+**What it does (5 steps):**
+
+| Step | Action | Requires |
+|------|--------|----------|
+| 1. Generate Signal | Runs fusion + ML + overlays for the date | RawDailyData for date |
+| 2. Persist Signal | Saves DailySignal to DB | — |
+| 3. Build Trade Setup | Selects options from chain, computes spread | OptionSnapshot data |
+| 4. Telegram Notify | Sends signal + setup message | TELEGRAM_BOT_TOKEN |
+| 5. Paper Trade | Opens OptionTrade for PnL tracking | OptionSnapshot data |
+
+**When option chain data is missing:** Steps 1-2 and 4 still work. Steps 3 and 5 report a warning and skip gracefully. To populate option data:
+
+```bash
+# Collect fresh Deribit snapshots (for today/recent dates)
+python manage.py collect_options --exchange deribit
+
+# Then run the full cycle
+python manage.py dev_signal_cycle --date 2026-06-12 --notify --paper-trade
+```
+
+**Typical daily dev flow:**
+```bash
+# 1. Collect fresh option chain
+python manage.py collect_options --exchange deribit --dte-min 7 --dte-max 21
+
+# 2. Run full cycle for today
+python manage.py dev_signal_cycle --date 2026-06-12 --notify --paper-trade
+
+# 3. Or test a new signal type you're developing
+python manage.py dev_signal_cycle --date 2026-06-12 --force-signal BEAR_CALL_SPREAD --notify
+```
+
 ### Training
 
 ```bash
@@ -832,6 +885,7 @@ BYBIT_API_SECRET=your_api_secret
 | `signals/services.py` | SignalService for scoring + persistence |
 | `signals/income_gate.py` | **Bull put spread & bear call spread income gates** |
 | `signals/management/commands/manual_setup.py` | **Manual trade setup for any signal type** |
+| `signals/management/commands/dev_signal_cycle.py` | **Full dev lifecycle: signal → persist → setup → notify → paper trade** |
 | `execution/services/policy.py` | Data-driven policy engine |
 | `execution/services/trade_setup.py` | Automated trade construction |
 | `execution/services/trade_validator.py` | 11 pre-flight validation checks |
