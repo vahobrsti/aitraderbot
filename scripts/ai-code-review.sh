@@ -112,7 +112,7 @@ elif COMMITS_LINE=$(grep 'COMMITS:' "$CONTEXT_FILE" 2>/dev/null | head -1 | sed 
       COMMIT_LIST="$VALID_COMMITS"
       echo "Using cherry-picked commits from implementation-context.md:"
       for h in $COMMIT_LIST; do
-        git log --oneline -1 "$h" 2>/dev/null || echo "  $h (no message)"
+        git --no-pager log --oneline -1 "$h" 2>/dev/null || echo "  $h (no message)"
       done
     fi
   fi
@@ -166,7 +166,7 @@ elif [ "$DIFF_MODE" = "range" ]; then
   echo ""
   echo "Review scope: $BASE_REF..HEAD (+ working tree)"
   echo "Commits in range:"
-  git log --oneline "$BASE_REF"..HEAD 2>/dev/null || echo "  (none — only uncommitted changes)"
+  git --no-pager log --oneline "$BASE_REF"..HEAD 2>/dev/null || echo "  (none — only uncommitted changes)"
   echo ""
 fi
 
