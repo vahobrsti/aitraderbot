@@ -66,8 +66,6 @@ class TelegramNotifier:
             raise ValueError("TELEGRAM_BOT_TOKEN not set")
         if not self.chat_id:
             raise ValueError("TELEGRAM_CHAT_ID not set")
-        
-        self.bot = Bot(token=self.bot_token)
     
     def _get_decision_emoji(self, decision: str) -> str:
         """Map trade decision to emoji."""
@@ -101,7 +99,6 @@ class TelegramNotifier:
         
         # Escape underscores for Telegram Markdown
         safe_decision = signal.trade_decision.replace("_", "\\_")
-        safe_state = signal.fusion_state.replace("_", "\\_")
         
         # Header - different for vetoed signals
         if signal.overlay_veto:
@@ -113,7 +110,9 @@ class TelegramNotifier:
             msg += f"📅 {signal.date}\n\n"
         
         # Market State
-        msg += f"*Fusion State:* `{safe_state}`\n"
+        # fusion_state goes inside a code span (backticks); underscores are
+        # literal there, so do NOT escape — escaping renders a literal backslash.
+        msg += f"*Fusion State:* `{signal.fusion_state}`\n"
         msg += f"*Score:* {signal.fusion_score:+d} {confidence_emoji} ({signal.fusion_confidence})\n"
         
         # Score breakdown (if available)
