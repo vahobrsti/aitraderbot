@@ -20,7 +20,7 @@
    - Use multiple commits if changes are logically distinct
    - Do **not** use `git commit --amend` or `git push --force` unless the user explicitly asks
 2. **Declare completion** — Say "Implementation complete" and summarize what changed.
-3. **Update context file** — Write `.ai-reviews/implementation-context.md` with a `COMMITS:` header listing the hashes you just created (see format below).
+3. **Update context file** — Write `.ai-reviews/implementation-context.md` with a `COMMITS:` header listing all task commits not yet reviewed — relevant ones only (see format below).
 4. **Do not self-review** — The human decides whether to run a review. Do not trigger `ai-code-review.sh` yourself.
 
 ## Review Workflow
@@ -28,15 +28,19 @@
 ### Context File Format
 Update `.ai-reviews/implementation-context.md` with:
 
-1. A **commit scope header** — REQUIRED. Without it the review script will exit with an error. Prefer `COMMITS:` listing the exact hashes you created:
+1. A **commit scope header** — REQUIRED. Without it the review script will exit with an error. Prefer `COMMITS:` listing **every commit that belongs to this task and has not yet been reviewed — not just the latest commit**:
    ```
    COMMITS: <hash1> <hash2> <hash3>
    ```
+   - If a fix spans multiple commits (e.g. a partial fix plus a follow-up completion, or work across several turns), list all of them.
+   - Carry forward any earlier task commit that has not yet been through a review.
+   - **Only include commits relevant to the current task.** Do not list unrelated commits that happen to be recent — verify each hash is part of this change before adding it.
+
    Use `BASE_COMMIT:` only when reviewing a contiguous range against a known base:
    ```
    BASE_COMMIT: <hash>
    ```
-   Run `git log --oneline --no-merges -10` to identify your commits.
+   Run `git log --oneline --no-merges -10` to identify your task commits, then include all of them since the last completed review.
 
 2. A brief context body (max 10 bullets) covering:
    - Purpose of the change

@@ -66,8 +66,6 @@ class TelegramNotifier:
             raise ValueError("TELEGRAM_BOT_TOKEN not set")
         if not self.chat_id:
             raise ValueError("TELEGRAM_CHAT_ID not set")
-        
-        self.bot = Bot(token=self.bot_token)
     
     def _get_decision_emoji(self, decision: str) -> str:
         """Map trade decision to emoji."""
@@ -99,21 +97,22 @@ class TelegramNotifier:
         decision_emoji = self._get_decision_emoji(signal.trade_decision)
         confidence_emoji = self._get_confidence_emoji(signal.fusion_confidence)
         
-        # Escape underscores for Telegram Markdown
-        safe_decision = signal.trade_decision.replace("_", "\\_")
-        safe_state = signal.fusion_state.replace("_", "\\_")
-        
         # Header - different for vetoed signals
+        # Decision/state names contain underscores. Telegram legacy Markdown does
+        # NOT support backslash escaping, so render these inside code spans
+        # (backticks) where underscores are literal.
         if signal.overlay_veto:
             msg = f"⛔ *SIGNAL VETOED*\n"
             msg += f"📅 {signal.date}\n\n"
             msg += f"⚠️ *Veto Reason:* `{signal.overlay_reason}`\n\n"
         else:
-            msg = f"{decision_emoji} *{safe_decision}* Signal\n"
+            msg = f"{decision_emoji} `{signal.trade_decision}` Signal\n"
             msg += f"📅 {signal.date}\n\n"
         
         # Market State
-        msg += f"*Fusion State:* `{safe_state}`\n"
+        # fusion_state goes inside a code span (backticks); underscores are
+        # literal there, so do NOT escape — escaping renders a literal backslash.
+        msg += f"*Fusion State:* `{signal.fusion_state}`\n"
         msg += f"*Score:* {signal.fusion_score:+d} {confidence_emoji} ({signal.fusion_confidence})\n"
         
         # Score breakdown (if available)
@@ -185,21 +184,28 @@ class TelegramNotifier:
         parts.append(f"*Fusion State:* `{signal.fusion_state}`")
         parts.append(f"*Score:* {signal.fusion_score:+d} ({signal.fusion_confidence})")
         parts.append("")
-        parts.append(f"📈 p\\_long: `{signal.p_long:.1%}`")
-        parts.append(f"📉 p\\_short: `{signal.p_short:.1%}`")
+        parts.append(f"📈 Long: `{signal.p_long:.1%}`")
+        parts.append(f"📉 Short: `{signal.p_short:.1%}`")
         parts.append("")
         parts.append("_Rule-based signal (not fusion). Use as supplementary alert._")
         
         return "\n".join(parts)
     
     async def _send_async(self, message: str) -> bool:
-        """Async send message via Telegram API."""
+        """Async send message via Telegram API.
+
+        Constructs a fresh Bot bound to the current event loop and manages its
+        lifecycle with ``async with``. This keeps each send self-contained so a
+        single process can send multiple messages (e.g. signal + setup) without
+        reusing a connection pool tied to an already-closed asyncio.run() loop.
+        """
         try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            async with Bot(token=self.bot_token) as bot:
+                await bot.send_message(
+                    chat_id=self.chat_id,
+                    text=message,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
             return True
         except Exception as e:
             print(f"Telegram send error: {e}")
@@ -263,10 +269,9 @@ class TelegramNotifier:
             True if sent successfully, False otherwise.
         """
         emoji = "🟢" if signal_type == "BULL_PUT_SPREAD" else "🔴"
-        safe_type = signal_type.replace("_", "\\_")
 
         lines = [
-            f"{emoji} *{safe_type}* Income Signal",
+            f"{emoji} `{signal_type}` Income Signal",
             f"📅 {signal_date}",
             f"*Gate Score:* {score:.0f}/100",
             "",

@@ -169,6 +169,19 @@ class Command(BaseCommand):
             self.stdout.write("  [skipped — --no-setup flag]")
         elif target_result.trade_decision == "NO_TRADE":
             self.stdout.write("  [skipped — NO_TRADE signal]")
+        elif target_result.trade_decision in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"):
+            # Income spreads are produced by the income gate, not TradeSetupBuilder.
+            # The risk-tiered setups are already attached to the SignalResult.
+            income_setups = target_result.income_spread_setups or []
+            if income_setups:
+                setup_available = True
+                self._print_income_setups(target_result)
+                # TradeSetupSnapshot persistence is handled by notifier.send_from_model
+            else:
+                self.stdout.write(self.style.WARNING(
+                    "  ⚠ Income gate produced no tradable spreads for this date.\n"
+                    "    (regime may be eligible, but no chain setup passed the filters)"
+                ))
         else:
             setup = self._build_setup(target_date, target_result.trade_decision, verbose)
             if setup:
@@ -214,6 +227,10 @@ class Command(BaseCommand):
             self.stdout.write("  [skipped — --paper-trade not set]")
         elif dry_run:
             self.stdout.write("  [skipped — dry run]")
+        elif target_result.trade_decision in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"):
+            self.stdout.write(self.style.WARNING(
+                "  ⚠ Paper trade not supported for income spreads via this command."
+            ))
         elif not setup_available:
             self.stdout.write(self.style.WARNING(
                 "  ⚠ Cannot open paper trade without option chain data.\n"
@@ -378,6 +395,26 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(
                 f"  ⚠ Warnings: {', '.join(setup.validation_warnings)}"
             ))
+
+    def _print_income_setups(self, result):
+        """Print income spread risk-tiered setups (sourced from the income gate)."""
+        is_put = result.trade_decision == "BULL_PUT_SPREAD"
+        short_label = "Short Put " if is_put else "Short Call"
+        long_label = "Long Put  " if is_put else "Long Call "
+        self.stdout.write(f"  Income gate score: {result.income_spread_score:.0f}/100")
+        self.stdout.write(f"  Tradable setups:   {len(result.income_spread_setups)}")
+        tier_labels = {"low": "🟢 LOW RISK", "medium": "🟡 MEDIUM RISK", "high": "🔴 HIGH RISK"}
+        for s in result.income_spread_setups:
+            tier = tier_labels.get(s.get("risk_tier"), str(s.get("risk_tier")).upper())
+            delta = s.get("short_delta", 0)
+            pop = (1 - delta) * 100
+            self.stdout.write(f"\n  {tier} (Δ{delta:.2f}, ~{pop:.0f}% POP)")
+            self.stdout.write(f"    {short_label}: ${s['short_strike']:,.0f} ({s['otm_pct']*100:.1f}% OTM)")
+            self.stdout.write(f"    {long_label}: ${s['long_strike']:,.0f}")
+            self.stdout.write(f"    Width:      ${s['spread_width']:,.0f}")
+            self.stdout.write(f"    Credit:     ${s['credit']:,.2f} ({s['credit_width_pct']*100:.1f}% of width)")
+            self.stdout.write(f"    Max Loss:   ${s['max_loss']:,.2f}")
+            self.stdout.write(f"    DTE:        {s['dte']}d | R:R: 1:{s['risk_reward']:.2f}")
 
     def _send_notification(self, signal, setup_available: bool):
         """Send Telegram notification."""
