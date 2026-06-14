@@ -10,7 +10,7 @@ from typing import Optional
 import joblib
 import pandas as pd
 
-from datafeed.models import RawDailyData
+from datafeed.models import RawDailyData, OptionSnapshot
 from features.feature_builder import build_features_and_labels_from_raw
 from signals.models import DailySignal
 
@@ -51,6 +51,7 @@ from signals.tactical_puts import tactical_put_inside_bull
 from signals.options import get_strategy_with_path_risk, get_decision_strategy_summary, DECISION_STRATEGY_MAP, format_stop_loss_string, compute_condor_strikes
 from signals.mvrv_short import check_mvrv_short_signal
 from signals.condor_gate import evaluate_condor_gate, CondorGateResult, CONDOR_COOLDOWN_DAYS, compute_vol_metrics
+from signals.income_gate import evaluate_bull_put_gate, evaluate_bear_call_gate, IncomeGateConfig
 from execution.services.policy import get_policy
 
 # Cooldown constants — single source of truth for live + backtest alignment
@@ -1070,6 +1071,80 @@ class SignalService:
             trace = [f"condor_gate=eligible(score={condor_gate.score:.0f})"]
             notes = f"Range gate: score={condor_gate.score:.0f}, chop state"
             results.append(_build_result("IRON_CONDOR", notes, [], trace, 0.50, 0.50))
+
+        # Gate 6: Income credit spreads (BULL_PUT_SPREAD / BEAR_CALL_SPREAD)
+        # Lowest-priority fallback: the gate self-vetoes when a higher-priority
+        # signal or the condor gate is active, so income only fires on otherwise
+        # quiet days. Requires option chain data to produce tradable setups.
+        income_config = IncomeGateConfig()
+        income_spot = getattr(raw_data, "btc_close", None) if raw_data else None
+        income_chain_df = None
+        chain_records = list(
+            OptionSnapshot.objects.filter(
+                timestamp__date=latest_date, underlying="BTC",
+            ).values("strike", "option_type", "delta", "bid", "ask", "dte", "spread_pct", "spot_price")
+        )
+        if chain_records:
+            income_chain_df = pd.DataFrame.from_records(chain_records)
+            for col in ("strike", "delta", "bid", "ask", "dte", "spread_pct", "spot_price"):
+                income_chain_df[col] = income_chain_df[col].apply(
+                    lambda x: float(x) if x is not None else None
+                )
+            if income_spot is None and not income_chain_df.empty:
+                income_spot = float(income_chain_df["spot_price"].iloc[0])
+
+        def _attach_income(res, gate):
+            res.income_spread_score = gate.score
+            res.income_spread_eligible = gate.eligible
+            res.income_spread_veto_reasons = gate.veto_reasons or []
+            res.income_spread_setups = [
+                {
+                    "risk_tier": s.risk_tier,
+                    "short_strike": s.short_strike,
+                    "long_strike": s.long_strike,
+                    "credit": s.credit,
+                    "spread_width": s.spread_width,
+                    "dte": s.dte,
+                    "max_loss": s.max_loss,
+                    "short_delta": s.short_delta,
+                    "credit_width_pct": s.credit_width_pct,
+                    "otm_pct": s.otm_pct,
+                    "risk_reward": s.risk_reward,
+                }
+                for s in gate.setups
+            ]
+            return res
+
+        if income_chain_df is not None and income_spot:
+            higher_priority_active = any(r.trade_decision != "NO_TRADE" for r in results)
+
+            if self._check_trade_cooldown(latest_date, "BULL_PUT_SPREAD", income_config.cooldown_days):
+                bull_gate = evaluate_bull_put_gate(
+                    row_with_mvrv, chain_df=income_chain_df, spot_price=income_spot,
+                    config=income_config, atr_ratio=atr_ratio,
+                    fusion_state=fusion_result.state.value,
+                    higher_priority_active=higher_priority_active,
+                    condor_eligible=condor_gate.eligible,
+                )
+                if bull_gate.eligible:
+                    trace = [f"income_bull_put=eligible(score={bull_gate.score:.0f})"]
+                    notes = f"Income gate: bull put spread (score={bull_gate.score:.0f})"
+                    res = _build_result("BULL_PUT_SPREAD", notes, [], trace, 0.50, 0.50)
+                    results.append(_attach_income(res, bull_gate))
+
+            if self._check_trade_cooldown(latest_date, "BEAR_CALL_SPREAD", income_config.cooldown_days):
+                bear_gate = evaluate_bear_call_gate(
+                    row_with_mvrv, chain_df=income_chain_df, spot_price=income_spot,
+                    config=income_config, atr_ratio=atr_ratio,
+                    fusion_state=fusion_result.state.value,
+                    higher_priority_active=higher_priority_active,
+                    condor_eligible=condor_gate.eligible,
+                )
+                if bear_gate.eligible:
+                    trace = [f"income_bear_call=eligible(score={bear_gate.score:.0f})"]
+                    notes = f"Income gate: bear call spread (score={bear_gate.score:.0f})"
+                    res = _build_result("BEAR_CALL_SPREAD", notes, [], trace, 0.50, 0.50)
+                    results.append(_attach_income(res, bear_gate))
 
         # If nothing qualified, return NO_TRADE
         if not results:
