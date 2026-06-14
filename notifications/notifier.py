@@ -97,16 +97,16 @@ class TelegramNotifier:
         decision_emoji = self._get_decision_emoji(signal.trade_decision)
         confidence_emoji = self._get_confidence_emoji(signal.fusion_confidence)
         
-        # Escape underscores for Telegram Markdown
-        safe_decision = signal.trade_decision.replace("_", "\\_")
-        
         # Header - different for vetoed signals
+        # Decision/state names contain underscores. Telegram legacy Markdown does
+        # NOT support backslash escaping, so render these inside code spans
+        # (backticks) where underscores are literal.
         if signal.overlay_veto:
             msg = f"⛔ *SIGNAL VETOED*\n"
             msg += f"📅 {signal.date}\n\n"
             msg += f"⚠️ *Veto Reason:* `{signal.overlay_reason}`\n\n"
         else:
-            msg = f"{decision_emoji} *{safe_decision}* Signal\n"
+            msg = f"{decision_emoji} `{signal.trade_decision}` Signal\n"
             msg += f"📅 {signal.date}\n\n"
         
         # Market State
@@ -184,8 +184,8 @@ class TelegramNotifier:
         parts.append(f"*Fusion State:* `{signal.fusion_state}`")
         parts.append(f"*Score:* {signal.fusion_score:+d} ({signal.fusion_confidence})")
         parts.append("")
-        parts.append(f"📈 p\\_long: `{signal.p_long:.1%}`")
-        parts.append(f"📉 p\\_short: `{signal.p_short:.1%}`")
+        parts.append(f"📈 Long: `{signal.p_long:.1%}`")
+        parts.append(f"📉 Short: `{signal.p_short:.1%}`")
         parts.append("")
         parts.append("_Rule-based signal (not fusion). Use as supplementary alert._")
         
@@ -269,10 +269,9 @@ class TelegramNotifier:
             True if sent successfully, False otherwise.
         """
         emoji = "🟢" if signal_type == "BULL_PUT_SPREAD" else "🔴"
-        safe_type = signal_type.replace("_", "\\_")
 
         lines = [
-            f"{emoji} *{safe_type}* Income Signal",
+            f"{emoji} `{signal_type}` Income Signal",
             f"📅 {signal_date}",
             f"*Gate Score:* {score:.0f}/100",
             "",
