@@ -118,7 +118,7 @@ class DailySignal(models.Model):
         help_text="Recommended option structures (e.g., long_call, call_spread)"
     )
     strike_guidance = models.CharField(
-        max_length=30,
+        max_length=200,
         blank=True,
         default="",
         help_text="Strike selection guidance (e.g., atm, slight_otm)"
