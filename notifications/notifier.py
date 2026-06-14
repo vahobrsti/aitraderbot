@@ -193,13 +193,20 @@ class TelegramNotifier:
         return "\n".join(parts)
     
     async def _send_async(self, message: str) -> bool:
-        """Async send message via Telegram API."""
+        """Async send message via Telegram API.
+
+        Constructs a fresh Bot bound to the current event loop and manages its
+        lifecycle with ``async with``. This keeps each send self-contained so a
+        single process can send multiple messages (e.g. signal + setup) without
+        reusing a connection pool tied to an already-closed asyncio.run() loop.
+        """
         try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            async with Bot(token=self.bot_token) as bot:
+                await bot.send_message(
+                    chat_id=self.chat_id,
+                    text=message,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
             return True
         except Exception as e:
             print(f"Telegram send error: {e}")
