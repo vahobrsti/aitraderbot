@@ -4,7 +4,7 @@ Utility functions for execution app.
 import os
 from typing import Optional
 from execution.models import ExchangeAccount
-from execution.exchanges import BybitAdapter, DeribitAdapter
+from execution.exchanges import DeribitAdapter
 from execution.exchanges.base import ExchangeAdapter
 
 
@@ -20,7 +20,6 @@ def get_adapter(account: ExchangeAccount) -> ExchangeAdapter:
         raise ValueError(f"Missing credentials for {account.name}")
     
     adapters = {
-        'bybit': BybitAdapter,
         'deribit': DeribitAdapter,
     }
     
@@ -31,7 +30,7 @@ def get_adapter(account: ExchangeAccount) -> ExchangeAdapter:
     return adapter_class(api_key, api_secret, account.is_testnet)
 
 
-def get_default_account(exchange: str = 'bybit') -> Optional[ExchangeAccount]:
+def get_default_account(exchange: str = 'deribit') -> Optional[ExchangeAccount]:
     """Get the default active account for an exchange."""
     return ExchangeAccount.objects.filter(
         exchange=exchange,

@@ -18,7 +18,7 @@ from django.utils import timezone
 from execution.models import (
     ExchangeAccount, ExecutionIntent, Order, Fill, Position, ExecutionEvent
 )
-from execution.exchanges import BybitAdapter, DeribitAdapter
+from execution.exchanges import DeribitAdapter
 from execution.exchanges.base import OrderRequest, ExchangeAdapter
 from .risk import RiskManager, RiskCheckResult
 
@@ -51,9 +51,7 @@ class ExecutionOrchestrator:
                 f"Missing credentials: {self.account.api_key_env} or {self.account.api_secret_env}"
             )
         
-        if self.account.exchange == 'bybit':
-            return BybitAdapter(api_key, api_secret, self.account.is_testnet)
-        elif self.account.exchange == 'deribit':
+        if self.account.exchange == 'deribit':
             return DeribitAdapter(api_key, api_secret, self.account.is_testnet)
         else:
             raise ValueError(f"Unsupported exchange: {self.account.exchange}")
@@ -303,27 +301,9 @@ class ExecutionOrchestrator:
         lot_size = instrument.lot_size or Decimal('0.1')
         min_qty = instrument.min_qty or Decimal('0.1')
         
-        # Try to get mark price
-        mark_price = None
-        try:
-            if self.account.exchange == 'bybit' and intent.target_symbol:
-                ticker = self.adapter.session.get_tickers(
-                    category='option',
-                    symbol=intent.target_symbol
-                )
-                if ticker.get('retCode') == 0:
-                    tickers = ticker.get('result', {}).get('list', [])
-                    if tickers:
-                        mark_price = Decimal(tickers[0].get('markPrice', '0'))
-        except Exception as e:
-            logger.warning(f"Could not fetch mark price: {e}")
-        
-        if mark_price and mark_price > 0:
-            qty = target_notional / mark_price
-        else:
-            # Fallback: estimate 5% premium
-            estimated_premium = target_notional * Decimal('0.05')
-            qty = target_notional / max(estimated_premium, Decimal('100'))
+        # Estimate qty from a 5% premium assumption
+        estimated_premium = target_notional * Decimal('0.05')
+        qty = target_notional / max(estimated_premium, Decimal('100'))
         
         qty = (qty / lot_size).quantize(Decimal('1')) * lot_size
         qty = max(qty, min_qty)

@@ -187,7 +187,7 @@ class ExchangeAdapter(ABC):
     def normalize_symbol(self, symbol: str) -> str:
         """
         Convert internal symbol format to exchange-specific format.
-        E.g., 'BTC-USDT-PERP' -> 'BTCUSDT' (Bybit) or 'BTC-PERPETUAL' (Deribit)
+        E.g., 'BTC-USD-PERP' -> 'BTC-PERPETUAL' (Deribit)
         """
         pass
     

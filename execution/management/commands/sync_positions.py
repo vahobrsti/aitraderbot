@@ -3,7 +3,7 @@ Management command to sync positions from exchange.
 Run periodically via cron or scheduler.
 
 Usage:
-    python manage.py sync_positions --account bybit-main
+    python manage.py sync_positions --account deribit-main
     python manage.py sync_positions --all
 """
 from django.core.management.base import BaseCommand, CommandError

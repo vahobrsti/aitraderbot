@@ -1,2 +1,2 @@
-# Execution app - Exchange integration for Bybit and Deribit
+# Execution app - Exchange integration for Deribit
 default_app_config = 'execution.apps.ExecutionConfig'

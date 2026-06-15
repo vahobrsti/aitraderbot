@@ -13,7 +13,6 @@ class ExchangeAccount(models.Model):
     Supports multiple accounts per exchange (e.g., testnet vs mainnet).
     """
     EXCHANGE_CHOICES = [
-        ('bybit', 'Bybit'),
         ('deribit', 'Deribit'),
     ]
     ACCOUNT_TYPE_CHOICES = [
@@ -30,7 +29,7 @@ class ExchangeAccount(models.Model):
     # Credentials stored encrypted in env or secrets manager - these are references
     api_key_env = models.CharField(
         max_length=100, 
-        help_text="Environment variable name for API key (e.g., BYBIT_API_KEY)"
+        help_text="Environment variable name for API key (e.g., DERIBIT_API_KEY)"
     )
     api_secret_env = models.CharField(
         max_length=100,

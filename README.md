@@ -842,13 +842,15 @@ python manage.py analyze_mvrv_short --today
 | Trade Type | Cooldown |
 |------------|----------|
 | CALL / PUT | 7 days |
-| BULL_PROBE / BEAR_PROBE | 5 days |
+| BULL_PROBE / BEAR_PROBE | 7 days (shares the CALL / PUT timer) |
 | TACTICAL_PUT | 7 days |
 | OPTION_CALL / OPTION_PUT | 5 days |
 | MVRV_SHORT | 5 days |
 | IRON_CONDOR | 5 days |
 | BULL_PUT_SPREAD | 5 days |
 | BEAR_CALL_SPREAD | 5 days |
+
+> **Probe cooldown:** In live execution, `BULL_PROBE`/`BEAR_PROBE` are recorded as `CALL`/`PUT` and gated by the 7-day `CORE_SIGNAL_COOLDOWN_DAYS`, so they share the core CALL/PUT timer. The separate 5-day `PROBE_COOLDOWN_DAYS` constant is only applied in the backtest/analysis commands (`analyze_path_stats.py`, `analyze_hit_rate.py`, `analyze_loser_recovery.py`).
 
 ### Environment Variables
 
