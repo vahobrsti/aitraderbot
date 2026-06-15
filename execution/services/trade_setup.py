@@ -419,20 +419,22 @@ class TradeSetup:
         
         if self.direction == "NEUTRAL" and self.extra_legs:
             # Iron condor: 4-leg credit structure
+            # Legacy Telegram Markdown treats "." as a literal — do NOT escape
+            # it; a backslash would render verbatim (e.g. "1\.").
             lines.extend([
-                f"1\\. Sell: `{self.long_leg.symbol}` × {self.contracts} (short call)",
-                f"2\\. Sell: `{self.short_leg.symbol}` × {self.contracts} (short put)",
+                f"1. Sell: `{self.long_leg.symbol}` × {self.contracts} (short call)",
+                f"2. Sell: `{self.short_leg.symbol}` × {self.contracts} (short put)",
             ])
             for i, leg in enumerate(self.extra_legs, start=3):
                 leg_label = "long call wing" if leg.strike > self.long_leg.strike else "long put wing"
-                lines.append(f"{i}\\. Buy: `{leg.symbol}` × {self.contracts} ({leg_label})")
-            lines.append(f"{len(self.extra_legs) + 3}\\. Limit: `${abs(self.net_debit):,.2f}` net credit")
+                lines.append(f"{i}. Buy: `{leg.symbol}` × {self.contracts} ({leg_label})")
+            lines.append(f"{len(self.extra_legs) + 3}. Limit: `${abs(self.net_debit):,.2f}` net credit")
         else:
             # Standard 2-leg debit spread
-            lines.append(f"1\\. Buy: `{self.long_leg.symbol}` × {self.contracts}")
+            lines.append(f"1. Buy: `{self.long_leg.symbol}` × {self.contracts}")
             if self.short_leg:
-                lines.append(f"2\\. Sell: `{self.short_leg.symbol}` × {self.contracts}")
-                lines.append(f"3\\. Limit: `${self.net_debit:,.2f}` debit")
+                lines.append(f"2. Sell: `{self.short_leg.symbol}` × {self.contracts}")
+                lines.append(f"3. Limit: `${self.net_debit:,.2f}` debit")
         
         return "\n".join(lines)
     
