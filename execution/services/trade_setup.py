@@ -540,12 +540,19 @@ class TradeSetupBuilder:
         tier = self.policy.get_tier(signal_type)
         risk_budget = tier.risk_usd * tier.spread_pct
         
-        # Get option snapshots
+        # Get option snapshots. Resolve a DTE band that contains listed
+        # expiries (falls back to nearest expiry when the calibrated window
+        # lands in a gap between weekly listings).
+        dte_band = self._resolve_dte_band(signal_date, dte_cfg, option_type)
+        if dte_band is None:
+            return None
+        dte_lo, dte_hi = dte_band
+
         latest_ts = OptionSnapshot.objects.filter(
             timestamp__date=signal_date,
             option_type=option_type,
-            dte__gte=dte_cfg.min_dte,
-            dte__lte=dte_cfg.max_dte,
+            dte__gte=dte_lo,
+            dte__lte=dte_hi,
         ).aggregate(Max('timestamp'))['timestamp__max']
         
         if not latest_ts:
@@ -554,8 +561,8 @@ class TradeSetupBuilder:
         options = list(OptionSnapshot.objects.filter(
             timestamp=latest_ts,
             option_type=option_type,
-            dte__gte=dte_cfg.min_dte,
-            dte__lte=dte_cfg.max_dte,
+            dte__gte=dte_lo,
+            dte__lte=dte_hi,
         ))
         
         if not options:
@@ -742,6 +749,48 @@ class TradeSetupBuilder:
             policy_version=self.policy.version,
         )
     
+    def _resolve_dte_band(
+        self,
+        signal_date: date,
+        dte_cfg,
+        option_type: Optional[str] = None,
+    ) -> Optional[tuple[float, float]]:
+        """
+        Resolve a DTE band that is guaranteed to contain listed options.
+
+        Returns the calibrated policy window (min_dte, max_dte) when at least
+        one expiry falls inside it. Deribit lists discrete weekly/monthly
+        expiries, so a narrow calibrated window often falls in the gap between
+        two listings (e.g. window 8-12 with expiries at 6d and 13d). In that
+        case, snap to the nearest available expiry's DTE so a setup can still
+        be built instead of returning None.
+
+        Args:
+            signal_date: Date of the option snapshots.
+            dte_cfg: Policy DTE target with .min_dte / .max_dte.
+            option_type: "call"/"put" to scope, or None for any (condor).
+
+        Returns:
+            (lo, hi) DTE bounds, or None if no options exist for the date.
+        """
+        base = OptionSnapshot.objects.filter(timestamp__date=signal_date)
+        if option_type:
+            base = base.filter(option_type=option_type)
+
+        # Preferred: calibrated window contains listed options.
+        if base.filter(dte__gte=dte_cfg.min_dte, dte__lte=dte_cfg.max_dte).exists():
+            return (float(dte_cfg.min_dte), float(dte_cfg.max_dte))
+
+        # Fallback: snap to the nearest available expiry by DTE midpoint.
+        dtes = sorted({float(d) for d in base.values_list("dte", flat=True) if d is not None})
+        if not dtes:
+            return None
+        midpoint = (float(dte_cfg.min_dte) + float(dte_cfg.max_dte)) / 2.0
+        nearest = min(dtes, key=lambda x: abs(x - midpoint))
+        # Half-day band isolates the single nearest expiry (all strikes at one
+        # expiry share the same DTE at a given snapshot timestamp).
+        return (nearest - 0.5, nearest + 0.5)
+
     def _get_direction_and_type(self, signal_type: str) -> tuple[Optional[str], Optional[str]]:
         """Map signal type to direction and option type."""
         mapping = {
@@ -932,11 +981,18 @@ class TradeSetupBuilder:
             target_short_call = spot_price * (1 + condor_cfg.spot_call_band)
             target_short_put = spot_price * (1 - condor_cfg.spot_put_band)
         
-        # Get latest timestamp for options on signal date
+        # Get latest timestamp for options on signal date. Resolve a DTE band
+        # over both option types so calls and puts share the same expiry even
+        # when the calibrated window falls between weekly listings.
+        dte_band = self._resolve_dte_band(signal_date, dte_cfg, option_type=None)
+        if dte_band is None:
+            return None
+        dte_lo, dte_hi = dte_band
+
         latest_ts = OptionSnapshot.objects.filter(
             timestamp__date=signal_date,
-            dte__gte=dte_cfg.min_dte,
-            dte__lte=dte_cfg.max_dte,
+            dte__gte=dte_lo,
+            dte__lte=dte_hi,
         ).aggregate(Max('timestamp'))['timestamp__max']
         
         if not latest_ts:
@@ -946,16 +1002,16 @@ class TradeSetupBuilder:
         call_options = list(OptionSnapshot.objects.filter(
             timestamp=latest_ts,
             option_type="call",
-            dte__gte=dte_cfg.min_dte,
-            dte__lte=dte_cfg.max_dte,
+            dte__gte=dte_lo,
+            dte__lte=dte_hi,
         ))
         
         # Get put options
         put_options = list(OptionSnapshot.objects.filter(
             timestamp=latest_ts,
             option_type="put",
-            dte__gte=dte_cfg.min_dte,
-            dte__lte=dte_cfg.max_dte,
+            dte__gte=dte_lo,
+            dte__lte=dte_hi,
         ))
         
         if not call_options or not put_options:
