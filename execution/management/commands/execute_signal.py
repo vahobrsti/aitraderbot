@@ -3,8 +3,8 @@ Management command to execute a signal.
 Creates ExecutionIntent from DailySignal and processes through exchange.
 
 Usage:
-    python manage.py execute_signal --date 2024-01-15 --account bybit-main
-    python manage.py execute_signal --latest --account bybit-main --dry-run
+    python manage.py execute_signal --date 2024-01-15 --account deribit-main
+    python manage.py execute_signal --latest --account deribit-main --dry-run
 """
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone

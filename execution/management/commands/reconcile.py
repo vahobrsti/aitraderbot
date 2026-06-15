@@ -3,7 +3,7 @@ Reconciliation job: sync exchange state with database.
 Run periodically to catch missed fills, position changes, etc.
 
 Usage:
-    python manage.py reconcile --account bybit-main
+    python manage.py reconcile --account deribit-main
     python manage.py reconcile --all
 """
 from django.core.management.base import BaseCommand, CommandError

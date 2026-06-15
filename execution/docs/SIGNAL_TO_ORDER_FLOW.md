@@ -13,7 +13,7 @@ DailySignal → ExecutionIntent → Risk Check → Instrument Selection → Orde
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  1. ENTRY POINT: execute_signal command                                     │
-│     python manage.py execute_signal --latest --account bybit-main           │
+│     python manage.py execute_signal --latest --account deribit-main         │
 │     File: execution/management/commands/execute_signal.py                   │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -67,16 +67,12 @@ DailySignal → ExecutionIntent → Risk Check → Instrument Selection → Orde
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  5. EXCHANGE ADAPTER: adapter.place_order(request)                          │
-│     File: execution/exchanges/bybit.py (or deribit.py)                      │
+│     File: execution/exchanges/deribit.py                                    │
 │                                                                             │
-│     Bybit place_order():                                                    │
-│     - Maps to Bybit V5 params: category, symbol, side, orderType, qty, etc. │
-│     - Calls: session.place_order(**params)  ← HTTP POST to Bybit API        │
+│     Deribit place_order():                                                  │
+│     - Maps OrderRequest to Deribit params: instrument_name, amount, type    │
+│     - Calls: private/buy or private/sell  ← HTTP request to Deribit API     │
 │     - Returns: OrderResponse with exchange_order_id or error                │
-│                                                                             │
-│     Bybit API endpoint: POST /v5/order/create                               │
-│     Required params: category, symbol, side, orderType, qty                 │
-│     Optional: price, triggerPrice, reduceOnly, orderLinkId, timeInForce     │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -94,7 +90,6 @@ DailySignal → ExecutionIntent → Risk Check → Instrument Selection → Orde
 | `execution/services/instrument_selector.py` | Reusable selector utilities |
 | `execution/services/order_builder.py` | Order plan construction |
 | `execution/services/position_manager.py` | Polling-based exit management |
-| `execution/exchanges/bybit.py` | Bybit V5 API adapter |
 | `execution/exchanges/deribit.py` | Deribit API adapter |
 | `execution/models.py` | ExecutionIntent, Order, Position |
 
@@ -110,33 +105,21 @@ decision_map = {
 }
 ```
 
-## Bybit Order Parameters
+## Order Parameters
 
-The `place_order` method in `bybit.py` maps to Bybit V5 API:
+The `place_order` method maps the internal `OrderRequest` to the adapter's API:
 
-| Our Param | Bybit Param | Notes |
-|-----------|-------------|-------|
-| `symbol` | `symbol` | e.g., BTC-26DEC25-100000-C |
-| `side` | `side` | Buy / Sell |
-| `order_type` | `orderType` | Market / Limit |
-| `qty` | `qty` | Contract quantity |
-| `price` | `price` | For limit orders |
-| `trigger_price` | `triggerPrice` | For conditional orders |
-| `time_in_force` | `timeInForce` | GTC / IOC / FOK / PostOnly |
-| `reduce_only` | `reduceOnly` | Close-only flag |
-| `client_order_id` | `orderLinkId` | Our internal reference |
-
-### Missing Parameters (Future)
-
-These Bybit params are not yet implemented:
-
-| Parameter | Purpose |
-|-----------|---------|
-| `positionIdx` | Required for hedge-mode |
-| `takeProfit` / `stopLoss` | Native TP/SL (not used for options) |
-| `triggerBy` | Price type for triggers (LastPrice/MarkPrice/IndexPrice) |
-| `closeOnTrigger` | Ensures stop closes position |
-| `isLeverage` | For spot margin |
+| Our Param | Notes |
+|-----------|-------|
+| `symbol` | e.g., BTC-26DEC25-100000-C |
+| `side` | buy / sell |
+| `order_type` | market / limit |
+| `qty` | Contract quantity |
+| `price` | For limit orders |
+| `trigger_price` | For conditional orders |
+| `time_in_force` | GTC / IOC / FOK / PostOnly |
+| `reduce_only` | Close-only flag |
+| `client_order_id` | Our internal reference |
 
 ## V1 Limitations
 
@@ -177,11 +160,11 @@ python manage.py execute_deribit --latest --account deribit-main
 
 ```bash
 # Dry run
-python manage.py execute_signal --latest --account bybit-prod --dry-run
+python manage.py execute_signal --latest --account deribit-main --dry-run
 
 # Execute
-python manage.py execute_signal --latest --account bybit-prod
+python manage.py execute_signal --latest --account deribit-main
 
 # Force re-execute (if intent exists)
-python manage.py execute_signal --date 2024-01-15 --account bybit-prod --force
+python manage.py execute_signal --date 2024-01-15 --account deribit-main --force
 ```

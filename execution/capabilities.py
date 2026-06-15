@@ -1,6 +1,6 @@
 """
 Exchange capability matrix for OPTIONS.
-Neither Bybit nor Deribit support native SL/TP for options.
+Deribit does not support native SL/TP for options.
 All exit management is polling-based via manage_exits command.
 """
 

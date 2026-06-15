@@ -27,18 +27,18 @@ class ExchangeAccountModelTests(TestCase):
     def test_create_account(self):
         """Test creating an exchange account."""
         account = ExchangeAccount.objects.create(
-            name='test-bybit',
-            exchange='bybit',
+            name='test-deribit',
+            exchange='deribit',
             account_type='unified',
-            api_key_env='BYBIT_API_KEY',
-            api_secret_env='BYBIT_API_SECRET',
+            api_key_env='DERIBIT_API_KEY',
+            api_secret_env='DERIBIT_API_SECRET',
             is_testnet=True,
             max_position_usd=Decimal('5000'),
             max_daily_loss_usd=Decimal('500'),
         )
-        self.assertEqual(account.exchange, 'bybit')
+        self.assertEqual(account.exchange, 'deribit')
         self.assertTrue(account.is_active)
-        self.assertEqual(str(account), 'test-bybit (bybit)')
+        self.assertEqual(str(account), 'test-deribit (deribit)')
     
     def test_account_defaults(self):
         """Test default values are set correctly."""
@@ -61,7 +61,7 @@ class ExecutionIntentModelTests(TestCase):
     def setUp(self):
         self.account = ExchangeAccount.objects.create(
             name='test-account',
-            exchange='bybit',
+            exchange='deribit',
             api_key_env='KEY',
             api_secret_env='SECRET',
         )
@@ -85,7 +85,7 @@ class OrderModelTests(TestCase):
     
     def setUp(self):
         self.account = ExchangeAccount.objects.create(
-            name='test', exchange='bybit',
+            name='test', exchange='deribit',
             api_key_env='KEY', api_secret_env='SECRET',
         )
     
@@ -120,7 +120,7 @@ class PositionModelTests(TestCase):
     
     def setUp(self):
         self.account = ExchangeAccount.objects.create(
-            name='test', exchange='bybit',
+            name='test', exchange='deribit',
             api_key_env='KEY', api_secret_env='SECRET',
         )
     
@@ -273,7 +273,7 @@ class RiskManagerTests(TestCase):
     def setUp(self):
         self.account = ExchangeAccount.objects.create(
             name='risk-test',
-            exchange='bybit',
+            exchange='deribit',
             api_key_env='KEY',
             api_secret_env='SECRET',
             is_active=True,
@@ -371,183 +371,6 @@ class RiskManagerTests(TestCase):
         
         result = self.risk_manager._check_open_positions(mock_intent)
         self.assertTrue(result.passed)
-
-
-# =============================================================================
-# BYBIT ADAPTER TESTS
-# =============================================================================
-
-class BybitAdapterTests(TestCase):
-    """Tests for Bybit exchange adapter."""
-    
-    def setUp(self):
-        self.adapter = None  # Will be created with mocked session
-    
-    @patch('execution.exchanges.bybit.BybitAdapter.session', new_callable=lambda: property(lambda self: Mock()))
-    def test_get_category_detection(self, mock_session):
-        """Test symbol category detection."""
-        from execution.exchanges.bybit import BybitAdapter
-        adapter = BybitAdapter('key', 'secret', testnet=True)
-        
-        self.assertEqual(adapter._get_category('BTCUSDT'), 'linear')
-        self.assertEqual(adapter._get_category('BTC-30JUN25-100000-C'), 'option')
-        self.assertEqual(adapter._get_category('BTC-30JUN25-100000-P'), 'option')
-        self.assertEqual(adapter._get_category('BTCUSD'), 'inverse')
-    
-    def test_order_type_mapping(self):
-        """Test order type mapping to Bybit format."""
-        from execution.exchanges.bybit import BybitAdapter
-        adapter = BybitAdapter('key', 'secret', testnet=True)
-        
-        self.assertEqual(adapter._map_order_type('market'), 'Market')
-        self.assertEqual(adapter._map_order_type('limit'), 'Limit')
-        self.assertEqual(adapter._map_order_type('stop_market'), 'Market')
-    
-    def test_status_mapping(self):
-        """Test Bybit status to internal status mapping."""
-        from execution.exchanges.bybit import BybitAdapter
-        adapter = BybitAdapter('key', 'secret', testnet=True)
-        
-        self.assertEqual(adapter._map_status('New'), 'open')
-        self.assertEqual(adapter._map_status('Filled'), 'filled')
-        self.assertEqual(adapter._map_status('Cancelled'), 'cancelled')
-        self.assertEqual(adapter._map_status('PartiallyFilled'), 'partial')
-    
-    def test_symbol_normalization(self):
-        """Test symbol format conversion."""
-        from execution.exchanges.bybit import BybitAdapter
-        adapter = BybitAdapter('key', 'secret', testnet=True)
-        
-        # Internal to Bybit
-        self.assertEqual(adapter.normalize_symbol('BTC-USDT-PERP'), 'BTCUSDT')
-        self.assertEqual(adapter.normalize_symbol('BTC-30JUN25-100000-C'), 'BTC-30JUN25-100000-C')
-        
-        # Bybit to internal
-        self.assertEqual(adapter.denormalize_symbol('BTCUSDT'), 'BTC-USDT-PERP')
-        self.assertEqual(adapter.denormalize_symbol('BTC-30JUN25-100000-C'), 'BTC-30JUN25-100000-C')
-    
-    @patch('execution.exchanges.bybit.BybitAdapter.session')
-    def test_place_order_success(self, mock_session):
-        """Test successful order placement."""
-        from execution.exchanges.bybit import BybitAdapter
-        
-        mock_session.place_order.return_value = {
-            'retCode': 0,
-            'result': {
-                'orderId': '123456',
-                'orderLinkId': 'ai_test',
-            }
-        }
-        
-        adapter = BybitAdapter('key', 'secret', testnet=True)
-        adapter._session = mock_session
-        
-        request = OrderRequest(
-            symbol='BTCUSDT',
-            side='buy',
-            order_type='market',
-            qty=Decimal('0.1'),
-        )
-        
-        response = adapter.place_order(request)
-        
-        self.assertTrue(response.success)
-        self.assertEqual(response.exchange_order_id, '123456')
-    
-    @patch('execution.exchanges.bybit.BybitAdapter.session')
-    def test_place_order_failure(self, mock_session):
-        """Test failed order placement."""
-        from execution.exchanges.bybit import BybitAdapter
-        
-        mock_session.place_order.return_value = {
-            'retCode': 10001,
-            'retMsg': 'Insufficient balance',
-        }
-        
-        adapter = BybitAdapter('key', 'secret', testnet=True)
-        adapter._session = mock_session
-        
-        request = OrderRequest(
-            symbol='BTCUSDT',
-            side='buy',
-            order_type='market',
-            qty=Decimal('100'),
-        )
-        
-        response = adapter.place_order(request)
-        
-        self.assertFalse(response.success)
-        self.assertEqual(response.error_code, '10001')
-    
-    @patch('execution.exchanges.bybit.BybitAdapter.session')
-    def test_get_positions_success(self, mock_session):
-        """Test successful position retrieval."""
-        from execution.exchanges.bybit import BybitAdapter
-        
-        # Return position for linear, empty for option
-        mock_session.get_positions.side_effect = [
-            {
-                'retCode': 0,
-                'result': {
-                    'list': [{
-                        'symbol': 'BTCUSDT',
-                        'side': 'Buy',
-                        'size': '0.5',
-                        'avgPrice': '50000',
-                        'unrealisedPnl': '100',
-                        'cumRealisedPnl': '50',
-                        'leverage': '10',
-                    }]
-                }
-            },
-            {  # Option category returns empty
-                'retCode': 0,
-                'result': {'list': []}
-            }
-        ]
-        
-        adapter = BybitAdapter('key', 'secret', testnet=True)
-        adapter._session = mock_session
-        
-        result = adapter.get_positions()
-        
-        self.assertTrue(result.success)
-        self.assertEqual(len(result.positions), 1)
-        self.assertEqual(result.positions[0].symbol, 'BTCUSDT')
-        self.assertEqual(result.positions[0].side, 'long')
-    
-    @patch('execution.exchanges.bybit.BybitAdapter.session')
-    def test_get_positions_api_error(self, mock_session):
-        """Test position retrieval with API error."""
-        from execution.exchanges.bybit import BybitAdapter
-        
-        mock_session.get_positions.return_value = {
-            'retCode': 10002,
-            'retMsg': 'Invalid API key',
-        }
-        
-        adapter = BybitAdapter('key', 'secret', testnet=True)
-        adapter._session = mock_session
-        
-        result = adapter.get_positions()
-        
-        self.assertFalse(result.success)
-        self.assertIn('Invalid API key', result.error)
-    
-    @patch('execution.exchanges.bybit.BybitAdapter.session')
-    def test_get_positions_exception(self, mock_session):
-        """Test position retrieval with exception."""
-        from execution.exchanges.bybit import BybitAdapter
-        
-        mock_session.get_positions.side_effect = Exception('Network error')
-        
-        adapter = BybitAdapter('key', 'secret', testnet=True)
-        adapter._session = mock_session
-        
-        result = adapter.get_positions()
-        
-        self.assertFalse(result.success)
-        self.assertIn('Network error', result.error)
 
 
 # =============================================================================
@@ -697,13 +520,13 @@ class PositionSyncTests(TestCase):
     def setUp(self):
         self.account = ExchangeAccount.objects.create(
             name='sync-test',
-            exchange='bybit',
-            api_key_env='BYBIT_API_KEY',
-            api_secret_env='BYBIT_API_SECRET',
+            exchange='deribit',
+            api_key_env='DERIBIT_API_KEY',
+            api_secret_env='DERIBIT_API_SECRET',
         )
     
-    @patch.dict('os.environ', {'BYBIT_API_KEY': 'test', 'BYBIT_API_SECRET': 'test'})
-    @patch('execution.exchanges.bybit.BybitAdapter')
+    @patch.dict('os.environ', {'DERIBIT_API_KEY': 'test', 'DERIBIT_API_SECRET': 'test'})
+    @patch('execution.exchanges.deribit.DeribitAdapter')
     def test_sync_positions_updates_existing(self, mock_adapter_class):
         """Test that sync updates existing positions."""
         from execution.services.orchestrator import ExecutionOrchestrator
@@ -740,8 +563,8 @@ class PositionSyncTests(TestCase):
         pos = Position.objects.get(account=self.account, symbol='BTCUSDT')
         self.assertEqual(pos.qty, Decimal('1.5'))
     
-    @patch.dict('os.environ', {'BYBIT_API_KEY': 'test', 'BYBIT_API_SECRET': 'test'})
-    @patch('execution.exchanges.bybit.BybitAdapter')
+    @patch.dict('os.environ', {'DERIBIT_API_KEY': 'test', 'DERIBIT_API_SECRET': 'test'})
+    @patch('execution.exchanges.deribit.DeribitAdapter')
     def test_sync_positions_zeros_closed(self, mock_adapter_class):
         """Test that closed positions are zeroed out on successful sync."""
         from execution.services.orchestrator import ExecutionOrchestrator
@@ -772,8 +595,8 @@ class PositionSyncTests(TestCase):
         self.assertEqual(pos.qty, Decimal('0'))
         self.assertEqual(pos.side, 'none')
     
-    @patch.dict('os.environ', {'BYBIT_API_KEY': 'test', 'BYBIT_API_SECRET': 'test'})
-    @patch('execution.exchanges.bybit.BybitAdapter')
+    @patch.dict('os.environ', {'DERIBIT_API_KEY': 'test', 'DERIBIT_API_SECRET': 'test'})
+    @patch('execution.exchanges.deribit.DeribitAdapter')
     def test_sync_positions_skips_zero_on_api_failure(self, mock_adapter_class):
         """Test that positions are NOT zeroed on API failure."""
         from execution.services.orchestrator import ExecutionOrchestrator
@@ -806,8 +629,8 @@ class PositionSyncTests(TestCase):
         self.assertEqual(pos.qty, Decimal('1.0'))
         self.assertEqual(pos.side, 'long')
     
-    @patch.dict('os.environ', {'BYBIT_API_KEY': 'test', 'BYBIT_API_SECRET': 'test'})
-    @patch('execution.exchanges.bybit.BybitAdapter')
+    @patch.dict('os.environ', {'DERIBIT_API_KEY': 'test', 'DERIBIT_API_SECRET': 'test'})
+    @patch('execution.exchanges.deribit.DeribitAdapter')
     def test_sync_positions_partial_update_on_failure(self, mock_adapter_class):
         """Test that received positions are updated even on partial failure."""
         from execution.services.orchestrator import ExecutionOrchestrator
@@ -1218,7 +1041,7 @@ class PositionManagerTests(TestCase):
     def setUp(self):
         self.account = ExchangeAccount.objects.create(
             name='pm-test',
-            exchange='bybit',
+            exchange='deribit',
             api_key_env='KEY',
             api_secret_env='SECRET',
         )
