@@ -1081,8 +1081,8 @@ class SignalService:
         income_chain_df = None
         chain_records = list(
             OptionSnapshot.objects.filter(
-                timestamp__date=latest_date, underlying="BTC",
-            ).values("symbol", "timestamp", "strike", "option_type", "delta", "bid", "ask", "dte", "spread_pct", "spot_price")
+                timestamp__date=latest_date, underlying="BTC", exchange="deribit",
+            ).values("symbol", "exchange", "timestamp", "strike", "option_type", "delta", "bid", "ask", "dte", "spread_pct", "spot_price")
         )
         if chain_records:
             income_chain_df = pd.DataFrame.from_records(chain_records)

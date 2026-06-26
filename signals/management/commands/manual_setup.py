@@ -913,8 +913,8 @@ class Command(BaseCommand):
         from datetime import datetime as dt
         target = signal_date or dt.now().date()
         chain_qs = OptionSnapshot.objects.filter(
-            timestamp__date=target, underlying='BTC',
-        ).values('symbol', 'timestamp', 'strike', 'option_type', 'delta', 'bid', 'ask', 'dte', 'spread_pct', 'spot_price')
+            timestamp__date=target, underlying='BTC', exchange='deribit',
+        ).values('symbol', 'exchange', 'timestamp', 'strike', 'option_type', 'delta', 'bid', 'ask', 'dte', 'spread_pct', 'spot_price')
 
         chain_df = pd.DataFrame.from_records(chain_qs)
         if len(chain_df) == 0:

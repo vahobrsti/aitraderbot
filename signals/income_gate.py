@@ -162,7 +162,10 @@ def dedupe_chain_to_latest(chain_df: pd.DataFrame) -> pd.DataFrame:
 
     Keep only the most recent snapshot per contract so each contract is a single
     candidate with one delta and one DTE. Contract identity is the exchange
-    symbol when present, else (strike, option_type/side, expiry).
+    symbol when present, else (strike, option_type/side, expiry) — always scoped
+    by exchange, since a symbol is only unique within an exchange. Callers should
+    still filter the query to a single exchange; this dedup is a safety net, not
+    a venue selector.
 
     Args:
         chain_df: Raw chain DataFrame including a ``timestamp`` column (and
@@ -185,6 +188,12 @@ def dedupe_chain_to_latest(chain_df: pd.DataFrame) -> pd.DataFrame:
             c for c in ("strike", "option_type", "side", "expiry")
             if c in df.columns
         ]
+    # A contract symbol is only unique within an exchange — the snapshot table's
+    # uniqueness is (timestamp, symbol, exchange). Include exchange in the key so
+    # mixed-exchange input is never silently collapsed across venues (callers are
+    # expected to scope to a single exchange; this is a defensive backstop).
+    if "exchange" in df.columns:
+        subset = subset + ["exchange"]
     if subset:
         df = df.drop_duplicates(subset=subset, keep="last")
     return df.reset_index(drop=True)
