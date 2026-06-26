@@ -14,6 +14,7 @@ Uses MVRV-derived strike boundaries:
 from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from signals.options import OptionStructure, SpreadGuidance, format_stop_loss_string
@@ -50,6 +51,16 @@ class IncomeGateConfig:
     tactical_max_dte: int = 21
     income_min_dte: int = 21
     income_max_dte: int = 45
+
+    # Bear-call ceiling — data-driven MVRV rally target (underwater regime only)
+    # When mvrv_60d < 1 the static cost_basis × p90_180d ceiling projects the
+    # short call unreachably far OTM. Instead, estimate the ceiling from how far
+    # mvrv_60d itself rallies over the option horizon in the trailing window.
+    # Percentile is a tunable hypothesis (see compute_bear_call_target_mvrv).
+    bear_call_ceiling_percentile: float = 0.60  # percentile of trailing forward MVRV rallies
+    bear_call_ceiling_lookback: int = 180       # trailing days sampled
+    bear_call_rally_hmin: int = 7               # forward window min (decoupled from DTE knobs)
+    bear_call_rally_hmax: int = 21              # forward window max (decoupled from DTE knobs)
 
     # Position management
     cooldown_days: int = 5
@@ -1126,6 +1137,113 @@ def evaluate_bull_put_gate(
     )
 
 
+def compute_bear_call_target_mvrv(
+    mvrv_series: pd.Series,
+    config: IncomeGateConfig = None,
+) -> Optional[float]:
+    """
+    Data-driven ceiling target for bear call spreads in underwater regimes.
+
+    Problem this solves
+    --------------------
+    The static macro ceiling (``cost_basis × mvrv_60d_p90_180d``) projects the
+    short call strike unreachably far OTM when holders are underwater
+    (``mvrv_60d < 1``): cost_basis sits well above spot, so the P90 multiplier
+    pushes the ceiling ~20%+ OTM — beyond any strike that still carries sellable
+    delta. ``filter_option_chain`` then returns nothing and the gate emits
+    NO_TRADE (observed on 2026-06-18 and 2026-06-25).
+
+    Approach
+    --------
+    Estimate a *reachable* ceiling from the recent behaviour of mvrv_60d itself:
+    over the trailing window, how far does mvrv_60d rally within the option's
+    holding horizon? Take a percentile of those forward rallies as the projected
+    upside and scale the current mvrv_60d by it::
+
+        target_mvrv = current_mvrv × (1 + pct)
+
+    Because ``cost_basis = spot / current_mvrv``, the downstream ceiling
+    (``cost_basis × target_mvrv``) reduces exactly to ``spot × (1 + pct)``: the
+    current_mvrv level cancels, so the ceiling's OTM distance equals the
+    percentile forward MVRV rally. The MVRV-native form is kept for
+    interpretability and parity with the profitable-regime path.
+
+    Anti-leakage
+    ------------
+    Only starting points whose *entire* forward ``[hmin, hmax]`` window lies
+    within the observed series are used, so the live computation matches a
+    properly lagged backtest (the most recent ~hmax days are never used as
+    starting points).
+
+    Modeling notes / tradeoffs
+    --------------------------
+    - Multiplicative scaling: a depressed current_mvrv produces a proportional
+      (not fixed) absolute rebound. Intentional — keeps the ceiling conservative
+      when valuations are deeply compressed.
+    - Trailing-window assumption: a fresh panic or violent post-capitulation
+      rebound can leave the trailing distribution stale in either direction.
+    - Percentile is a hypothesis (default P60), not a tuned optimum. It should
+      be calibrated against realized breach-rate / credit tradeoff over history,
+      not by how many contracts survive on any single day.
+
+    Args:
+        mvrv_series: Trailing mvrv_60d values up to and including the signal
+            date, in chronological order. The last value is treated as current.
+        config: Gate configuration (percentile, lookback, horizon knobs).
+
+    Returns:
+        target_mvrv, or None if data is insufficient — in which case the caller
+        should fall back to the static P90 ceiling.
+    """
+    if config is None:
+        config = IncomeGateConfig()
+
+    if mvrv_series is None:
+        return None
+
+    vals = pd.to_numeric(mvrv_series, errors="coerce").dropna().to_numpy()
+    if vals.size == 0:
+        return None
+
+    current_mvrv = float(vals[-1])
+    if current_mvrv <= 0:
+        return None
+
+    lookback = int(config.bear_call_ceiling_lookback)
+    hmin = int(config.bear_call_rally_hmin)
+    hmax = int(config.bear_call_rally_hmax)
+
+    # Keep the trailing lookback plus the forward span needed to fully observe
+    # windows for the most recent eligible starting points.
+    if vals.size > (lookback + hmax):
+        window = vals[-(lookback + hmax):]
+    else:
+        window = vals
+    n = window.size
+
+    # Forward rally for each starting point with a fully-observed [hmin, hmax]
+    # window. last_start is inclusive and guarantees t + hmax <= n - 1.
+    rallies = []
+    last_start = n - hmax - 1
+    for t in range(0, last_start + 1):
+        base = window[t]
+        if not (base > 0):
+            continue
+        fwd_max = window[t + hmin : t + hmax + 1].max()
+        rallies.append(fwd_max / base - 1.0)
+
+    MIN_SAMPLES = 30
+    if len(rallies) < MIN_SAMPLES:
+        return None
+
+    pct = float(np.percentile(rallies, config.bear_call_ceiling_percentile * 100.0))
+    # A downtrend-only window can yield a negative percentile, which would pull
+    # the ceiling below spot — nonsensical for a resistance. Floor at 0 so the
+    # ceiling is at least spot (delta + min_otm filters still apply downstream).
+    pct = max(pct, 0.0)
+    return current_mvrv * (1.0 + pct)
+
+
 def evaluate_bear_call_gate(
     row: pd.Series,
     chain_df: Optional[pd.DataFrame],
@@ -1136,6 +1254,7 @@ def evaluate_bear_call_gate(
     higher_priority_active: bool = False,
     condor_eligible: bool = False,
     dte_mode: str = "tactical",
+    target_mvrv: Optional[float] = None,
 ) -> IncomeGateResult:
     """
     Full bear call spread gate evaluation: score + vetoes + chain selection.
@@ -1154,6 +1273,10 @@ def evaluate_bear_call_gate(
         higher_priority_active: Whether a higher-priority signal is active.
         condor_eligible: Whether the condor gate passed.
         dte_mode: "tactical" or "income".
+        target_mvrv: Data-driven MVRV ceiling target for the underwater regime
+            (from compute_bear_call_target_mvrv). When provided and mvrv_60d < 1,
+            it replaces the static p90_180d ceiling, which projects unreachably
+            far OTM when holders are underwater. None → static P90 fallback.
 
     Returns:
         IncomeGateResult with eligibility decision.
@@ -1207,11 +1330,16 @@ def evaluate_bear_call_gate(
             chain_rejection_reason="MISSING_COLUMNS",
         )
 
-    # Compute MVRV ceiling for bear call spread
-    # Primary: cost_basis × P90 = where MVRV-60D at its 90th percentile implies price
-    # When mvrv_60d < 1 (buyers underwater): cost_basis > spot → P90 gives meaningful ceiling above
-    # When mvrv_60d >= 1 (buyers profitable): cost_basis < spot → use cost_basis × p90 / mvrv_60d 
-    #   which simplifies to spot × (p90 / mvrv_60d) — how much more profit can build
+    # Compute MVRV ceiling for bear call spread.
+    #
+    # Underwater (mvrv_60d < 1): the static cost_basis × p90_180d ceiling projects
+    # the short call ~20%+ OTM (cost_basis sits far above spot), beyond any strike
+    # with sellable delta. When a data-driven target_mvrv is supplied, use it —
+    # it reflects how far mvrv_60d actually rallies over the option horizon in the
+    # trailing window, yielding a reachable ceiling. See compute_bear_call_target_mvrv.
+    #
+    # Profitable (mvrv_60d >= 1): cost_basis < spot, the P90 ceiling is already
+    # meaningful and reachable — keep it unchanged.
     mvrv_60d = row.get("mvrv_60d", row.get("mvrv_usd_60d"))
     mvrv_60d_p90 = row.get("mvrv_60d_p90_180d")
     mvrv_composite_pct = row.get("mvrv_composite_pct")
@@ -1220,7 +1348,10 @@ def evaluate_bear_call_gate(
     ceiling_price = None
     if mvrv_60d and float(mvrv_60d) > 0:
         cost_basis = spot_price / float(mvrv_60d)
-        if mvrv_60d_p90 and float(mvrv_60d_p90) > 0:
+        if float(mvrv_60d) < 1.0 and target_mvrv is not None and float(target_mvrv) > 0:
+            # Underwater + data-driven target available: reachable ceiling.
+            ceiling_price = cost_basis * float(target_mvrv)
+        elif mvrv_60d_p90 and float(mvrv_60d_p90) > 0:
             # P90: where price would be if MVRV-60D hits its 6-month 90th percentile
             ceiling_price = cost_basis * float(mvrv_60d_p90)
         elif mvrv_composite_pct is not None and mvrv_comp_max_180d is not None:
