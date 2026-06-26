@@ -51,7 +51,7 @@ from signals.tactical_puts import tactical_put_inside_bull
 from signals.options import get_strategy_with_path_risk, get_decision_strategy_summary, DECISION_STRATEGY_MAP, format_stop_loss_string, compute_condor_strikes
 from signals.mvrv_short import check_mvrv_short_signal
 from signals.condor_gate import evaluate_condor_gate, CondorGateResult, CONDOR_COOLDOWN_DAYS, compute_vol_metrics
-from signals.income_gate import evaluate_bull_put_gate, evaluate_bear_call_gate, IncomeGateConfig, compute_bear_call_target_mvrv
+from signals.income_gate import evaluate_bull_put_gate, evaluate_bear_call_gate, IncomeGateConfig, compute_bear_call_target_mvrv, dedupe_chain_to_latest
 from execution.services.policy import get_policy
 
 # Cooldown constants — single source of truth for live + backtest alignment
@@ -1082,10 +1082,13 @@ class SignalService:
         chain_records = list(
             OptionSnapshot.objects.filter(
                 timestamp__date=latest_date, underlying="BTC",
-            ).values("strike", "option_type", "delta", "bid", "ask", "dte", "spread_pct", "spot_price")
+            ).values("symbol", "timestamp", "strike", "option_type", "delta", "bid", "ask", "dte", "spread_pct", "spot_price")
         )
         if chain_records:
             income_chain_df = pd.DataFrame.from_records(chain_records)
+            # Collapse hourly snapshots to one row per contract (latest), else
+            # the same contract appears ~24x and pollutes spread/tier selection.
+            income_chain_df = dedupe_chain_to_latest(income_chain_df)
             for col in ("strike", "delta", "bid", "ask", "dte", "spread_pct", "spot_price"):
                 income_chain_df[col] = income_chain_df[col].apply(
                     lambda x: float(x) if x is not None else None
