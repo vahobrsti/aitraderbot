@@ -51,7 +51,7 @@ from signals.tactical_puts import tactical_put_inside_bull
 from signals.options import get_strategy_with_path_risk, get_decision_strategy_summary, DECISION_STRATEGY_MAP, format_stop_loss_string, compute_condor_strikes
 from signals.mvrv_short import check_mvrv_short_signal
 from signals.condor_gate import evaluate_condor_gate, CondorGateResult, CONDOR_COOLDOWN_DAYS, compute_vol_metrics
-from signals.income_gate import evaluate_bull_put_gate, evaluate_bear_call_gate, IncomeGateConfig
+from signals.income_gate import evaluate_bull_put_gate, evaluate_bear_call_gate, IncomeGateConfig, compute_bear_call_target_mvrv
 from execution.services.policy import get_policy
 
 # Cooldown constants — single source of truth for live + backtest alignment
@@ -1133,12 +1133,20 @@ class SignalService:
                     results.append(_attach_income(res, bull_gate))
 
             if self._check_trade_cooldown(latest_date, "BEAR_CALL_SPREAD", income_config.cooldown_days):
+                # Data-driven ceiling target for the underwater regime: how far
+                # mvrv_60d rallies over the option horizon in the trailing window.
+                bear_target_mvrv = None
+                if "mvrv_60d" in feats.columns:
+                    bear_target_mvrv = compute_bear_call_target_mvrv(
+                        feats.loc[:latest_date, "mvrv_60d"], income_config
+                    )
                 bear_gate = evaluate_bear_call_gate(
                     row_with_mvrv, chain_df=income_chain_df, spot_price=income_spot,
                     config=income_config, atr_ratio=atr_ratio,
                     fusion_state=fusion_result.state.value,
                     higher_priority_active=higher_priority_active,
                     condor_eligible=condor_gate.eligible,
+                    target_mvrv=bear_target_mvrv,
                 )
                 if bear_gate.eligible:
                     trace = [f"income_bear_call=eligible(score={bear_gate.score:.0f})"]

@@ -42,6 +42,7 @@ from signals.fusion import MarketState
 from signals.income_gate import (
     evaluate_bull_put_gate, evaluate_bear_call_gate, IncomeGateConfig,
     compute_bull_put_score, compute_bear_call_score,
+    compute_bear_call_target_mvrv,
 )
 
 
@@ -928,6 +929,14 @@ class Command(BaseCommand):
 
         # Evaluate
         config = IncomeGateConfig()
+        # Data-driven bear-call ceiling target (underwater regime) — mirror live
+        # generation so manual setup selection matches SignalService for the
+        # same date and chain.
+        bear_target_mvrv = None
+        if 'mvrv_60d' in df.columns:
+            bear_target_mvrv = compute_bear_call_target_mvrv(
+                df.loc[:date_str, 'mvrv_60d'], config
+            )
         if signal_type == "BULL_PUT_SPREAD":
             gate_result = evaluate_bull_put_gate(
                 row, chain_df=chain_df, spot_price=use_spot,
@@ -940,6 +949,7 @@ class Command(BaseCommand):
             gate_result = evaluate_bear_call_gate(
                 row, chain_df=chain_df, spot_price=use_spot,
                 fusion_state=fusion_result.state.value, config=config,
+                target_mvrv=bear_target_mvrv,
             )
             score_fn = compute_bear_call_score
             side_label = "BEAR CALL SPREAD"
@@ -977,7 +987,15 @@ class Command(BaseCommand):
                 floor = cost_basis * float(p10)
                 self.stdout.write(f"  Floor: ${floor:,.0f} (cost_basis × P10={float(p10):.4f}, {((use_spot-floor)/use_spot*100):.1f}% below)")
         else:
-            if p90:
+            if mvrv_60d > 0 and mvrv_60d < 1.0 and bear_target_mvrv:
+                # Underwater: data-driven trailing MVRV-rally ceiling (matches gate)
+                ceiling = cost_basis * float(bear_target_mvrv)
+                self.stdout.write(
+                    f"  Ceiling: ${ceiling:,.0f} (cost_basis × target_mvrv={float(bear_target_mvrv):.4f} "
+                    f"[P{config.bear_call_ceiling_percentile*100:.0f} trailing rally], "
+                    f"{((ceiling-use_spot)/use_spot*100):.1f}% above)"
+                )
+            elif p90:
                 ceiling = cost_basis * float(p90)
                 self.stdout.write(f"  Ceiling: ${ceiling:,.0f} (cost_basis × P90={float(p90):.4f}, {((ceiling-use_spot)/use_spot*100):.1f}% above)")
 
