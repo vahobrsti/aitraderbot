@@ -42,7 +42,7 @@ from signals.fusion import MarketState
 from signals.income_gate import (
     evaluate_bull_put_gate, evaluate_bear_call_gate, IncomeGateConfig,
     compute_bull_put_score, compute_bear_call_score,
-    compute_bear_call_target_mvrv,
+    compute_bear_call_target_mvrv, dedupe_chain_to_latest,
 )
 
 
@@ -913,13 +913,17 @@ class Command(BaseCommand):
         from datetime import datetime as dt
         target = signal_date or dt.now().date()
         chain_qs = OptionSnapshot.objects.filter(
-            timestamp__date=target, underlying='BTC',
-        ).values('strike', 'option_type', 'delta', 'bid', 'ask', 'dte', 'spread_pct', 'spot_price')
+            timestamp__date=target, underlying='BTC', exchange='deribit',
+        ).values('symbol', 'exchange', 'timestamp', 'strike', 'option_type', 'delta', 'bid', 'ask', 'dte', 'spread_pct', 'spot_price')
 
         chain_df = pd.DataFrame.from_records(chain_qs)
         if len(chain_df) == 0:
             self.stderr.write(self.style.WARNING(f"No option chain for {target}"))
             return None
+
+        # Collapse hourly snapshots to one row per contract (latest), so manual
+        # setup mirrors live selection and tiers land on distinct strikes.
+        chain_df = dedupe_chain_to_latest(chain_df)
 
         for col in ['strike', 'delta', 'bid', 'ask', 'dte', 'spread_pct', 'spot_price']:
             chain_df[col] = chain_df[col].apply(lambda x: float(x) if x is not None else None)

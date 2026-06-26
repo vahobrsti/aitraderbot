@@ -380,6 +380,9 @@ POLICY_V1 = PolicyVersion(
         "BEAR_PROBE": DTEConfig(min_dte=11, max_dte=16, optimal_dte=13),  # TTH p75=8.5d, slow
         "IRON_CONDOR": DTEConfig(min_dte=9, max_dte=13, optimal_dte=9),  # 7d horizon + 2d buffer
         "MVRV_SHORT": DTEConfig(min_dte=12, max_dte=18, optimal_dte=14),  # TTH p75=10d, slowest
+        # Income credit spreads use the income gate's tactical selection window
+        # (IncomeGateConfig.tactical_min/max_dte = 9-21), not the default fallback.
+        "BEAR_CALL_SPREAD": DTEConfig(min_dte=9, max_dte=21, optimal_dte=14),
     },
     
     delta_targets={

@@ -147,6 +147,58 @@ _COLUMN_ALIASES = {
 _REQUIRED_COLUMNS = {"strike", "side", "delta", "bid", "ask", "dte"}
 
 
+def dedupe_chain_to_latest(chain_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Collapse intraday option snapshots to one row per contract (latest snapshot).
+
+    The OptionSnapshot table stores multiple intraday snapshots per contract
+    (hourly). If the raw query result is fed straight into spread selection,
+    every contract appears N times with slightly different delta (spot drifts
+    hour to hour) and a DTE that flips across the integer-day boundary as the
+    fractional day count ticks down (e.g. 15.0 → 14.99 within the same day,
+    int-truncated to 15 then 14). The tier selector then buckets these as
+    distinct candidates and can pick the *same* contract for two risk tiers
+    (identical strikes, different DTE/credit).
+
+    Keep only the most recent snapshot per contract so each contract is a single
+    candidate with one delta and one DTE. Contract identity is the exchange
+    symbol when present, else (strike, option_type/side, expiry) — always scoped
+    by exchange, since a symbol is only unique within an exchange. Callers should
+    still filter the query to a single exchange; this dedup is a safety net, not
+    a venue selector.
+
+    Args:
+        chain_df: Raw chain DataFrame including a ``timestamp`` column (and
+            ideally ``symbol``). If ``timestamp`` is absent the frame is
+            returned unchanged (already deduped or single-snapshot source).
+
+    Returns:
+        Deduplicated DataFrame, one row per contract.
+    """
+    if chain_df is None or chain_df.empty:
+        return chain_df
+    if "timestamp" not in chain_df.columns:
+        return chain_df
+
+    df = chain_df.sort_values("timestamp")
+    if "symbol" in df.columns:
+        subset = ["symbol"]
+    else:
+        subset = [
+            c for c in ("strike", "option_type", "side", "expiry")
+            if c in df.columns
+        ]
+    # A contract symbol is only unique within an exchange — the snapshot table's
+    # uniqueness is (timestamp, symbol, exchange). Include exchange in the key so
+    # mixed-exchange input is never silently collapsed across venues (callers are
+    # expected to scope to a single exchange; this is a defensive backstop).
+    if "exchange" in df.columns:
+        subset = subset + ["exchange"]
+    if subset:
+        df = df.drop_duplicates(subset=subset, keep="last")
+    return df.reset_index(drop=True)
+
+
 def normalize_chain_columns(chain_df: pd.DataFrame) -> Optional[pd.DataFrame]:
     """
     Normalize column names from Deribit/Bybit schemas to canonical names.

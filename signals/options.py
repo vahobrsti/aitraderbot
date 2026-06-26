@@ -453,7 +453,9 @@ DECISION_STRATEGY_MAP["BULL_PUT_SPREAD"] = {
 }
 
 # Bear Call Spread: Income strategy in bearish regimes
-# Sell call spread above MVRV Composite P90 ceiling
+# Sell call spread above the MVRV-derived resistance ceiling. The ceiling is the
+# data-driven trailing MVRV-rally target when holders are underwater (mvrv_60d < 1),
+# else the cost_basis × P90 level when profitable (see income_gate.py).
 _BEAR_CALL_SPREAD = SpreadGuidance(
     width_pct=0.05,        # 5% spread width target
     take_profit_pct=0.50,  # Take profit at 50% of max credit
@@ -464,7 +466,7 @@ _BEAR_CALL_SPREAD = SpreadGuidance(
 
 DECISION_STRATEGY_MAP["BEAR_CALL_SPREAD"] = {
     "primary_structures": "short_call_spread",
-    "strike_guidance": "Short call at 0.20 delta OTM, long call 3-8% above. Short strike at or above MVRV Composite P90 ceiling.",
+    "strike_guidance": "Short call ~0.20-0.35 delta OTM, long call 3-8% above. Short strike anchored to the MVRV-derived resistance: trailing MVRV-rally target when underwater, P90 ceiling when profitable.",
     "dte_range": "9-21d (tactical) or 21-45d (income)",
     "rationale": "Income: bearish regime + whale distribution + no MDIA inflow. Sell premium above resistance.",
     "stop_loss": format_stop_loss_string(_BEAR_CALL_SPREAD),
