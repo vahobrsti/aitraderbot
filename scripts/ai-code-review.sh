@@ -310,13 +310,13 @@ $DIFF_SECTION
 
 Default to APPROVE. Only BLOCK if you would mass-revert this commit in production."
 
-# --- Run review via kiro-cli ---
+# --- Run review via codex ---
 # Write prompt to file for reference
 echo "$REVIEW_PROMPT" > ".ai-reviews/review-prompt.md"
 
-echo "Running review via kiro-cli..."
+echo "Running review via codex..."
 echo ""
-kiro-cli chat --no-interactive --model claude-sonnet-4 --trust-all-tools "$REVIEW_PROMPT" | tee "$OUT"
+codex exec "$REVIEW_PROMPT" | tee "$OUT"
 
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
