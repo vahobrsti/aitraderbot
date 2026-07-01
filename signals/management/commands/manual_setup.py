@@ -42,7 +42,8 @@ from signals.fusion import MarketState
 from signals.income_gate import (
     evaluate_bull_put_gate, evaluate_bear_call_gate, IncomeGateConfig,
     compute_bull_put_score, compute_bear_call_score,
-    compute_bear_call_target_mvrv, dedupe_chain_to_latest,
+    compute_bear_call_target_mvrv, compute_bull_put_target_mvrv,
+    dedupe_chain_to_latest,
 )
 
 
@@ -942,9 +943,18 @@ class Command(BaseCommand):
                 df.loc[:date_str, 'mvrv_60d'], config
             )
         if signal_type == "BULL_PUT_SPREAD":
+            # Data-driven bull-put floor target (reachable drawdown) — mirror
+            # live generation so manual setup selection matches SignalService
+            # for the same date and chain.
+            bull_target_mvrv = None
+            if 'mvrv_60d' in df.columns:
+                bull_target_mvrv = compute_bull_put_target_mvrv(
+                    df.loc[:date_str, 'mvrv_60d'], config
+                )
             gate_result = evaluate_bull_put_gate(
                 row, chain_df=chain_df, spot_price=use_spot,
                 fusion_state=fusion_result.state.value, config=config,
+                target_mvrv=bull_target_mvrv,
             )
             score_fn = compute_bull_put_score
             side_label = "BULL PUT SPREAD"
@@ -985,7 +995,15 @@ class Command(BaseCommand):
         p10 = row.get('mvrv_60d_p10_180d')
         p90 = row.get('mvrv_60d_p90_180d')
         if signal_type == "BULL_PUT_SPREAD":
-            if cost_basis <= use_spot:
+            if bull_target_mvrv:
+                # Data-driven reachable floor (matches gate): cost_basis × target_mvrv
+                floor = cost_basis * float(bull_target_mvrv)
+                self.stdout.write(
+                    f"  Floor: ${floor:,.0f} (cost_basis × target_mvrv={float(bull_target_mvrv):.4f} "
+                    f"[P{config.bull_put_floor_percentile*100:.0f} trailing drawdown], "
+                    f"{((use_spot-floor)/use_spot*100):.1f}% below)"
+                )
+            elif cost_basis <= use_spot:
                 self.stdout.write(f"  Floor: ${cost_basis:,.0f} (cost_basis, {((use_spot-cost_basis)/use_spot*100):.1f}% below)")
             elif p10:
                 floor = cost_basis * float(p10)
