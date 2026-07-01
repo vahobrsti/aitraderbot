@@ -62,6 +62,20 @@ class IncomeGateConfig:
     bear_call_rally_hmin: int = 7               # forward window min (decoupled from DTE knobs)
     bear_call_rally_hmax: int = 21              # forward window max (decoupled from DTE knobs)
 
+    # Bull-put floor — data-driven MVRV drawdown target (mirror of bear-call ceiling)
+    # The static cost_basis = spot / mvrv_60d floor scales inversely with MVRV:
+    # the higher mvrv_60d climbs, the further below spot the floor sits, pushing
+    # the short put unreachably far OTM in extended bull regimes (no strike with
+    # sellable delta survives → NO_TRADE). Instead, estimate a *reachable* floor
+    # from how far mvrv_60d actually draws down over the option horizon in the
+    # trailing window. Percentile is a tunable hypothesis (see
+    # compute_bull_put_target_mvrv) and is the negative-tail mirror of the
+    # bear-call rally percentile.
+    bull_put_floor_percentile: float = 0.40  # percentile of trailing forward MVRV drawdowns
+    bull_put_floor_lookback: int = 180       # trailing days sampled
+    bull_put_drawdown_hmin: int = 7          # forward window min (decoupled from DTE knobs)
+    bull_put_drawdown_hmax: int = 21         # forward window max (decoupled from DTE knobs)
+
     # Position management
     cooldown_days: int = 5
     max_concurrent: int = 1
@@ -1025,6 +1039,114 @@ _BEAR_CALL_GUIDANCE = SpreadGuidance(
 )
 
 
+def compute_bull_put_target_mvrv(
+    mvrv_series: pd.Series,
+    config: IncomeGateConfig = None,
+) -> Optional[float]:
+    """
+    Data-driven floor target for bull put spreads (mirror of the bear-call ceiling).
+
+    Problem this solves
+    --------------------
+    The static floor (``cost_basis = spot / mvrv_60d``) scales inversely with
+    mvrv_60d: as valuations extend (mvrv_60d well above 1), cost_basis drops far
+    below spot and the short put strike is forced unreachably far OTM — beyond
+    any contract with sellable delta. ``filter_option_chain`` then returns
+    nothing and the gate emits NO_TRADE in exactly the bullish regimes where a
+    put-credit spread should work best.
+
+    Approach
+    --------
+    Estimate a *reachable* floor from the recent behaviour of mvrv_60d itself:
+    over the trailing window, how far does mvrv_60d draw down within the option's
+    holding horizon? Take a (negative-tail) percentile of those forward drawdowns
+    as the projected downside and scale the current mvrv_60d by it::
+
+        target_mvrv = current_mvrv × (1 + pct)     # pct <= 0
+
+    Because ``cost_basis = spot / current_mvrv``, the downstream floor
+    (``cost_basis × target_mvrv``) reduces exactly to ``spot × (1 + pct)``: the
+    current_mvrv level cancels, so the floor's OTM distance equals the percentile
+    forward MVRV drawdown and no longer balloons with mvrv_60d. The MVRV-native
+    form is kept for interpretability and parity with the bear-call path.
+
+    Anti-leakage
+    ------------
+    Only starting points whose *entire* forward ``[hmin, hmax]`` window lies
+    within the observed series are used, so the live computation matches a
+    properly lagged backtest (the most recent ~hmax days are never used as
+    starting points).
+
+    Modeling notes / tradeoffs
+    --------------------------
+    - Multiplicative scaling: an elevated current_mvrv produces a proportional
+      (not fixed) absolute drawdown. Intentional — keeps the floor's OTM distance
+      anchored to MVRV-relative moves rather than absolute MVRV points.
+    - Trailing-window assumption: a fresh crash or violent recovery can leave the
+      trailing drawdown distribution stale in either direction.
+    - Percentile is a hypothesis (default P40, the negative-tail mirror of the
+      bear-call P60 rally), not a tuned optimum. It should be calibrated against
+      realized breach-rate / credit tradeoff over history, not by how many
+      contracts survive on any single day.
+
+    Args:
+        mvrv_series: Trailing mvrv_60d values up to and including the signal
+            date, in chronological order. The last value is treated as current.
+        config: Gate configuration (percentile, lookback, horizon knobs).
+
+    Returns:
+        target_mvrv, or None if data is insufficient — in which case the caller
+        falls back to the static cost-basis floor.
+    """
+    if config is None:
+        config = IncomeGateConfig()
+
+    if mvrv_series is None:
+        return None
+
+    vals = pd.to_numeric(mvrv_series, errors="coerce").dropna().to_numpy()
+    if vals.size == 0:
+        return None
+
+    current_mvrv = float(vals[-1])
+    if current_mvrv <= 0:
+        return None
+
+    lookback = int(config.bull_put_floor_lookback)
+    hmin = int(config.bull_put_drawdown_hmin)
+    hmax = int(config.bull_put_drawdown_hmax)
+
+    # Keep the trailing lookback plus the forward span needed to fully observe
+    # windows for the most recent eligible starting points.
+    if vals.size > (lookback + hmax):
+        window = vals[-(lookback + hmax):]
+    else:
+        window = vals
+    n = window.size
+
+    # Forward drawdown for each starting point with a fully-observed [hmin, hmax]
+    # window. last_start is inclusive and guarantees t + hmax <= n - 1.
+    drawdowns = []
+    last_start = n - hmax - 1
+    for t in range(0, last_start + 1):
+        base = window[t]
+        if not (base > 0):
+            continue
+        fwd_min = window[t + hmin : t + hmax + 1].min()
+        drawdowns.append(fwd_min / base - 1.0)
+
+    MIN_SAMPLES = 30
+    if len(drawdowns) < MIN_SAMPLES:
+        return None
+
+    pct = float(np.percentile(drawdowns, config.bull_put_floor_percentile * 100.0))
+    # An uptrend-only window can yield a positive percentile, which would pull
+    # the floor above spot — nonsensical for a support. Cap at 0 so the floor is
+    # at most spot (delta + min_otm filters still apply downstream).
+    pct = min(pct, 0.0)
+    return current_mvrv * (1.0 + pct)
+
+
 def evaluate_bull_put_gate(
     row: pd.Series,
     chain_df: Optional[pd.DataFrame],
@@ -1035,6 +1157,7 @@ def evaluate_bull_put_gate(
     higher_priority_active: bool = False,
     condor_eligible: bool = False,
     dte_mode: str = "tactical",
+    target_mvrv: Optional[float] = None,
 ) -> IncomeGateResult:
     """
     Full bull put spread gate evaluation: score + vetoes + chain selection.
@@ -1053,6 +1176,10 @@ def evaluate_bull_put_gate(
         higher_priority_active: Whether a higher-priority signal is active.
         condor_eligible: Whether the condor gate passed.
         dte_mode: "tactical" or "income".
+        target_mvrv: Data-driven MVRV floor target (from
+            compute_bull_put_target_mvrv). When provided, it replaces the static
+            cost_basis floor, which is pushed unreachably far OTM as mvrv_60d
+            extends above 1. None → static cost-basis fallback.
 
     Returns:
         IncomeGateResult with eligibility decision.
@@ -1106,16 +1233,27 @@ def evaluate_bull_put_gate(
             chain_rejection_reason="MISSING_COLUMNS",
         )
 
-    # Compute MVRV floor for bull put spread
-    # Primary: cost_basis = spot / mvrv_60d (where recent buyers break even)
-    # When mvrv_60d >= 1 (buyers profitable): cost_basis < spot → good floor
-    # When mvrv_60d < 1 (buyers underwater): cost_basis > spot → use P10 fallback
+    # Compute MVRV floor for bull put spread.
+    #
+    # Data-driven (target_mvrv supplied): reachable floor from how far mvrv_60d
+    # actually draws down over the option horizon in the trailing window. Because
+    # cost_basis = spot / mvrv_60d, the floor (cost_basis × target_mvrv) reduces
+    # to spot × (1 + pct), so the OTM distance no longer balloons as mvrv_60d
+    # extends above 1. See compute_bull_put_target_mvrv.
+    #
+    # Static fallback (no target): cost_basis = spot / mvrv_60d (where recent
+    # buyers break even). When mvrv_60d >= 1 (buyers profitable) cost_basis sits
+    # below spot; when mvrv_60d < 1 (underwater) cost_basis sits above spot, so
+    # the P10 multiplier pulls it back to a tighter anchor.
     mvrv_60d = row.get("mvrv_60d", row.get("mvrv_usd_60d"))
     mvrv_60d_p10 = row.get("mvrv_60d_p10_180d")
     floor_price = None
     if mvrv_60d and float(mvrv_60d) > 0:
         cost_basis = spot_price / float(mvrv_60d)
-        if cost_basis <= spot_price:
+        if target_mvrv is not None and float(target_mvrv) > 0:
+            # Data-driven reachable floor (= spot × (1 + drawdown pct))
+            floor_price = cost_basis * float(target_mvrv)
+        elif cost_basis <= spot_price:
             # Normal case: buyers in profit, cost basis is below spot → use it
             floor_price = cost_basis
         else:
