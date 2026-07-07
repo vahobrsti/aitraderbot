@@ -24,6 +24,7 @@ urlpatterns = [
     
     # Research endpoints (auth required)
     path('v1/fusion/explain/', research_views.FusionExplainView.as_view(), name='fusion-explain'),
+    path('v1/fusion/analyze-engine/', research_views.AnalyzeEngineView.as_view(), name='fusion-analyze-engine'),
     path('v1/fusion/analysis/metric-stats/', research_views.MetricStatsView.as_view(), name='fusion-metric-stats'),
     path('v1/fusion/analysis/combo-stats/', research_views.ComboStatsView.as_view(), name='fusion-combo-stats'),
     path('v1/fusion/analysis/state-stats/', research_views.StateStatsView.as_view(), name='fusion-state-stats'),

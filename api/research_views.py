@@ -236,3 +236,53 @@ class ScoreValidationView(BaseResearchAPIView):
             rt, mono, 
             filters={"year": request.query_params.get('year'), "min_count": min_count, "type": validate_type}
         )
+
+
+class AnalyzeEngineView(BaseResearchAPIView):
+    """GET /api/v1/fusion/analyze-engine/
+
+    Returns the essential engine metrics (buckets, exchange flow, sentiment,
+    mvrv_composite, mvrv_60d and z-scores) for a single date.
+    """
+
+    def get(self, request):
+        csv_path = Path(settings.BASE_DIR) / 'features_14d_5pct.csv'
+        if not csv_path.exists():
+            return Response(
+                {"error": f"Feature CSV not found at {csv_path}"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        date_str = request.query_params.get('date')
+        if not date_str:
+            return Response(
+                {"error": "'date' query param is required, e.g., '2024-11-20'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        import pandas as pd
+        from signals.engine_metrics import collect_essential_metrics
+
+        try:
+            df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+            df.index = pd.to_datetime(df.index).normalize()
+            target_date = pd.to_datetime(date_str).normalize()
+
+            if target_date not in df.index:
+                return Response(
+                    {"error": f"Date {date_str} not found in feature dataset"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            row = df.loc[target_date]
+            metrics = collect_essential_metrics(row)
+
+            return Response({
+                "meta": {"date": date_str, "model_version": "v1-static"},
+                "metrics": metrics,
+            })
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to collect engine metrics: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
