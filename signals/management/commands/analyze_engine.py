@@ -95,6 +95,7 @@ class Command(BaseCommand):
         self.stdout.write("EXCHANGE FLOW BALANCE")
         self.stdout.write("-" * 70)
         ef = m["exchange_flow"]
+        self.stdout.write(f"  bucket                       {m['buckets']['exchange_flow']}")
         self.stdout.write(f"  flow_raw                     {fmt(ef['flow_raw'])}")
         for w in (2, 4, 7, 14, 21):
             self.stdout.write(f"  flow_sum_{w:<2}                   {fmt(ef[f'flow_sum_{w}'])}")

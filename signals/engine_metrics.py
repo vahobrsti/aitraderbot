@@ -19,6 +19,7 @@ from signals.research.bucket_mapping import (
     map_whale_bucket,
     map_mvrv_ls_bucket,
     map_mvrv_60d_bucket,
+    map_flow_bucket,
 )
 
 # Mutually-exclusive flag buckets → active bucket name
@@ -79,6 +80,7 @@ def collect_essential_metrics(row: pd.Series, fusion_result: FusionResult = None
             "whale": map_whale_bucket(row),
             "mvrv_ls": map_mvrv_ls_bucket(row),
             "mvrv_60d": map_mvrv_60d_bucket(row),
+            "exchange_flow": map_flow_bucket(row),
             "sentiment": _active_flag_bucket(row, _SENTIMENT_BUCKET_FLAGS),
             "mvrv_composite": _active_flag_bucket(row, _MVRV_COMPOSITE_BUCKET_FLAGS),
         },
