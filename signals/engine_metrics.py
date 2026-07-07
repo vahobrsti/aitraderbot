@@ -39,6 +39,37 @@ _MVRV_COMPOSITE_BUCKET_FLAGS = {
     "extreme_overvalued": "mvrv_bucket_extreme_overvalued",
 }
 
+# Exchange-flow bucket → (direction, magnitude) trader interpretation.
+# Inflow to exchanges = sell pressure; outflow = buy pressure.
+_FLOW_PRESSURE = {
+    "strong_inflow": ("sell", "strong"),
+    "inflow": ("sell", "moderate"),
+    "neutral": ("neutral", "none"),
+    "outflow": ("buy", "moderate"),
+    "strong_outflow": ("buy", "strong"),
+    "unknown": ("unknown", "unknown"),
+}
+
+
+def _flow_pressure(bucket: str, flow_z_90) -> dict:
+    """Translate the flow bucket into a buy/sell pressure reading.
+
+    ``value`` is the signed z-score (positive = sell pressure, negative = buy).
+    """
+    direction, magnitude = _FLOW_PRESSURE.get(bucket, ("unknown", "unknown"))
+    if direction == "neutral":
+        label = "NEUTRAL"
+    elif direction == "unknown":
+        label = "UNKNOWN"
+    else:
+        label = f"{direction.upper()} pressure ({magnitude})"
+    return {
+        "direction": direction,
+        "magnitude": magnitude,
+        "label": label,
+        "value": flow_z_90,
+    }
+
 
 def _num(row: pd.Series, col: str):
     """Return a plain float for a column, or None if missing/NaN."""
@@ -85,6 +116,9 @@ def collect_essential_metrics(row: pd.Series, fusion_result: FusionResult = None
             "mvrv_composite": _active_flag_bucket(row, _MVRV_COMPOSITE_BUCKET_FLAGS),
         },
         "exchange_flow": {
+            "pressure": _flow_pressure(
+                map_flow_bucket(row), _num(row, "flow_z_90")
+            ),
             "flow_raw": _num(row, "flow_raw"),
             "flow_sum_2": _num(row, "flow_sum_2"),
             "flow_sum_4": _num(row, "flow_sum_4"),

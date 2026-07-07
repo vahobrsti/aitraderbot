@@ -95,6 +95,8 @@ class Command(BaseCommand):
         self.stdout.write("EXCHANGE FLOW BALANCE")
         self.stdout.write("-" * 70)
         ef = m["exchange_flow"]
+        p = ef["pressure"]
+        self.stdout.write(f"  >> {p['label']}  (z={fmt(p['value'], 2)})")
         self.stdout.write(f"  bucket                       {m['buckets']['exchange_flow']}")
         self.stdout.write(f"  flow_raw                     {fmt(ef['flow_raw'])}")
         for w in (2, 4, 7, 14, 21):
