@@ -83,6 +83,19 @@ class Command(BaseCommand):
                 f"{name:<15}{fmt(d['value'], 3):>14}{fmt(d['z_90']):>9}   {d['label']}"
             )
 
+        fc = m["fusion_components"]
+        self.stdout.write("\n" + "-" * 60)
+        self.stdout.write("FUSION COMPONENTS (oriented bullish+, per-horizon -> sum)")
+        self.stdout.write("-" * 60)
+        mdia_h = "  ".join(f"{k}={v:+d}" for k, v in fc["mdia"]["horizons"].items())
+        self.stdout.write(f"  mdia     {mdia_h}   sum={fc['mdia']['sum']:+.0f}")
+        self.stdout.write(
+            f"  whale    mega={fc['whale']['mega_sum']:+.0f}  "
+            f"small={fc['whale']['small_sum']:+.0f}   sum={fc['whale']['sum']:+.0f}"
+        )
+        mvrv_h = "  ".join(f"{k}={v:+d}" for k, v in fc["mvrv_ls"]["horizons"].items())
+        self.stdout.write(f"  mvrv_ls  {mvrv_h}   sum={fc['mvrv_ls']['sum']:+.0f}")
+
         s = m["score"]
         self.stdout.write("\n" + "-" * 60)
         self.stdout.write(f"ENGINE SCORE: {s['value']:+d}  ({s['direction'].upper()})")
@@ -91,9 +104,14 @@ class Command(BaseCommand):
             f"  net={s['net']:+.2f}  agreement={s['agreement']:.0%}  "
             f"active={s['active']}/{len(s['contributions'])}"
         )
-        contribs = "  ".join(
-            f"{k}={v:+.2f}" for k, v in s["contributions"].items()
+        c = s["contributions"]
+        norm = ["mvrv_60d", "sentiment", "exchange_flow", "mvrv_composite"]
+        fus = ["mdia", "whale", "mvrv_ls"]
+        self.stdout.write(
+            "  metrics:  " + "  ".join(f"{k}={c[k]:+.2f}" for k in norm)
         )
-        self.stdout.write(f"  contributions: {contribs}")
+        self.stdout.write(
+            "  fusion:   " + "  ".join(f"{k}={c[k]:+.2f}" for k in fus)
+        )
 
         self.stdout.write("\n" + "=" * 60 + "\nDone.\n")
