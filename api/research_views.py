@@ -261,10 +261,14 @@ class AnalyzeEngineView(BaseResearchAPIView):
             )
 
         import pandas as pd
-        from signals.engine_metrics import collect_essential_metrics
+        from signals.engine_metrics import (
+            collect_essential_metrics,
+            ensure_normalized_columns,
+        )
 
         try:
             df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+            df = ensure_normalized_columns(df)
             df.index = pd.to_datetime(df.index).normalize()
             target_date = pd.to_datetime(date_str).normalize()
 

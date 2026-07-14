@@ -71,6 +71,52 @@ def _flow_pressure(bucket: str, flow_z_90) -> dict:
     }
 
 
+# Normalized reading: (value, z_col) sources per metric. Window = 90d
+# (chosen data-driven via analyze_window_sweep — stability-dominant, weak/unstable
+# standalone predictive power at every window).
+_NORMALIZED_SOURCES = {
+    "mvrv_60d": ("mvrv_60d", "mvrv_60d_z_90d"),
+    "sentiment": ("sentiment_norm", "sentiment_z_90d"),
+    "exchange_flow": ("flow_sum_7", "flow_z_90"),
+    "mvrv_composite": ("mvrv_composite_pct", "mvrv_comp_z_90d"),
+}
+
+
+def classify_z_position(z) -> str:
+    """Map a z-score to a plain-language position vs its 90-day baseline.
+
+    Thresholds mirror the mvrv_composite / flow buckets (+/-0.5, +/-1.5).
+    """
+    if z is None or pd.isna(z):
+        return "unknown"
+    if z > 1.5:
+        return "stretched_high"
+    if z > 0.5:
+        return "high"
+    if z >= -0.5:
+        return "normal"
+    if z >= -1.5:
+        return "low"
+    return "stretched_low"
+
+
+def ensure_normalized_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Add ``mvrv_60d_z_90d`` if the CSV doesn't already carry it.
+
+    The other 90-day z columns (flow_z_90, sentiment_z_90d, mvrv_comp_z_90d) are
+    produced by the feature pipeline; mvrv_60d has no 90d z, so derive it here
+    from the full series. Returns a copy when it adds the column.
+    """
+    if "mvrv_60d_z_90d" in df.columns or "mvrv_60d" not in df.columns:
+        return df
+    s = df["mvrv_60d"]
+    roll_mean = s.rolling(90, min_periods=30).mean()
+    roll_std = s.rolling(90, min_periods=30).std()
+    out = df.copy()
+    out["mvrv_60d_z_90d"] = (s - roll_mean) / (roll_std + 1e-9)
+    return out
+
+
 def _num(row: pd.Series, col: str):
     """Return a plain float for a column, or None if missing/NaN."""
     val = row.get(col, None)
@@ -98,7 +144,17 @@ def collect_essential_metrics(row: pd.Series, fusion_result: FusionResult = None
     if fusion_result is None:
         fusion_result = fuse_signals(row)
 
+    normalized = {}
+    for name, (value_col, z_col) in _NORMALIZED_SOURCES.items():
+        z = _num(row, z_col)
+        normalized[name] = {
+            "value": _num(row, value_col),
+            "z_90": z,
+            "position": classify_z_position(z),
+        }
+
     return {
+        "normalized": normalized,
         "fusion": {
             "state": fusion_result.state.value,
             "confidence": fusion_result.confidence.value,

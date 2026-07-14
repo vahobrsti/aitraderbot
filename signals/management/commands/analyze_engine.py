@@ -15,7 +15,10 @@ from pathlib import Path
 import pandas as pd
 from django.core.management.base import BaseCommand
 
-from signals.engine_metrics import collect_essential_metrics
+from signals.engine_metrics import (
+    collect_essential_metrics,
+    ensure_normalized_columns,
+)
 
 
 class Command(BaseCommand):
@@ -50,6 +53,7 @@ class Command(BaseCommand):
         if len(df) == 0:
             self.stderr.write("No rows in feature CSV. Nothing to analyze.")
             return
+        df = ensure_normalized_columns(df)
 
         # Resolve target row
         target_date = options.get("date")
@@ -84,6 +88,15 @@ class Command(BaseCommand):
             f"bear_mode={fusion['bear_mode']} | "
             f"cycle_day={fmt(fusion['cycle_day'], 0)}"
         )
+
+        self.stdout.write("\n" + "-" * 70)
+        self.stdout.write("NORMALIZED vs 90-DAY BASELINE  (how stretched vs its own 3-month norm)")
+        self.stdout.write("-" * 70)
+        for name, n in m["normalized"].items():
+            self.stdout.write(
+                f"  {name:15s} {n['position']:15s} "
+                f"(z={fmt(n['z_90'], 2)}, val={fmt(n['value'], 3)})"
+            )
 
         self.stdout.write("\n" + "-" * 70)
         self.stdout.write("BUCKETS")
