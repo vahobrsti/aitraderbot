@@ -49,13 +49,8 @@ _WHALE_SMALL_COLS = [
 _MVRV_LS_COLS = [
     "mvrv_ls_trend_2d", "mvrv_ls_trend_4d", "mvrv_ls_trend_7d", "mvrv_ls_trend_14d",
 ]
-# Max attainable |sum| per component (used to normalise onto the +/-Z_CAP scale).
-# mdia: 4 horizons x |2|; whale: 9 horizons x |1|; mvrv_ls: 4 horizons x |1|.
-_FUSION_MAX_MAG = {"mdia": 8.0, "whale": 9.0, "mvrv_ls": 4.0}
-
-NEUTRAL_BAND = 0.5   # |contribution| below this = noise, contributes 0
-Z_CAP = 2.0          # common contribution scale; no input dominates
-DIRECTION_THRESHOLD = 20  # |score| below this = neutral / no edge
+NEUTRAL_BAND = 0.5       # |oriented z| below this = 0 vote (matches "normal" label)
+DIRECTION_THRESHOLD = 2  # |score| below this (on the -7..+7 scale) = neutral
 
 
 def classify_z_position(z) -> str:
@@ -124,63 +119,56 @@ def compute_fusion_components(row: pd.Series) -> dict:
     return {
         "mdia": {
             "sum": -mdia_raw,
-            "max_mag": _FUSION_MAX_MAG["mdia"],
             "horizons": _oriented_horizons(_MDIA_COLS, "mdia_bucket_", flip=True),
         },
         "whale": {
             "sum": mega + small,
-            "max_mag": _FUSION_MAX_MAG["whale"],
             "mega_sum": mega,
             "small_sum": small,
         },
         "mvrv_ls": {
             "sum": mvrv_ls_raw,
-            "max_mag": _FUSION_MAX_MAG["mvrv_ls"],
             "horizons": _oriented_horizons(_MVRV_LS_COLS, "mvrv_ls_trend_"),
         },
     }
 
 
-def _gate_clip(x: float) -> float:
-    """Clip to +/-Z_CAP, then zero out anything inside the neutral band."""
-    x = max(-Z_CAP, min(Z_CAP, x))
-    return 0.0 if abs(x) < NEUTRAL_BAND else float(x)
+def _z_vote(z, sign: int) -> int:
+    """Collapse an oriented z-score to a -1 / 0 / +1 vote (0.5 neutral band)."""
+    if z is None or pd.isna(z):
+        return 0
+    o = sign * z
+    if o > NEUTRAL_BAND:
+        return 1
+    if o < -NEUTRAL_BAND:
+        return -1
+    return 0
+
+
+def _fusion_vote(oriented_sum: float) -> int:
+    """Collapse an oriented fusion sum to a -1 / 0 / +1 vote (pure sign)."""
+    if oriented_sum > 0:
+        return 1
+    if oriented_sum < 0:
+        return -1
+    return 0
 
 
 def compute_engine_score(normalized: dict, fusion_components: dict) -> dict:
-    """Confluence score across the 4 normalized metrics + 3 fusion components.
+    """Discrete confluence score: each of the 7 inputs votes -1/0/+1, summed.
 
-    Heuristic, not calibrated alpha (metrics are weak/unstable standalone). Each
-    input is put on a common +/-Z_CAP scale, noise-gated, then combined:
-    conviction = net * agreement, so conflicting inputs damp toward zero.
+    Range -7..+7. Higher = more bullish. Direction (vote magnitude only, not
+    calibrated alpha) is oriented per DIRECTION_SIGNS for the normalized metrics
+    and already baked into the oriented sum for the fusion components.
     """
-    contributions = {}
-
-    # Normalized metrics: z already ~standardised, cap + gate directly.
+    votes = {}
     for name, sign in DIRECTION_SIGNS.items():
-        z = normalized.get(name, {}).get("z_90")
-        contributions[name] = 0.0 if z is None or pd.isna(z) else _gate_clip(sign * z)
-
-    # Fusion components: normalise sum onto the same +/-Z_CAP scale, then gate.
+        votes[name] = _z_vote(normalized.get(name, {}).get("z_90"), sign)
     for name, fc in fusion_components.items():
-        max_mag = fc.get("max_mag", 0.0)
-        contributions[name] = (
-            0.0 if max_mag <= 0 else _gate_clip(fc["sum"] / max_mag * Z_CAP)
-        )
+        votes[name] = _fusion_vote(fc["sum"])
 
-    active = sum(1 for c in contributions.values() if c != 0)
-    net = sum(contributions.values())
-    if active > 0 and net != 0:
-        agree = sum(
-            1 for c in contributions.values() if c != 0 and (c > 0) == (net > 0)
-        )
-        agreement = agree / active
-    else:
-        agreement = 0.0
-
-    conviction = net * agreement
-    max_possible = Z_CAP * len(contributions)
-    value = round(conviction / max_possible * 100)
+    value = sum(votes.values())
+    active = sum(1 for v in votes.values() if v != 0)
 
     if value >= DIRECTION_THRESHOLD:
         direction = "bullish"
@@ -192,10 +180,8 @@ def compute_engine_score(normalized: dict, fusion_components: dict) -> dict:
     return {
         "value": value,
         "direction": direction,
-        "net": round(net, 3),
-        "agreement": round(agreement, 3),
         "active": active,
-        "contributions": {k: round(v, 3) for k, v in contributions.items()},
+        "votes": votes,
     }
 
 

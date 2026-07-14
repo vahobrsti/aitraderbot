@@ -97,21 +97,16 @@ class Command(BaseCommand):
         self.stdout.write(f"  mvrv_ls  {mvrv_h}   sum={fc['mvrv_ls']['sum']:+.0f}")
 
         s = m["score"]
+        v = s["votes"]
         self.stdout.write("\n" + "-" * 60)
-        self.stdout.write(f"ENGINE SCORE: {s['value']:+d}  ({s['direction'].upper()})")
-        self.stdout.write("-" * 60)
         self.stdout.write(
-            f"  net={s['net']:+.2f}  agreement={s['agreement']:.0%}  "
-            f"active={s['active']}/{len(s['contributions'])}"
+            f"ENGINE SCORE: {s['value']:+d} / 7  ({s['direction'].upper()})"
         )
-        c = s["contributions"]
+        self.stdout.write("-" * 60)
+        self.stdout.write(f"  active={s['active']}/{len(v)}")
         norm = ["mvrv_60d", "sentiment", "exchange_flow", "mvrv_composite"]
         fus = ["mdia", "whale", "mvrv_ls"]
-        self.stdout.write(
-            "  metrics:  " + "  ".join(f"{k}={c[k]:+.2f}" for k in norm)
-        )
-        self.stdout.write(
-            "  fusion:   " + "  ".join(f"{k}={c[k]:+.2f}" for k in fus)
-        )
+        self.stdout.write("  metrics:  " + "  ".join(f"{k}={v[k]:+d}" for k in norm))
+        self.stdout.write("  fusion:   " + "  ".join(f"{k}={v[k]:+d}" for k in fus))
 
         self.stdout.write("\n" + "=" * 60 + "\nDone.\n")
