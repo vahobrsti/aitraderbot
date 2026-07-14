@@ -67,26 +67,20 @@ class Command(BaseCommand):
             return "N/A" if val is None else f"{val:.{prec}f}"
 
         fusion = m["fusion"]
-        self.stdout.write("\n" + "=" * 60)
-        self.stdout.write(f"ENGINE METRICS: {date_str} | {fusion['state'].upper()}")
-        self.stdout.write("=" * 60)
+        self.stdout.write(f"\nEngine metrics: {date_str} | {fusion['state']}")
         self.stdout.write(
             f"fusion: {fusion['state']} (score {fusion['score']:+d}, "
             f"{fusion['confidence']}, bear_mode={fusion['bear_mode']})"
         )
 
-        self.stdout.write("\n" + "-" * 60)
-        self.stdout.write(f"{'metric':<15}{'value':>14}{'z(90d)':>9}   label")
-        self.stdout.write("-" * 60)
+        self.stdout.write(f"\n{'metric':<15}{'value':>14}{'z(90d)':>9}   label")
         for name, d in m["metrics"].items():
             self.stdout.write(
                 f"{name:<15}{fmt(d['value'], 3):>14}{fmt(d['z_90']):>9}   {d['label']}"
             )
 
         fc = m["fusion_components"]
-        self.stdout.write("\n" + "-" * 60)
-        self.stdout.write("FUSION COMPONENTS (oriented bullish+, per-horizon -> sum)")
-        self.stdout.write("-" * 60)
+        self.stdout.write("\nfusion components (oriented bullish+, per-horizon -> sum)")
         mdia_h = "  ".join(f"{k}={v:+d}" for k, v in fc["mdia"]["horizons"].items())
         self.stdout.write(f"  mdia     {mdia_h}   sum={fc['mdia']['sum']:+.0f}")
         self.stdout.write(
@@ -98,15 +92,11 @@ class Command(BaseCommand):
 
         s = m["score"]
         v = s["votes"]
-        self.stdout.write("\n" + "-" * 60)
-        self.stdout.write(
-            f"ENGINE SCORE: {s['value']:+d} / 7  ({s['direction'].upper()})"
-        )
-        self.stdout.write("-" * 60)
-        self.stdout.write(f"  active={s['active']}/{len(v)}")
         norm = ["mvrv_60d", "sentiment", "exchange_flow", "mvrv_composite"]
         fus = ["mdia", "whale", "mvrv_ls"]
+        self.stdout.write(
+            f"\nengine score: {s['value']:+d} / 7  ({s['direction']})  "
+            f"active={s['active']}/{len(v)}"
+        )
         self.stdout.write("  metrics:  " + "  ".join(f"{k}={v[k]:+d}" for k in norm))
         self.stdout.write("  fusion:   " + "  ".join(f"{k}={v[k]:+d}" for k in fus))
-
-        self.stdout.write("\n" + "=" * 60 + "\nDone.\n")
