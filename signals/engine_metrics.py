@@ -87,54 +87,50 @@ def _num(row: pd.Series, col: str):
     return float(val)
 
 
-def _sum_count(row: pd.Series, cols: list[str]) -> tuple[float, int]:
-    """Return (sum, count) over present, non-NaN horizon buckets."""
-    total = 0.0
+def _collapse_horizons(row: pd.Series, cols: list[str], prefix: str, flip: bool = False):
+    """Collapse each present horizon bucket to a directional -1/0/+1 vote.
+
+    Magnitude is intentionally discarded here: a strong ``mdia`` bucket (+/-2)
+    counts as one directional vote, same as +/-1, so no single horizon can carry
+    a whole component. Returns (horizons_dict, sum_of_votes, count).
+    """
+    horizons = {}
+    total = 0
     count = 0
     for c in cols:
         v = row.get(c, None)
-        if v is not None and not pd.isna(v):
-            total += float(v)
-            count += 1
-    return total, count
+        if v is None or pd.isna(v):
+            continue
+        vote = 0 if v == 0 else (1 if v > 0 else -1)
+        if flip:
+            vote = -vote
+        horizons[c.replace(prefix, "")] = vote
+        total += vote
+        count += 1
+    return horizons, total, count
 
 
 def compute_fusion_components(row: pd.Series) -> dict:
-    """Sum per-horizon fusion buckets, oriented so positive = bullish.
+    """Per-horizon fusion buckets collapsed to directional votes, oriented so
+    positive = bullish.
 
     mdia is sign-flipped (its raw buckets are negative-when-bullish: inflow < 0).
-    whale combines mega + small; mvrv_ls sums its trend horizons.
+    whale combines mega + small; mvrv_ls uses its trend horizons.
     """
-    mdia_raw, mdia_n = _sum_count(row, _MDIA_COLS)
-    mega, mega_n = _sum_count(row, _WHALE_MEGA_COLS)
-    small, small_n = _sum_count(row, _WHALE_SMALL_COLS)
-    mvrv_ls_raw, mvrv_ls_n = _sum_count(row, _MVRV_LS_COLS)
-
-    def _oriented_horizons(cols, prefix, flip=False):
-        out = {}
-        for c in cols:
-            v = row.get(c, None)
-            iv = 0 if v is None or pd.isna(v) else int(v)
-            out[c.replace(prefix, "")] = -iv if flip else iv
-        return out
+    mdia_h, mdia_sum, mdia_n = _collapse_horizons(row, _MDIA_COLS, "mdia_bucket_", flip=True)
+    mega_h, mega_sum, mega_n = _collapse_horizons(row, _WHALE_MEGA_COLS, "whale_mega_bucket_")
+    small_h, small_sum, small_n = _collapse_horizons(row, _WHALE_SMALL_COLS, "whale_small_bucket_")
+    mvrv_h, mvrv_sum, mvrv_n = _collapse_horizons(row, _MVRV_LS_COLS, "mvrv_ls_trend_")
 
     return {
-        "mdia": {
-            "sum": -mdia_raw,
-            "n": mdia_n,
-            "horizons": _oriented_horizons(_MDIA_COLS, "mdia_bucket_", flip=True),
-        },
+        "mdia": {"sum": mdia_sum, "n": mdia_n, "horizons": mdia_h},
         "whale": {
-            "sum": mega + small,
+            "sum": mega_sum + small_sum,
             "n": mega_n + small_n,
-            "mega_sum": mega,
-            "small_sum": small,
+            "mega_sum": mega_sum,
+            "small_sum": small_sum,
         },
-        "mvrv_ls": {
-            "sum": mvrv_ls_raw,
-            "n": mvrv_ls_n,
-            "horizons": _oriented_horizons(_MVRV_LS_COLS, "mvrv_ls_trend_"),
-        },
+        "mvrv_ls": {"sum": mvrv_sum, "n": mvrv_n, "horizons": mvrv_h},
     }
 
 
