@@ -1,10 +1,7 @@
 # signals/management/commands/analyze_engine.py
 """
-Django command to print the essential engine metrics for a single date.
-
-Mirrors the analyze_fusion command/endpoint pattern. Shows all canonical
-buckets plus exchange flow balance, sentiment, mvrv_composite, mvrv_60d and
-their z-scores for the requested (or latest) feature row.
+Django command to print the essential engine snapshot for a single date:
+per-metric value / 90-day z-score / position label, plus a confluence score.
 
 Usage:
     python manage.py analyze_engine --explain
@@ -22,24 +19,19 @@ from signals.engine_metrics import (
 
 
 class Command(BaseCommand):
-    help = "Print essential engine metrics (buckets, flow, sentiment, mvrv) for a date."
+    help = "Print the engine snapshot (value/z/label per metric + confluence score)."
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "--csv",
-            type=str,
-            default="features_14d_5pct.csv",
+            "--csv", type=str, default="features_14d_5pct.csv",
             help="Input features CSV",
         )
         parser.add_argument(
-            "--explain",
-            action="store_true",
-            help="Print the essential-metrics breakdown for the target date",
+            "--explain", action="store_true",
+            help="Print the snapshot for the target date",
         )
         parser.add_argument(
-            "--date",
-            type=str,
-            default=None,
+            "--date", type=str, default=None,
             help="Target date (YYYY-MM-DD), defaults to the latest row",
         )
 
@@ -55,7 +47,6 @@ class Command(BaseCommand):
             return
         df = ensure_normalized_columns(df)
 
-        # Resolve target row
         target_date = options.get("date")
         if target_date:
             df.index = pd.to_datetime(df.index)
@@ -69,88 +60,40 @@ class Command(BaseCommand):
             row = df.iloc[-1]
             date_str = str(df.index[-1])[:10]
 
-        metrics = collect_essential_metrics(row)
-        self._print_metrics(date_str, metrics)
+        self._print(date_str, collect_essential_metrics(row))
 
-    # ── output ──────────────────────────────────────────────────────
-    def _print_metrics(self, date_str: str, m: dict):
-        def fmt(val, prec=4):
+    def _print(self, date_str: str, m: dict):
+        def fmt(val, prec=2):
             return "N/A" if val is None else f"{val:.{prec}f}"
 
         fusion = m["fusion"]
-        self.stdout.write("\n" + "=" * 70)
+        self.stdout.write("\n" + "=" * 60)
         self.stdout.write(f"ENGINE METRICS: {date_str} | {fusion['state'].upper()}")
-        self.stdout.write("=" * 70)
-
+        self.stdout.write("=" * 60)
         self.stdout.write(
-            f"\nFUSION: score={fusion['score']:+d} | "
-            f"confidence={fusion['confidence']} | "
-            f"bear_mode={fusion['bear_mode']} | "
-            f"cycle_day={fmt(fusion['cycle_day'], 0)}"
+            f"fusion: {fusion['state']} (score {fusion['score']:+d}, "
+            f"{fusion['confidence']}, bear_mode={fusion['bear_mode']})"
         )
 
-        self.stdout.write("\n" + "-" * 70)
-        self.stdout.write("NORMALIZED vs 90-DAY BASELINE  (how stretched vs its own 3-month norm)")
-        self.stdout.write("-" * 70)
-        for name, n in m["normalized"].items():
+        self.stdout.write("\n" + "-" * 60)
+        self.stdout.write(f"{'metric':<15}{'value':>14}{'z(90d)':>9}   label")
+        self.stdout.write("-" * 60)
+        for name, d in m["metrics"].items():
             self.stdout.write(
-                f"  {name:15s} {n['position']:15s} "
-                f"(z={fmt(n['z_90'], 2)}, val={fmt(n['value'], 3)})"
+                f"{name:<15}{fmt(d['value'], 3):>14}{fmt(d['z_90']):>9}   {d['label']}"
             )
 
-        self.stdout.write("\n" + "-" * 70)
-        self.stdout.write("BUCKETS")
-        self.stdout.write("-" * 70)
-        for name, val in m["buckets"].items():
-            self.stdout.write(f"  {name:15s} {val}")
-
-        self.stdout.write("\n" + "-" * 70)
-        self.stdout.write("EXCHANGE FLOW BALANCE")
-        self.stdout.write("-" * 70)
-        ef = m["exchange_flow"]
-        p = ef["pressure"]
-        self.stdout.write(f"  >> {p['label']}  (z={fmt(p['value'], 2)})")
-        self.stdout.write(f"  bucket                       {m['buckets']['exchange_flow']}")
-        self.stdout.write(f"  flow_raw                     {fmt(ef['flow_raw'])}")
-        for w in (2, 4, 7, 14, 21):
-            self.stdout.write(f"  flow_sum_{w:<2}                   {fmt(ef[f'flow_sum_{w}'])}")
-        self.stdout.write(f"  distribution_pressure_score  {fmt(ef['distribution_pressure_score'])}")
-        self.stdout.write(f"  flow_pct_rank_180            {fmt(ef['flow_pct_rank_180'])}")
-        self.stdout.write(f"  z: flow_z_90={fmt(ef['z_scores']['flow_z_90'], 2)}  flow_z_180={fmt(ef['z_scores']['flow_z_180'], 2)}")
-
-        self.stdout.write("\n" + "-" * 70)
-        self.stdout.write("SENTIMENT")
-        self.stdout.write("-" * 70)
-        s = m["sentiment"]
-        self.stdout.write(f"  sentiment_norm               {fmt(s['sentiment_norm'], 2)}")
-        self.stdout.write(f"  sentiment_roll_pct_180d      {fmt(s['sentiment_roll_pct_180d'])}")
-        z = s["z_scores"]
+        s = m["score"]
+        self.stdout.write("\n" + "-" * 60)
+        self.stdout.write(f"ENGINE SCORE: {s['value']:+d}  ({s['direction'].upper()})")
+        self.stdout.write("-" * 60)
         self.stdout.write(
-            f"  z: 30d={fmt(z['sentiment_z_30d'], 2)}  90d={fmt(z['sentiment_z_90d'], 2)}  "
-            f"180d={fmt(z['sentiment_z_180d'], 2)}  365d={fmt(z['sentiment_z_365d'], 2)}"
+            f"  net={s['net']:+.2f}  agreement={s['agreement']:.0%}  "
+            f"active={s['active']}/{len(s['contributions'])}"
         )
-
-        self.stdout.write("\n" + "-" * 70)
-        self.stdout.write("MVRV COMPOSITE")
-        self.stdout.write("-" * 70)
-        mc = m["mvrv_composite"]
-        self.stdout.write(f"  mvrv_composite_pct           {fmt(mc['mvrv_composite_pct'], 2)}")
-        zc = mc["z_scores"]
-        self.stdout.write(
-            f"  z: 90d={fmt(zc['mvrv_comp_z_90d'], 2)}  180d={fmt(zc['mvrv_comp_z_180d'], 2)}  "
-            f"365d={fmt(zc['mvrv_comp_z_365d'], 2)}"
+        contribs = "  ".join(
+            f"{k}={v:+.2f}" for k, v in s["contributions"].items()
         )
+        self.stdout.write(f"  contributions: {contribs}")
 
-        self.stdout.write("\n" + "-" * 70)
-        self.stdout.write("MVRV 60D")
-        self.stdout.write("-" * 70)
-        m60 = m["mvrv_60d"]
-        self.stdout.write(f"  mvrv_60d                     {fmt(m60['mvrv_60d'], 3)}")
-        self.stdout.write(f"  mvrv_60d_pct_rank            {fmt(m60['mvrv_60d_pct_rank'])}")
-        self.stdout.write(f"  mvrv_60d_dist_from_max       {fmt(m60['mvrv_60d_dist_from_max'])}")
-        self.stdout.write(
-            f"  trend: falling={m60['is_falling']}  flattening={m60['is_flattening']}  rising={m60['is_rising']}"
-        )
-
-        self.stdout.write("\n" + "=" * 70)
-        self.stdout.write("Done.\n")
+        self.stdout.write("\n" + "=" * 60 + "\nDone.\n")

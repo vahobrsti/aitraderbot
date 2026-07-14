@@ -1,79 +1,23 @@
 # signals/engine_metrics.py
 """
-Essential engine metrics extraction.
+Essential engine metrics + confluence score for a single feature row.
 
-Collects the "at-a-glance" metrics that explain an engine decision for a single
-feature row: all canonical buckets, exchange flow balance, sentiment,
-mvrv_composite, mvrv_60d, and their z-scores.
+For each of four orthogonal metrics (mvrv_60d, sentiment, exchange_flow,
+mvrv_composite) we expose only what matters: the raw value, its 90-day z-score,
+and a human-readable position label. On top of those we compute a single
+confluence score that rewards agreement across metrics and gates out noise.
 
-Shared by the ``analyze_engine`` management command and the AnalyzeEngine API
-endpoint so both surfaces stay consistent.
+Shared by the ``analyze_engine`` command and the AnalyzeEngine API endpoint.
 """
 from __future__ import annotations
 
 import pandas as pd
 
 from signals.fusion import fuse_signals, FusionResult
-from signals.research.bucket_mapping import (
-    map_mdia_bucket,
-    map_whale_bucket,
-    map_mvrv_ls_bucket,
-    map_mvrv_60d_bucket,
-    map_flow_bucket,
-)
 
-# Mutually-exclusive flag buckets → active bucket name
-_SENTIMENT_BUCKET_FLAGS = {
-    "extreme_fear": "sent_bucket_extreme_fear",
-    "fear": "sent_bucket_fear",
-    "neutral": "sent_bucket_neutral",
-    "greed": "sent_bucket_greed",
-    "extreme_greed": "sent_bucket_extreme_greed",
-}
-
-_MVRV_COMPOSITE_BUCKET_FLAGS = {
-    "deep_undervalued": "mvrv_bucket_deep_undervalued",
-    "undervalued": "mvrv_bucket_undervalued",
-    "fair": "mvrv_bucket_fair",
-    "overvalued": "mvrv_bucket_overvalued",
-    "extreme_overvalued": "mvrv_bucket_extreme_overvalued",
-}
-
-# Exchange-flow bucket → (direction, magnitude) trader interpretation.
-# Inflow to exchanges = sell pressure; outflow = buy pressure.
-_FLOW_PRESSURE = {
-    "strong_inflow": ("sell", "strong"),
-    "inflow": ("sell", "moderate"),
-    "neutral": ("neutral", "none"),
-    "outflow": ("buy", "moderate"),
-    "strong_outflow": ("buy", "strong"),
-    "unknown": ("unknown", "unknown"),
-}
-
-
-def _flow_pressure(bucket: str, flow_z_90) -> dict:
-    """Translate the flow bucket into a buy/sell pressure reading.
-
-    ``value`` is the signed z-score (positive = sell pressure, negative = buy).
-    """
-    direction, magnitude = _FLOW_PRESSURE.get(bucket, ("unknown", "unknown"))
-    if direction == "neutral":
-        label = "NEUTRAL"
-    elif direction == "unknown":
-        label = "UNKNOWN"
-    else:
-        label = f"{direction.upper()} pressure ({magnitude})"
-    return {
-        "direction": direction,
-        "magnitude": magnitude,
-        "label": label,
-        "value": flow_z_90,
-    }
-
-
-# Normalized reading: (value, z_col) sources per metric. Window = 90d
-# (chosen data-driven via analyze_window_sweep — stability-dominant, weak/unstable
-# standalone predictive power at every window).
+# Normalized reading: (value_col, z_col) per metric. Window = 90d, chosen
+# data-driven via analyze_window_sweep (stability-dominant; standalone predictive
+# power is weak/unstable at every window, so metrics are combined via confluence).
 _NORMALIZED_SOURCES = {
     "mvrv_60d": ("mvrv_60d", "mvrv_60d_z_90d"),
     "sentiment": ("sentiment_norm", "sentiment_z_90d"),
@@ -81,11 +25,24 @@ _NORMALIZED_SOURCES = {
     "mvrv_composite": ("mvrv_composite_pct", "mvrv_comp_z_90d"),
 }
 
+# Bullish orientation of each metric's z-score (+1: high z = bullish;
+# -1: high z = bearish). See compute_engine_score docstring for rationale.
+DIRECTION_SIGNS = {
+    "mvrv_60d": +1,        # recent-buyer valuation rising vs its norm = bullish
+    "exchange_flow": -1,   # inflow to exchanges = distribution/sell pressure = bearish
+    "sentiment": -1,       # contrarian: greed = bearish, fear = bullish
+    "mvrv_composite": -1,  # mean-reversion: overvalued = bearish, undervalued = bullish
+}
+
+NEUTRAL_BAND = 0.5   # |z| below this contributes nothing (noise gate)
+Z_CAP = 2.0          # clip extreme z so one metric can't dominate the score
+DIRECTION_THRESHOLD = 20  # |score| below this = neutral / no edge
+
 
 def classify_z_position(z) -> str:
     """Map a z-score to a plain-language position vs its 90-day baseline.
 
-    Thresholds mirror the mvrv_composite / flow buckets (+/-0.5, +/-1.5).
+    Thresholds mirror the codebase convention (+/-0.5, +/-1.5).
     """
     if z is None or pd.isna(z):
         return "unknown"
@@ -125,36 +82,78 @@ def _num(row: pd.Series, col: str):
     return float(val)
 
 
-def _active_flag_bucket(row: pd.Series, flag_map: dict) -> str:
-    """Return the name of the single active (==1) flag bucket, else 'unknown'."""
-    for name, col in flag_map.items():
-        val = row.get(col, 0)
-        if val is not None and not pd.isna(val) and int(val) == 1:
-            return name
-    return "unknown"
+def compute_engine_score(normalized: dict) -> dict:
+    """Confluence score from the four normalized metric z-scores.
+
+    Method (heuristic, not calibrated alpha — the metrics are weak/unstable
+    standalone predictors, so the score's job is to summarise agreement, not to
+    claim edge):
+      1. Orient each z bullish via DIRECTION_SIGNS.
+      2. Gate noise: |z| < NEUTRAL_BAND contributes 0.
+      3. Clip to +/-Z_CAP so no single metric dominates.
+      4. net = sum of contributions; agreement = share of *active* metrics that
+         match net's sign. conviction = net * agreement, so conflicting signals
+         are damped toward zero ("chop / no real move").
+      5. Scale to -100..+100 and label direction.
+    """
+    contributions = {}
+    active = 0
+    for name, sign in DIRECTION_SIGNS.items():
+        z = normalized.get(name, {}).get("z_90")
+        if z is None or pd.isna(z) or abs(z) < NEUTRAL_BAND:
+            contributions[name] = 0.0
+            continue
+        d = sign * z
+        contributions[name] = float(max(-Z_CAP, min(Z_CAP, d)))
+        active += 1
+
+    net = sum(contributions.values())
+    if active > 0 and net != 0:
+        agree = sum(
+            1 for c in contributions.values() if c != 0 and (c > 0) == (net > 0)
+        )
+        agreement = agree / active
+    else:
+        agreement = 0.0
+
+    conviction = net * agreement
+    max_possible = Z_CAP * len(DIRECTION_SIGNS)
+    value = round(conviction / max_possible * 100)
+
+    if value >= DIRECTION_THRESHOLD:
+        direction = "bullish"
+    elif value <= -DIRECTION_THRESHOLD:
+        direction = "bearish"
+    else:
+        direction = "neutral"
+
+    return {
+        "value": value,
+        "direction": direction,
+        "net": round(net, 3),
+        "agreement": round(agreement, 3),
+        "active": active,
+        "contributions": {k: round(v, 3) for k, v in contributions.items()},
+    }
 
 
 def collect_essential_metrics(row: pd.Series, fusion_result: FusionResult = None) -> dict:
-    """
-    Build the essential-metrics dict for one feature row.
-
-    Sections: fusion, buckets, exchange_flow, sentiment, mvrv_composite, mvrv_60d.
-    Missing columns resolve to None (numeric) or 'unknown' (bucket).
+    """Build the reduced engine snapshot: fusion context, per-metric
+    value/z/label, and the confluence score.
     """
     if fusion_result is None:
         fusion_result = fuse_signals(row)
 
-    normalized = {}
+    metrics = {}
     for name, (value_col, z_col) in _NORMALIZED_SOURCES.items():
         z = _num(row, z_col)
-        normalized[name] = {
+        metrics[name] = {
             "value": _num(row, value_col),
             "z_90": z,
-            "position": classify_z_position(z),
+            "label": classify_z_position(z),
         }
 
     return {
-        "normalized": normalized,
         "fusion": {
             "state": fusion_result.state.value,
             "confidence": fusion_result.confidence.value,
@@ -162,56 +161,6 @@ def collect_essential_metrics(row: pd.Series, fusion_result: FusionResult = None
             "bear_mode": bool(fusion_result.components.get("bear_mode", False)),
             "cycle_day": fusion_result.components.get("cycle_day"),
         },
-        "buckets": {
-            "mdia": map_mdia_bucket(row),
-            "whale": map_whale_bucket(row),
-            "mvrv_ls": map_mvrv_ls_bucket(row),
-            "mvrv_60d": map_mvrv_60d_bucket(row),
-            "exchange_flow": map_flow_bucket(row),
-            "sentiment": _active_flag_bucket(row, _SENTIMENT_BUCKET_FLAGS),
-            "mvrv_composite": _active_flag_bucket(row, _MVRV_COMPOSITE_BUCKET_FLAGS),
-        },
-        "exchange_flow": {
-            "pressure": _flow_pressure(
-                map_flow_bucket(row), _num(row, "flow_z_90")
-            ),
-            "flow_raw": _num(row, "flow_raw"),
-            "flow_sum_2": _num(row, "flow_sum_2"),
-            "flow_sum_4": _num(row, "flow_sum_4"),
-            "flow_sum_7": _num(row, "flow_sum_7"),
-            "flow_sum_14": _num(row, "flow_sum_14"),
-            "flow_sum_21": _num(row, "flow_sum_21"),
-            "distribution_pressure_score": _num(row, "distribution_pressure_score"),
-            "flow_pct_rank_180": _num(row, "flow_pct_rank_180"),
-            "z_scores": {
-                "flow_z_90": _num(row, "flow_z_90"),
-                "flow_z_180": _num(row, "flow_z_180"),
-            },
-        },
-        "sentiment": {
-            "sentiment_norm": _num(row, "sentiment_norm"),
-            "sentiment_roll_pct_180d": _num(row, "sentiment_roll_pct_180d"),
-            "z_scores": {
-                "sentiment_z_30d": _num(row, "sentiment_z_30d"),
-                "sentiment_z_90d": _num(row, "sentiment_z_90d"),
-                "sentiment_z_180d": _num(row, "sentiment_z_180d"),
-                "sentiment_z_365d": _num(row, "sentiment_z_365d"),
-            },
-        },
-        "mvrv_composite": {
-            "mvrv_composite_pct": _num(row, "mvrv_composite_pct"),
-            "z_scores": {
-                "mvrv_comp_z_90d": _num(row, "mvrv_comp_z_90d"),
-                "mvrv_comp_z_180d": _num(row, "mvrv_comp_z_180d"),
-                "mvrv_comp_z_365d": _num(row, "mvrv_comp_z_365d"),
-            },
-        },
-        "mvrv_60d": {
-            "mvrv_60d": _num(row, "mvrv_60d"),
-            "mvrv_60d_pct_rank": _num(row, "mvrv_60d_pct_rank"),
-            "mvrv_60d_dist_from_max": _num(row, "mvrv_60d_dist_from_max"),
-            "is_falling": int(row.get("mvrv_60d_is_falling", 0) or 0),
-            "is_flattening": int(row.get("mvrv_60d_is_flattening", 0) or 0),
-            "is_rising": int(row.get("mvrv_60d_is_rising", 0) or 0),
-        },
+        "metrics": metrics,
+        "score": compute_engine_score(metrics),
     }

@@ -241,8 +241,8 @@ class ScoreValidationView(BaseResearchAPIView):
 class AnalyzeEngineView(BaseResearchAPIView):
     """GET /api/v1/fusion/analyze-engine/
 
-    Returns the essential engine metrics (buckets, exchange flow, sentiment,
-    mvrv_composite, mvrv_60d and z-scores) for a single date.
+    Returns the engine snapshot for a single date: fusion context, per-metric
+    value/90d-z/label, and the confluence score.
     """
 
     def get(self, request):
@@ -279,11 +279,11 @@ class AnalyzeEngineView(BaseResearchAPIView):
                 )
 
             row = df.loc[target_date]
-            metrics = collect_essential_metrics(row)
+            snapshot = collect_essential_metrics(row)
 
             return Response({
                 "meta": {"date": date_str, "model_version": "v1-static"},
-                "metrics": metrics,
+                **snapshot,
             })
         except Exception as e:
             return Response(
