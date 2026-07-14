@@ -87,14 +87,16 @@ def _num(row: pd.Series, col: str):
     return float(val)
 
 
-def _sum_cols(row: pd.Series, cols: list[str]) -> float:
-    """Sum present, non-NaN horizon buckets (missing horizons count as 0)."""
+def _sum_count(row: pd.Series, cols: list[str]) -> tuple[float, int]:
+    """Return (sum, count) over present, non-NaN horizon buckets."""
     total = 0.0
+    count = 0
     for c in cols:
         v = row.get(c, None)
         if v is not None and not pd.isna(v):
             total += float(v)
-    return total
+            count += 1
+    return total, count
 
 
 def compute_fusion_components(row: pd.Series) -> dict:
@@ -103,10 +105,10 @@ def compute_fusion_components(row: pd.Series) -> dict:
     mdia is sign-flipped (its raw buckets are negative-when-bullish: inflow < 0).
     whale combines mega + small; mvrv_ls sums its trend horizons.
     """
-    mdia_raw = _sum_cols(row, _MDIA_COLS)
-    mega = _sum_cols(row, _WHALE_MEGA_COLS)
-    small = _sum_cols(row, _WHALE_SMALL_COLS)
-    mvrv_ls_raw = _sum_cols(row, _MVRV_LS_COLS)
+    mdia_raw, mdia_n = _sum_count(row, _MDIA_COLS)
+    mega, mega_n = _sum_count(row, _WHALE_MEGA_COLS)
+    small, small_n = _sum_count(row, _WHALE_SMALL_COLS)
+    mvrv_ls_raw, mvrv_ls_n = _sum_count(row, _MVRV_LS_COLS)
 
     def _oriented_horizons(cols, prefix, flip=False):
         out = {}
@@ -119,15 +121,18 @@ def compute_fusion_components(row: pd.Series) -> dict:
     return {
         "mdia": {
             "sum": -mdia_raw,
+            "n": mdia_n,
             "horizons": _oriented_horizons(_MDIA_COLS, "mdia_bucket_", flip=True),
         },
         "whale": {
             "sum": mega + small,
+            "n": mega_n + small_n,
             "mega_sum": mega,
             "small_sum": small,
         },
         "mvrv_ls": {
             "sum": mvrv_ls_raw,
+            "n": mvrv_ls_n,
             "horizons": _oriented_horizons(_MVRV_LS_COLS, "mvrv_ls_trend_"),
         },
     }
@@ -145,11 +150,18 @@ def _z_vote(z, sign: int) -> int:
     return 0
 
 
-def _fusion_vote(oriented_sum: float) -> int:
-    """Collapse an oriented fusion sum to a -1 / 0 / +1 vote (pure sign)."""
-    if oriented_sum > 0:
+def _fusion_vote(oriented_sum: float, n: int) -> int:
+    """Collapse a fusion component to a -1 / 0 / +1 vote via the mean of its
+    horizons, rounded on the same 0.5 band as the metrics.
+
+    e.g. mvrv_ls sum -3 over 4 horizons = -0.75 -> -1; mdia +1 over 4 = +0.25 -> 0.
+    """
+    if n <= 0:
+        return 0
+    mean = oriented_sum / n
+    if mean >= NEUTRAL_BAND:
         return 1
-    if oriented_sum < 0:
+    if mean <= -NEUTRAL_BAND:
         return -1
     return 0
 
@@ -165,7 +177,7 @@ def compute_engine_score(normalized: dict, fusion_components: dict) -> dict:
     for name, sign in DIRECTION_SIGNS.items():
         votes[name] = _z_vote(normalized.get(name, {}).get("z_90"), sign)
     for name, fc in fusion_components.items():
-        votes[name] = _fusion_vote(fc["sum"])
+        votes[name] = _fusion_vote(fc["sum"], fc.get("n", 0))
 
     value = sum(votes.values())
     active = sum(1 for v in votes.values() if v != 0)
