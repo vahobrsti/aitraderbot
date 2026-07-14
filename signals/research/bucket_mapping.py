@@ -110,6 +110,38 @@ def map_mvrv_60d_bucket(row: pd.Series) -> str:
 
 
 # ────────────────────────────────────────────────────────────────────
+# Exchange-flow buckets  (z-score → category)
+# ────────────────────────────────────────────────────────────────────
+def map_flow_bucket(row: pd.Series) -> str:
+    """
+    Discretise exchange flow balance into directional buckets using the
+    90-day z-score of the 7-day flow sum (``flow_z_90``).
+
+    exchange_flow_balance = inflows - outflows, so a positive z-score means
+    more BTC than usual moving *into* exchanges (distribution pressure).
+
+    Thresholds mirror the mvrv_composite z-buckets (+/-0.5, +/-1.5):
+      z >  1.5  → strong_inflow
+      z >  0.5  → inflow
+      z >= -0.5 → neutral
+      z >= -1.5 → outflow
+      z <  -1.5 → strong_outflow
+    """
+    z = row.get("flow_z_90", None)
+    if z is None or pd.isna(z):
+        return "unknown"
+    if z > 1.5:
+        return "strong_inflow"
+    if z > 0.5:
+        return "inflow"
+    if z >= -0.5:
+        return "neutral"
+    if z >= -1.5:
+        return "outflow"
+    return "strong_outflow"
+
+
+# ────────────────────────────────────────────────────────────────────
 # Bulk helpers
 # ────────────────────────────────────────────────────────────────────
 def add_bucket_columns(df: pd.DataFrame) -> pd.DataFrame:

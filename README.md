@@ -375,6 +375,7 @@ Hit rates from 5% target, 14-day horizon, 345 trades (with overlays and cooldown
 | `/api/v1/signals/latest/setup/` | GET | ✅ | **Trade setup for latest tradeable signal** |
 | `/api/v1/options/predict/` | POST | ✅ | **Predict option price under BTC scenarios** |
 | `/api/v1/fusion/explain/` | GET | ✅ | Explain fusion logic |
+| `/api/v1/fusion/analyze-engine/` | GET | ✅ | **Engine snapshot + confluence score for a date** (`?date=YYYY-MM-DD`) |
 
 ### Authentication
 
@@ -575,6 +576,14 @@ python manage.py analyze_hit_rate --type MVRV_SHORT
 
 # Calibrate policy from path analysis
 python manage.py calibrate_policy
+
+# Engine snapshot + confluence score for a date (latest if --date omitted)
+python manage.py analyze_engine --explain
+python manage.py analyze_engine --explain --date 2024-11-20
+
+# Data-driven rolling-window selection for metric normalization
+python manage.py analyze_window_sweep --by-year
+python manage.py analyze_window_sweep --csv features_14d_4pct.csv --windows 60,90
 
 # Diagnose why trades didn't fire
 python manage.py diagnose_notrade --year 2025
@@ -831,6 +840,98 @@ A tactical short signal for bear market conditions (cycle days 540-900 post-halv
 ```bash
 # Check today's signal status
 python manage.py analyze_mvrv_short --today
+```
+
+---
+
+## Engine Snapshot & Confluence Score
+
+A compact, at-a-glance read of the engine for a single date, available as both a
+management command (`analyze_engine`) and an API endpoint
+(`/api/v1/fusion/analyze-engine/`). Both share the same logic in
+`signals/engine_metrics.py`.
+
+It shows two families of inputs, then combines them into one confluence score:
+
+1. **Normalized metrics** — `mvrv_60d`, `sentiment`, `exchange_flow`,
+   `mvrv_composite`, each as its raw value, 90-day z-score, and a position label
+   (`stretched_high / high / normal / low / stretched_low`). The 90-day window was
+   chosen data-driven via `analyze_window_sweep` (stability-dominant).
+2. **Fusion components** — `mdia`, `whale`, `mvrv_ls`, each a sum of per-horizon
+   `-1/0/+1` buckets, oriented so positive = bullish (mdia is sign-flipped since
+   its raw buckets are negative-when-bullish; whale combines mega + small).
+
+### Confluence Score (−7 … +7)
+
+Each of the 7 inputs collapses to a single **−1 / 0 / +1 vote**; the score is
+their sum, so higher = more bullish.
+
+- Normalized metrics vote via a 0.5 z-score neutral band (a `normal` reading votes 0).
+- Fusion components vote on the **mean of their per-horizon directional votes**,
+  rounded on the same 0.5 band (e.g. `mvrv_ls` −3 over 4 horizons = −0.75 → −1).
+- Direction orientation: `exchange_flow` inflow = bearish, `sentiment` greed =
+  bearish (contrarian), `mvrv_composite` overvalued = bearish (mean-reversion),
+  `mvrv_60d` rising = bullish.
+
+> This is a transparent heuristic confluence read, not a calibrated alpha signal —
+> standalone predictive power of these metrics is weak/unstable (see
+> `analyze_window_sweep`), so the score summarizes agreement, it does not claim edge.
+
+### Command
+
+```bash
+python manage.py analyze_engine --explain --date 2024-11-20
+```
+
+```
+Engine metrics: 2024-11-20 | no_trade
+fusion: no_trade (score +0, low, bear_mode=False)
+
+metric                  value   z(90d)   label
+mvrv_60d                1.237     2.07   stretched_high
+sentiment              -0.429    -0.54   low
+exchange_flow      -91056.817    -4.06   stretched_low
+mvrv_composite         20.686     2.19   stretched_high
+
+fusion components (oriented bullish+, per-horizon -> sum)
+  mdia     1d=+1  2d=+1  4d=+1  7d=+1   sum=+4
+  whale    mega=+0  small=-3   sum=-3
+  mvrv_ls  2d=+1  4d=+1  7d=+1  14d=+1   sum=+4
+
+engine score: +4 / 7  (bullish)  active=6/7
+  metrics:  mvrv_60d=+1  sentiment=+1  exchange_flow=+1  mvrv_composite=-1
+  fusion:   mdia=+1  whale=+0  mvrv_ls=+1
+```
+
+### API
+
+```bash
+curl -H "Authorization: Token YOUR_TOKEN" \
+     "http://localhost:8000/api/v1/fusion/analyze-engine/?date=2024-11-20"
+```
+
+```json
+{
+  "meta": { "date": "2024-11-20", "model_version": "v1-static" },
+  "fusion": { "state": "no_trade", "confidence": "low", "score": 0, "bear_mode": false, "cycle_day": 215.0 },
+  "metrics": {
+    "mvrv_60d": { "value": 1.237, "z_90": 2.073, "label": "stretched_high" },
+    "sentiment": { "value": -0.429, "z_90": -0.540, "label": "low" },
+    "exchange_flow": { "value": -91056.82, "z_90": -4.060, "label": "stretched_low" },
+    "mvrv_composite": { "value": 20.686, "z_90": 2.187, "label": "stretched_high" }
+  },
+  "fusion_components": {
+    "mdia": { "sum": 4, "n": 4, "horizons": { "1d": 1, "2d": 1, "4d": 1, "7d": 1 } },
+    "whale": { "sum": -3, "n": 9, "mega_sum": 0, "small_sum": -3 },
+    "mvrv_ls": { "sum": 4, "n": 4, "horizons": { "2d": 1, "4d": 1, "7d": 1, "14d": 1 } }
+  },
+  "score": {
+    "value": 4,
+    "direction": "bullish",
+    "active": 6,
+    "votes": { "mvrv_60d": 1, "sentiment": 1, "exchange_flow": 1, "mvrv_composite": -1, "mdia": 1, "whale": 0, "mvrv_ls": 1 }
+  }
+}
 ```
 
 ---
