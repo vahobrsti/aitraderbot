@@ -1082,7 +1082,7 @@ class SignalService:
         chain_records = list(
             OptionSnapshot.objects.filter(
                 timestamp__date=latest_date, underlying="BTC", exchange="deribit",
-            ).values("symbol", "exchange", "timestamp", "strike", "option_type", "delta", "bid", "ask", "dte", "spread_pct", "spot_price")
+            ).values("symbol", "exchange", "timestamp", "expiry", "strike", "option_type", "delta", "bid", "ask", "dte", "spread_pct", "spot_price")
         )
         if chain_records:
             income_chain_df = pd.DataFrame.from_records(chain_records)
@@ -1113,6 +1113,7 @@ class SignalService:
                     "credit_width_pct": s.credit_width_pct,
                     "otm_pct": s.otm_pct,
                     "risk_reward": s.risk_reward,
+                    "expiry": s.expiry,
                 }
                 for s in gate.setups
             ]

@@ -95,6 +95,7 @@ class SpreadCandidate:
     dte: int
     max_loss: float
     short_delta: float
+    expiry: Optional[str] = None  # contract expiry date (YYYY-MM-DD), if available
 
 
 @dataclass
@@ -112,6 +113,7 @@ class SpreadSetup:
     credit_width_pct: float  # credit / spread_width
     otm_pct: float  # distance from spot as %
     risk_reward: float  # credit / max_loss
+    expiry: Optional[str] = None  # contract expiry date (YYYY-MM-DD), if available
 
 
 @dataclass
@@ -849,6 +851,7 @@ def select_spread_tiers(
             credit_width_pct=best.credit / best.spread_width,
             otm_pct=otm_pct,
             risk_reward=best.credit / best.max_loss if best.max_loss > 0 else 0.0,
+            expiry=best.expiry,
         ))
 
     return setups
@@ -934,6 +937,13 @@ def _find_all_valid_spreads(
         if credit_ratio < required_credit_pct:
             continue
 
+        # Real contract expiry (if the chain carries it). Preferred over the
+        # DTE day-count so downstream messages show an actual expiry date.
+        raw_expiry = short_row.get("expiry")
+        expiry_str = None
+        if raw_expiry is not None and pd.notna(raw_expiry):
+            expiry_str = pd.Timestamp(raw_expiry).strftime("%Y-%m-%d")
+
         max_loss = spread_width - credit
         candidates.append(SpreadCandidate(
             short_strike=short_strike,
@@ -943,6 +953,7 @@ def _find_all_valid_spreads(
             dte=short_dte,
             max_loss=max_loss,
             short_delta=short_delta,
+            expiry=expiry_str,
         ))
 
     return candidates

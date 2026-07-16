@@ -5,6 +5,7 @@ Sends formatted signal messages to configured Telegram chat.
 import asyncio
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -13,6 +14,9 @@ from telegram.constants import ParseMode
 
 # Ensure .env is loaded
 load_dotenv()
+
+# Telegram rejects messages longer than 4096 characters.
+TELEGRAM_MAX_CHARS = 4096
 
 
 @dataclass
@@ -269,6 +273,13 @@ class TelegramNotifier:
         tier_emojis = {"low": "🟢", "medium": "🟡", "high": "🔴"}
         tier_labels = {"low": "LOW RISK", "medium": "MEDIUM RISK", "high": "HIGH RISK"}
 
+        # DTE is days-to-expiry measured from the signal date, so the expiry
+        # date is signal_date + dte days.
+        try:
+            base_date = datetime.strptime(signal_date, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            base_date = None
+
         for s in setups:
             tier = s.get("risk_tier", "unknown")
             t_emoji = tier_emojis.get(tier, "❓")
@@ -288,7 +299,15 @@ class TelegramNotifier:
             lines.append(f"  Width: `${s['spread_width']:,.0f}`")
             lines.append(f"  Credit: `${s['credit']:,.2f}` ({s['credit_width_pct']*100:.1f}%)")
             lines.append(f"  Max Loss: `${s['max_loss']:,.2f}`")
-            lines.append(f"  DTE: {s['dte']}d | R:R: 1:{s['risk_reward']:.2f}")
+            # Prefer the real contract expiry when present; otherwise fall back
+            # to signal_date + dte (older signals persisted without an expiry).
+            expiry_str = s.get("expiry")
+            if not expiry_str and base_date is not None:
+                expiry_str = f"{base_date + timedelta(days=int(s['dte'])):%Y-%m-%d}"
+            if expiry_str:
+                lines.append(f"  Expiry: `{expiry_str}` ({s['dte']}d) | R:R: 1:{s['risk_reward']:.2f}")
+            else:
+                lines.append(f"  DTE: {s['dte']}d | R:R: 1:{s['risk_reward']:.2f}")
             lines.append("")
 
         lines.append("*Exit Rules (all tiers):*")
@@ -411,5 +430,26 @@ class TelegramNotifier:
             except Exception as e:
                 print(f"Trade setup notification error: {e}")
 
-        message = section_divider.join(parts)
-        return asyncio.run(self._send_async(message))
+        return self._send_parts(parts, section_divider)
+
+    def _send_parts(self, parts: list, divider: str) -> bool:
+        """
+        Send message parts as a single combined message when it fits within
+        Telegram's character limit, otherwise send each part separately.
+
+        Merging into one message is the desired UX, but an oversized combined
+        message is rejected outright — delivering nothing. Falling back to
+        per-part sends (the pre-merge behavior) keeps the notification flowing.
+        """
+        parts = [p for p in parts if p]
+        if not parts:
+            return False
+
+        combined = divider.join(parts)
+        if len(combined) <= TELEGRAM_MAX_CHARS:
+            return asyncio.run(self._send_async(combined))
+
+        result = True
+        for part in parts:
+            result = asyncio.run(self._send_async(part)) and result
+        return result
