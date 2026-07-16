@@ -255,19 +255,8 @@ class TelegramNotifier:
         message = setup.to_telegram_message()
         return asyncio.run(self._send_async(message))
 
-    def send_income_spread_setups(self, signal_date: str, signal_type: str, score: float, setups: list) -> bool:
-        """
-        Send income spread risk-tiered setups to Telegram.
-
-        Args:
-            signal_date: Date string.
-            signal_type: BULL_PUT_SPREAD or BEAR_CALL_SPREAD.
-            score: Income gate score (0-100).
-            setups: List of setup dicts with risk_tier, short_strike, etc.
-
-        Returns:
-            True if sent successfully, False otherwise.
-        """
+    def _format_income_spread_message(self, signal_date: str, signal_type: str, score: float, setups: list) -> str:
+        """Format income spread risk-tiered setups into a Telegram message."""
         emoji = "🟢" if signal_type == "BULL_PUT_SPREAD" else "🔴"
 
         lines = [
@@ -308,7 +297,22 @@ class TelegramNotifier:
         lines.append("  Scale: Day 12 → 25%")
         lines.append("  Max Hold: 18 days")
 
-        message = "\n".join(lines)
+        return "\n".join(lines)
+
+    def send_income_spread_setups(self, signal_date: str, signal_type: str, score: float, setups: list) -> bool:
+        """
+        Send income spread risk-tiered setups to Telegram.
+
+        Args:
+            signal_date: Date string.
+            signal_type: BULL_PUT_SPREAD or BEAR_CALL_SPREAD.
+            score: Income gate score (0-100).
+            setups: List of setup dicts with risk_tier, short_strike, etc.
+
+        Returns:
+            True if sent successfully, False otherwise.
+        """
+        message = self._format_income_spread_message(signal_date, signal_type, score, setups)
         return asyncio.run(self._send_async(message))
     
     def send_from_model(self, daily_signal, include_setup: bool = True) -> bool:
@@ -348,12 +352,23 @@ class TelegramNotifier:
             signal_option_put=daily_signal.signal_option_put,
             stop_loss=getattr(daily_signal, 'stop_loss', '') or "",
         )
-        result = self.send_signal(signal)
-        
-        # Send trade setup if requested and signal is tradeable
+        # Skip NO_TRADE unless it's a vetoed signal (matches send_signal behavior)
+        if signal.trade_decision == "NO_TRADE" and not overlay_veto:
+            return False
+
+        # Build a single combined message: signal + (option alert) + setup.
+        # Keeping everything in one Telegram message makes it easier to navigate.
+        section_divider = "\n\n═══════════════\n\n"
+        parts = [self._format_message(signal)]
+
+        # Rule-based option alert (only for option trades)
+        if signal.trade_decision in ("OPTION_CALL", "OPTION_PUT"):
+            parts.append(self._format_option_signal_message(signal))
+
+        # Trade setup if requested and signal is tradeable
         if include_setup and daily_signal.trade_decision != "NO_TRADE" and not overlay_veto:
             try:
-                # Income spreads: send risk-tiered setups directly
+                # Income spreads: build risk-tiered setups directly
                 if daily_signal.trade_decision in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"):
                     setups = daily_signal.income_spread_setups or []
                     if setups:
@@ -379,13 +394,12 @@ class TelegramNotifier:
                                 'validation_passed': True,
                             }
                         )
-                        setup_result = self.send_income_spread_setups(
+                        parts.append(self._format_income_spread_message(
                             signal_date=str(daily_signal.date),
                             signal_type=daily_signal.trade_decision,
                             score=daily_signal.income_spread_score,
                             setups=setups,
-                        )
-                        result = result and setup_result
+                        ))
                 else:
                     from execution.services.trade_setup import TradeSetupBuilder
                     builder = TradeSetupBuilder()
@@ -393,9 +407,9 @@ class TelegramNotifier:
                     if setup:
                         # Persist setup to database
                         setup.save_to_db(signal=daily_signal)
-                        setup_result = self.send_trade_setup(setup)
-                        result = result and setup_result
+                        parts.append(setup.to_telegram_message())
             except Exception as e:
                 print(f"Trade setup notification error: {e}")
-        
-        return result
+
+        message = section_divider.join(parts)
+        return asyncio.run(self._send_async(message))
