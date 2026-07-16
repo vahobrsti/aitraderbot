@@ -15,6 +15,9 @@ from telegram.constants import ParseMode
 # Ensure .env is loaded
 load_dotenv()
 
+# Telegram rejects messages longer than 4096 characters.
+TELEGRAM_MAX_CHARS = 4096
+
 
 @dataclass
 class SignalMessage:
@@ -427,5 +430,26 @@ class TelegramNotifier:
             except Exception as e:
                 print(f"Trade setup notification error: {e}")
 
-        message = section_divider.join(parts)
-        return asyncio.run(self._send_async(message))
+        return self._send_parts(parts, section_divider)
+
+    def _send_parts(self, parts: list, divider: str) -> bool:
+        """
+        Send message parts as a single combined message when it fits within
+        Telegram's character limit, otherwise send each part separately.
+
+        Merging into one message is the desired UX, but an oversized combined
+        message is rejected outright — delivering nothing. Falling back to
+        per-part sends (the pre-merge behavior) keeps the notification flowing.
+        """
+        parts = [p for p in parts if p]
+        if not parts:
+            return False
+
+        combined = divider.join(parts)
+        if len(combined) <= TELEGRAM_MAX_CHARS:
+            return asyncio.run(self._send_async(combined))
+
+        result = True
+        for part in parts:
+            result = asyncio.run(self._send_async(part)) and result
+        return result
