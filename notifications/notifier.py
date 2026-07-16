@@ -296,9 +296,13 @@ class TelegramNotifier:
             lines.append(f"  Width: `${s['spread_width']:,.0f}`")
             lines.append(f"  Credit: `${s['credit']:,.2f}` ({s['credit_width_pct']*100:.1f}%)")
             lines.append(f"  Max Loss: `${s['max_loss']:,.2f}`")
-            if base_date is not None:
-                expiry = base_date + timedelta(days=int(s['dte']))
-                lines.append(f"  Expiry: `{expiry:%Y-%m-%d}` ({s['dte']}d) | R:R: 1:{s['risk_reward']:.2f}")
+            # Prefer the real contract expiry when present; otherwise fall back
+            # to signal_date + dte (older signals persisted without an expiry).
+            expiry_str = s.get("expiry")
+            if not expiry_str and base_date is not None:
+                expiry_str = f"{base_date + timedelta(days=int(s['dte'])):%Y-%m-%d}"
+            if expiry_str:
+                lines.append(f"  Expiry: `{expiry_str}` ({s['dte']}d) | R:R: 1:{s['risk_reward']:.2f}")
             else:
                 lines.append(f"  DTE: {s['dte']}d | R:R: 1:{s['risk_reward']:.2f}")
             lines.append("")
