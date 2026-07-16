@@ -5,6 +5,7 @@ Sends formatted signal messages to configured Telegram chat.
 import asyncio
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -269,6 +270,13 @@ class TelegramNotifier:
         tier_emojis = {"low": "🟢", "medium": "🟡", "high": "🔴"}
         tier_labels = {"low": "LOW RISK", "medium": "MEDIUM RISK", "high": "HIGH RISK"}
 
+        # DTE is days-to-expiry measured from the signal date, so the expiry
+        # date is signal_date + dte days.
+        try:
+            base_date = datetime.strptime(signal_date, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            base_date = None
+
         for s in setups:
             tier = s.get("risk_tier", "unknown")
             t_emoji = tier_emojis.get(tier, "❓")
@@ -288,7 +296,11 @@ class TelegramNotifier:
             lines.append(f"  Width: `${s['spread_width']:,.0f}`")
             lines.append(f"  Credit: `${s['credit']:,.2f}` ({s['credit_width_pct']*100:.1f}%)")
             lines.append(f"  Max Loss: `${s['max_loss']:,.2f}`")
-            lines.append(f"  DTE: {s['dte']}d | R:R: 1:{s['risk_reward']:.2f}")
+            if base_date is not None:
+                expiry = base_date + timedelta(days=int(s['dte']))
+                lines.append(f"  Expiry: `{expiry:%Y-%m-%d}` ({s['dte']}d) | R:R: 1:{s['risk_reward']:.2f}")
+            else:
+                lines.append(f"  DTE: {s['dte']}d | R:R: 1:{s['risk_reward']:.2f}")
             lines.append("")
 
         lines.append("*Exit Rules (all tiers):*")
