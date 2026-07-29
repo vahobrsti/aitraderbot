@@ -379,8 +379,16 @@ class Command(BaseCommand):
         """Print compact setup summary."""
         self.stdout.write(f"  Direction:  {setup.direction}")
         self.stdout.write(f"  Expiry:     {setup.expiry} (DTE: {setup.dte})")
-        self.stdout.write(f"  Long Leg:   {setup.long_leg.symbol} @ ${setup.long_leg.price:,.2f} (Δ{setup.long_leg.delta:.3f})")
-        self.stdout.write(f"  Short Leg:  {setup.short_leg.symbol} @ ${setup.short_leg.price:,.2f} (Δ{setup.short_leg.delta:.3f})")
+        if setup.extra_legs:
+            # Multi-leg structure (e.g. iron condor): print every leg with its
+            # action, since long_leg/short_leg alone omit the protective wings.
+            for leg in [setup.long_leg, setup.short_leg, *setup.extra_legs]:
+                self.stdout.write(
+                    f"  {leg.action:<4} Leg:  {leg.symbol} @ ${leg.price:,.2f} (Δ{leg.delta:.3f})"
+                )
+        else:
+            self.stdout.write(f"  Long Leg:   {setup.long_leg.symbol} @ ${setup.long_leg.price:,.2f} (Δ{setup.long_leg.delta:.3f})")
+            self.stdout.write(f"  Short Leg:  {setup.short_leg.symbol} @ ${setup.short_leg.price:,.2f} (Δ{setup.short_leg.delta:.3f})")
         self.stdout.write(f"  Width:      ${setup.spread_width:,.0f} ({setup.spread_width_pct*100:.1f}%)")
         self.stdout.write(f"  Net Debit:  ${setup.net_debit:,.2f}")
         self.stdout.write(f"  Max Profit: ${setup.max_profit:,.2f}")
