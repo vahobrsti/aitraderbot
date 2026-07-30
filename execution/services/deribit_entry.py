@@ -327,14 +327,15 @@ class DeribitEntryEngine:
             return None
 
         # Shared credit-filtered, delta-ranked selection (authoritative routine).
-        # Deribit quotes are BTC-denominated, so convert to USD via spot to match
-        # the USD wing width when computing credit %.
+        # OptionSnapshot bid/ask are already converted to USD at ingestion
+        # (datafeed/ingestion/deribit_options.py), same as the setup path, so no
+        # price scaling is applied (price_to_usd=1.0).
         delta_target = abs(self.policy.get_signal_delta("IRON_CONDOR"))
         candidate = select_condor_structure(
             call_candidates, put_candidates, spot, condor_cfg, delta_target,
             mvrv_short_call=signal.condor_short_call,
             mvrv_short_put=signal.condor_short_put,
-            price_to_usd=spot,
+            price_to_usd=1.0,
         )
         if candidate is None:
             logger.warning("No constructible condor structure found")

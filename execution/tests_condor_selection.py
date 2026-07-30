@@ -177,22 +177,37 @@ class CondorSelectorTests(TestCase):
         best = select_condor_structure(calls, puts, SPOT, cfg(), DELTA_TARGET)
         self.assertIsNone(best)
 
-    def test_price_to_usd_conversion_for_btc_quotes(self):
-        """BTC-quoted chains qualify once converted to USD via price_to_usd."""
-        # ~0.008 BTC net credit on a $2000 wing = ~25% once × spot.
+    def test_credit_uses_quote_currency_by_default(self):
+        """OptionSnapshot bid/ask are already USD at ingestion (both the setup and
+        Deribit paths), so the default price_to_usd=1.0 computes credit directly
+        in the quote currency — no scaling by spot."""
         calls = [
-            mkopt(67000, 0.19, 0.0055, 0.0057),
-            mkopt(69000, 0.084, 0.0022, 0.0023),  # wing
+            mkopt(67000, 0.19, 350, 360),
+            mkopt(69000, 0.084, 140, 146),  # wing
         ]
         puts = [
-            mkopt(61000, 0.23, 0.0080, 0.0082),
-            mkopt(59000, 0.11, 0.0046, 0.0048),   # wing
+            mkopt(61000, 0.23, 510, 520),
+            mkopt(59000, 0.11, 295, 300),   # wing
         ]
-        # Without conversion the credit % is ~0 and would fail the gate.
-        raw = select_condor_structure(calls, puts, SPOT, cfg(), DELTA_TARGET)
-        self.assertFalse(raw.credit_qualified)
-        # With price_to_usd=spot the same structure clears the gate.
-        usd = select_condor_structure(
-            calls, puts, SPOT, cfg(), DELTA_TARGET, price_to_usd=SPOT,
+        best = select_condor_structure(calls, puts, SPOT, cfg(), DELTA_TARGET)
+        # net credit = 350 + 510 - 146 - 300 = 414 on a $2000 wing = 20.7%.
+        self.assertTrue(best.credit_qualified)
+        self.assertAlmostEqual(best.credit_pct, 414.0 / 2000.0, places=4)
+
+    def test_price_to_usd_scales_credit(self):
+        """price_to_usd is a pure unit multiplier on the collected credit; a
+        multiplier > 1 must not be used for already-USD snapshots (guards against
+        the double-conversion bug)."""
+        calls = [
+            mkopt(67000, 0.19, 350, 360),
+            mkopt(69000, 0.084, 140, 146),
+        ]
+        puts = [
+            mkopt(61000, 0.23, 510, 520),
+            mkopt(59000, 0.11, 295, 300),
+        ]
+        base = select_condor_structure(calls, puts, SPOT, cfg(), DELTA_TARGET)
+        scaled = select_condor_structure(
+            calls, puts, SPOT, cfg(), DELTA_TARGET, price_to_usd=2.0,
         )
-        self.assertTrue(usd.credit_qualified)
+        self.assertAlmostEqual(scaled.credit_pct, base.credit_pct * 2.0, places=4)
