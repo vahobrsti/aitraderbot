@@ -112,8 +112,12 @@ class CondorConfig:
     min_credit_pct: float = 0.15  # Min credit as % of wing width
     max_concurrent: int = 1
     drift_multiplier: float = 1.5
-    spot_call_band: float = 0.10
-    spot_put_band: float = 0.10
+    spot_call_band: float = 0.10  # fallback only — no longer the primary selector
+    spot_put_band: float = 0.10   # fallback only — no longer the primary selector
+    # Sellable delta band for short-strike selection (mirrors the income gate).
+    # Delta is the ranking target; min_credit_pct is the hard eligibility gate.
+    min_delta: float = 0.12
+    max_delta: float = 0.35
 
 
 @dataclass 
@@ -600,6 +604,8 @@ POLICY_V1 = PolicyVersion(
         drift_multiplier=1.5,
         spot_call_band=0.10,
         spot_put_band=0.10,
+        min_delta=0.12,
+        max_delta=0.35,
     ),
     
     # Scoring weights for candidate ranking

@@ -475,6 +475,186 @@ class TradeSetup:
         return snapshot
 
 
+@dataclass
+class CondorCandidate:
+    """A complete four-leg iron condor candidate at a single expiry."""
+    short_call: object
+    long_call: object
+    short_put: object
+    long_put: object
+    net_credit: float
+    wing_width: float
+    credit_pct: float
+    credit_qualified: bool
+
+
+def select_condor_structure(
+    call_options,
+    put_options,
+    spot_price,
+    condor_cfg,
+    delta_target,
+    mvrv_short_call=None,
+    mvrv_short_put=None,
+    price_to_usd=1.0,
+):
+    """
+    Select an iron condor by credit-filtered, delta-ranked candidate search.
+
+    Credit adequacy (``condor_cfg.min_credit_pct``) is the hard eligibility
+    constraint; the policy delta target is the ranking objective. MVRV strikes,
+    when provided, act only as a ranking preference among already
+    credit-qualified candidates — they never move a strike below the credit gate.
+
+    ``price_to_usd`` converts option quotes to the same currency as the strikes
+    (wing width) before computing credit %. Setup snapshots are USD-quoted
+    (multiplier 1.0); Deribit snapshots are BTC-quoted (pass spot).
+
+    The search enumerates complete four-leg structures per expiry (so all legs
+    share one expiry), keeps those meeting the credit minimum, and ranks them by
+    closeness to the delta target, then MVRV alignment, then liquidity, with a
+    stable strike/expiry tiebreak so results never depend on DB row order.
+
+    Returns:
+        The best CondorCandidate. If none are credit-qualified but a structure is
+        constructible, returns the highest-credit candidate with
+        ``credit_qualified=False`` so the caller can surface a blocking setup.
+        Returns None when no four-leg structure can be built.
+    """
+    min_delta = condor_cfg.min_delta
+    max_delta = condor_cfg.max_delta
+    wing_offset = condor_cfg.wing_offset_usd
+    min_credit_pct = condor_cfg.min_credit_pct
+
+    def abs_delta(o):
+        return abs(float(o.delta)) if o.delta is not None else None
+
+    # Group options by expiry so each candidate is a single shared-expiry condor.
+    expiries = {}
+    for o in call_options:
+        expiries.setdefault(o.expiry, ([], []))[0].append(o)
+    for o in put_options:
+        expiries.setdefault(o.expiry, ([], []))[1].append(o)
+
+    candidates = []
+    for expiry, (calls, puts) in expiries.items():
+        # Short legs: OTM, inside the sellable delta band, with a sell price.
+        short_calls = [
+            c for c in calls
+            if float(c.strike) >= spot_price
+            and abs_delta(c) is not None
+            and min_delta <= abs_delta(c) <= max_delta
+            and c.bid is not None
+        ]
+        short_puts = [
+            p for p in puts
+            if float(p.strike) <= spot_price
+            and abs_delta(p) is not None
+            and min_delta <= abs_delta(p) <= max_delta
+            and p.bid is not None
+        ]
+        if not short_calls or not short_puts:
+            continue
+
+        # Pair each short leg with its protective wing at wing_offset_usd.
+        call_spreads = []
+        for sc in short_calls:
+            wing_target = float(sc.strike) + wing_offset
+            wing = min(
+                [c for c in calls
+                 if float(c.strike) > float(sc.strike) and c.ask is not None],
+                key=lambda x: abs(float(x.strike) - wing_target),
+                default=None,
+            )
+            if wing is not None:
+                call_spreads.append((sc, wing))
+
+        put_spreads = []
+        for sp in short_puts:
+            wing_target = float(sp.strike) - wing_offset
+            wing = min(
+                [p for p in puts
+                 if float(p.strike) < float(sp.strike) and p.ask is not None],
+                key=lambda x: abs(float(x.strike) - wing_target),
+                default=None,
+            )
+            if wing is not None:
+                put_spreads.append((sp, wing))
+
+        # Form complete four-leg condors and score their credit.
+        for sc, lc in call_spreads:
+            for sp, lp in put_spreads:
+                net_credit = (
+                    float(sc.bid) + float(sp.bid)
+                    - float(lc.ask) - float(lp.ask)
+                ) * price_to_usd
+                call_wing_width = float(lc.strike) - float(sc.strike)
+                put_wing_width = float(sp.strike) - float(lp.strike)
+                wing_width = max(call_wing_width, put_wing_width)
+                if wing_width <= 0 or net_credit <= 0:
+                    continue
+                credit_pct = net_credit / wing_width
+                candidates.append(CondorCandidate(
+                    short_call=sc,
+                    long_call=lc,
+                    short_put=sp,
+                    long_put=lp,
+                    net_credit=net_credit,
+                    wing_width=wing_width,
+                    credit_pct=credit_pct,
+                    credit_qualified=credit_pct >= min_credit_pct,
+                ))
+
+    if not candidates:
+        return None
+
+    def delta_closeness(c):
+        return round(
+            abs(abs_delta(c.short_call) - delta_target)
+            + abs(abs_delta(c.short_put) - delta_target),
+            6,
+        )
+
+    def mvrv_penalty(c):
+        # Prefer shorts at or beyond the MVRV cushion (further OTM). Lower better.
+        penalty = 0
+        if mvrv_short_call is not None and float(c.short_call.strike) < float(mvrv_short_call):
+            penalty += 1
+        if mvrv_short_put is not None and float(c.short_put.strike) > float(mvrv_short_put):
+            penalty += 1
+        return penalty
+
+    def liquidity_cost(c):
+        legs = (c.short_call, c.long_call, c.short_put, c.long_put)
+        return round(sum(float(l.spread_pct) for l in legs if l.spread_pct is not None), 6)
+
+    def stable_key(c):
+        return (
+            str(c.short_call.expiry),
+            float(c.short_call.strike),
+            float(c.short_put.strike),
+        )
+
+    qualified = [c for c in candidates if c.credit_qualified]
+    if qualified:
+        qualified.sort(key=lambda c: (
+            delta_closeness(c),
+            mvrv_penalty(c),
+            liquidity_cost(c),
+            stable_key(c),
+        ))
+        return qualified[0]
+
+    # No credit-qualified candidate — return the highest-credit structure so the
+    # caller can build a blocking, sub-minimum setup for diagnostics.
+    candidates.sort(key=lambda c: (
+        -c.credit_pct,
+        delta_closeness(c),
+        stable_key(c),
+    ))
+    return candidates[0]
+
+
 class TradeSetupBuilder:
     """
     Builds complete trade setups from signals and option data.
@@ -974,14 +1154,14 @@ class TradeSetupBuilder:
         tier = self.policy.get_tier(signal_type)
         risk_budget = tier.risk_usd * tier.spread_pct
         
-        # Get signal for MVRV-based strike targets (if available)
+        # MVRV strikes are a ranking preference only (not a hard target).
         try:
             signal = DailySignal.active().get(date=signal_date, trade_decision="IRON_CONDOR")
-            target_short_call = signal.condor_short_call or spot_price * (1 + condor_cfg.spot_call_band)
-            target_short_put = signal.condor_short_put or spot_price * (1 - condor_cfg.spot_put_band)
+            mvrv_short_call = signal.condor_short_call
+            mvrv_short_put = signal.condor_short_put
         except DailySignal.DoesNotExist:
-            target_short_call = spot_price * (1 + condor_cfg.spot_call_band)
-            target_short_put = spot_price * (1 - condor_cfg.spot_put_band)
+            mvrv_short_call = None
+            mvrv_short_put = None
         
         # Get latest timestamp for options on signal date. Resolve a DTE band
         # over both option types so calls and puts share the same expiry even
@@ -1019,46 +1199,20 @@ class TradeSetupBuilder:
         if not call_options or not put_options:
             return None
         
-        # Find short call (closest to target, OTM)
-        short_call = min(
-            [o for o in call_options if float(o.strike) >= spot_price],
-            key=lambda x: abs(float(x.strike) - target_short_call),
-            default=None
+        # Credit-filtered, delta-ranked selection. Credit adequacy is the hard
+        # eligibility constraint; the policy Δ target is the ranking objective.
+        delta_target = abs(self.policy.get_signal_delta(signal_type))
+        candidate = select_condor_structure(
+            call_options, put_options, spot_price, condor_cfg, delta_target,
+            mvrv_short_call=mvrv_short_call, mvrv_short_put=mvrv_short_put,
         )
-        if not short_call:
+        if candidate is None:
             return None
         
-        # Find long call (wing, same expiry, higher strike)
-        long_call_target = float(short_call.strike) + condor_cfg.wing_offset_usd
-        long_call = min(
-            [o for o in call_options 
-             if o.expiry == short_call.expiry and float(o.strike) > float(short_call.strike)],
-            key=lambda x: abs(float(x.strike) - long_call_target),
-            default=None
-        )
-        if not long_call:
-            return None
-        
-        # Find short put (closest to target, OTM)
-        short_put = min(
-            [o for o in put_options 
-             if float(o.strike) <= spot_price and o.expiry == short_call.expiry],
-            key=lambda x: abs(float(x.strike) - target_short_put),
-            default=None
-        )
-        if not short_put:
-            return None
-        
-        # Find long put (wing, same expiry, lower strike)
-        long_put_target = float(short_put.strike) - condor_cfg.wing_offset_usd
-        long_put = min(
-            [o for o in put_options 
-             if o.expiry == short_call.expiry and float(o.strike) < float(short_put.strike)],
-            key=lambda x: abs(float(x.strike) - long_put_target),
-            default=None
-        )
-        if not long_put:
-            return None
+        short_call = candidate.short_call
+        long_call = candidate.long_call
+        short_put = candidate.short_put
+        long_put = candidate.long_put
         
         # Calculate condor metrics
         # Net credit = (short call bid + short put bid) - (long call ask + long put ask)
@@ -1184,10 +1338,11 @@ class TradeSetupBuilder:
         warnings = []
         blocking = []
         
-        # Check credit percentage
+        # Check credit percentage — sub-minimum credit is a blocking failure,
+        # not a warning, so structurally poor condors cannot pass validation.
         credit_pct = net_credit / wing_width if wing_width > 0 else 0
         if credit_pct < condor_cfg.min_credit_pct:
-            warnings.append(f"Credit {credit_pct:.1%} below minimum {condor_cfg.min_credit_pct:.1%}")
+            blocking.append(f"Credit {credit_pct:.1%} below minimum {condor_cfg.min_credit_pct:.1%}")
         
         # Check wing distances
         call_dist_pct = (float(short_call.strike) - spot_price) / spot_price
