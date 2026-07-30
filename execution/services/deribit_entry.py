@@ -30,6 +30,7 @@ from datafeed.models import OptionSnapshot, RawDailyData
 from signals.models import DailySignal
 from execution.services.policy import get_policy, PolicyVersion
 from execution.services.instrument_selector import InstrumentSelector
+from execution.services.trade_setup import select_condor_structure
 
 logger = logging.getLogger(__name__)
 
@@ -305,56 +306,52 @@ class DeribitEntryEngine:
         dte_cfg = self.policy.get_dte_target("IRON_CONDOR")
         condor_cfg = self.policy.condor
 
-        # MVRV drift strike targets from signal pipeline
-        target_short_call = signal.condor_short_call or spot * (1 + condor_cfg.spot_call_band)
-        target_short_put = signal.condor_short_put or spot * (1 - condor_cfg.spot_put_band)
-
         legs: list[LegPlan] = []
         warnings: list[str] = []
 
-        # --- Short call (SELL) ---
+        # Candidate chains (Deribit snapshots are BTC-quoted).
         call_candidates = self.selector.find_candidates(
             option_type="call",
             side="sell",
             dte_min=dte_cfg.min_dte,
             dte_max=dte_cfg.max_dte,
         )
-        short_call = self._find_nearest_from_candidates(call_candidates, target_short_call)
-        if not short_call:
-            logger.warning("No short call strike found for condor")
-            return None
-
-        # --- Long call (wing) ---
-        long_call_target = float(short_call.strike) + condor_cfg.wing_offset_usd
-        long_call = self._find_nearest_from_candidates(
-            call_candidates, long_call_target, same_expiry_as=short_call
-        )
-        if not long_call:
-            logger.error("No long call wing found - condor would have unlimited upside risk")
-            return None
-
-        # --- Short put (SELL) ---
         put_candidates = self.selector.find_candidates(
             option_type="put",
             side="sell",
             dte_min=dte_cfg.min_dte,
             dte_max=dte_cfg.max_dte,
         )
-        short_put = self._find_nearest_from_candidates(
-            put_candidates, target_short_put, same_expiry_as=short_call
-        )
-        if not short_put:
-            logger.warning("No short put strike found for condor")
+        if not call_candidates or not put_candidates:
+            logger.warning("No condor candidates found")
             return None
 
-        # --- Long put (wing) ---
-        long_put_target = float(short_put.strike) - condor_cfg.wing_offset_usd
-        long_put = self._find_nearest_from_candidates(
-            put_candidates, long_put_target, same_expiry_as=short_call
+        # Shared credit-filtered, delta-ranked selection (authoritative routine).
+        # Deribit quotes are BTC-denominated, so convert to USD via spot to match
+        # the USD wing width when computing credit %.
+        delta_target = abs(self.policy.get_signal_delta("IRON_CONDOR"))
+        candidate = select_condor_structure(
+            call_candidates, put_candidates, spot, condor_cfg, delta_target,
+            mvrv_short_call=signal.condor_short_call,
+            mvrv_short_put=signal.condor_short_put,
+            price_to_usd=spot,
         )
-        if not long_put:
-            logger.error("No long put wing found - condor would have unlimited downside risk")
+        if candidate is None:
+            logger.warning("No constructible condor structure found")
             return None
+
+        # Sub-minimum credit is a hard reject on the live path (not a warning).
+        if not candidate.credit_qualified:
+            logger.warning(
+                "Condor credit %.1f%% below minimum %.1f%% — rejecting",
+                candidate.credit_pct * 100, condor_cfg.min_credit_pct * 100,
+            )
+            return None
+
+        short_call = candidate.short_call
+        long_call = candidate.long_call
+        short_put = candidate.short_put
+        long_put = candidate.long_put
 
         # Build legs (all 4 required)
         legs.append(self._snapshot_to_leg(short_call, side="sell", leg_type=LegType.SHORT_CALL))
@@ -362,7 +359,9 @@ class DeribitEntryEngine:
         legs.append(self._snapshot_to_leg(short_put, side="sell", leg_type=LegType.SHORT_PUT))
         legs.append(self._snapshot_to_leg(long_put, side="buy", leg_type=LegType.LONG_PUT))
 
-        # Estimate credit
+        # Mid-based credit estimate for the rationale. Eligibility was already
+        # enforced above via candidate.credit_qualified, which uses the actual
+        # wing width and USD-converted quotes.
         credit = Decimal("0")
         for leg in legs:
             if leg.mid_price:
@@ -370,14 +369,7 @@ class DeribitEntryEngine:
                     credit += leg.mid_price
                 else:
                     credit -= leg.mid_price
-
-        # Check minimum credit threshold
-        wing_width = condor_cfg.wing_offset_usd
-        credit_usd = float(credit) * spot
-        credit_pct = credit_usd / wing_width if wing_width > 0 else 0
-        
-        if credit_pct < condor_cfg.min_credit_pct:
-            warnings.append(f"Credit {credit_pct:.1%} below minimum {condor_cfg.min_credit_pct:.1%}")
+        credit_pct = candidate.credit_pct
 
         tier = self.policy.get_tier("IRON_CONDOR")
         tier_risk = tier.risk_usd

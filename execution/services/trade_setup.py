@@ -496,6 +496,7 @@ def select_condor_structure(
     delta_target,
     mvrv_short_call=None,
     mvrv_short_put=None,
+    price_to_usd=1.0,
 ):
     """
     Select an iron condor by credit-filtered, delta-ranked candidate search.
@@ -504,6 +505,10 @@ def select_condor_structure(
     constraint; the policy delta target is the ranking objective. MVRV strikes,
     when provided, act only as a ranking preference among already
     credit-qualified candidates — they never move a strike below the credit gate.
+
+    ``price_to_usd`` converts option quotes to the same currency as the strikes
+    (wing width) before computing credit %. Setup snapshots are USD-quoted
+    (multiplier 1.0); Deribit snapshots are BTC-quoted (pass spot).
 
     The search enumerates complete four-leg structures per expiry (so all legs
     share one expiry), keeps those meeting the credit minimum, and ranks them by
@@ -582,7 +587,7 @@ def select_condor_structure(
                 net_credit = (
                     float(sc.bid) + float(sp.bid)
                     - float(lc.ask) - float(lp.ask)
-                )
+                ) * price_to_usd
                 call_wing_width = float(lc.strike) - float(sc.strike)
                 put_wing_width = float(sp.strike) - float(lp.strike)
                 wing_width = max(call_wing_width, put_wing_width)

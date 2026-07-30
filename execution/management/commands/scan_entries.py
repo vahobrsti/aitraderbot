@@ -210,18 +210,21 @@ class Command(BaseCommand):
         self.stdout.write("IRON CONDOR SCAN")
         self.stdout.write(f"{'=' * 80}")
 
-        target_call = signal.condor_short_call or spot * 1.10
-        target_put = signal.condor_short_put or spot * 0.90
-
-        self.stdout.write(f"Target short call: ${target_call:,.0f} (+{(target_call/spot - 1)*100:.1f}%)")
-        self.stdout.write(f"Target short put:  ${target_put:,.0f} (-{(1 - target_put/spot)*100:.1f}%)")
+        # MVRV levels are an indicative cushion reference only. Actual strikes are
+        # chosen by the shared delta-ranked, credit-filtered selector in the plan.
+        if signal.condor_short_call or signal.condor_short_put:
+            ref_call = signal.condor_short_call
+            ref_put = signal.condor_short_put
+            if ref_call:
+                self.stdout.write(f"MVRV cushion call (ref): ${ref_call:,.0f} (+{(ref_call/spot - 1)*100:.1f}%)")
+            if ref_put:
+                self.stdout.write(f"MVRV cushion put  (ref): ${ref_put:,.0f} (-{(1 - ref_put/spot)*100:.1f}%)")
 
         if signal.condor_strike_meta:
             meta = signal.condor_strike_meta
             self.stdout.write(f"MVRV drift: {meta.get('mvrv_drift', 'n/a')}")
-            self.stdout.write(f"Call source: {meta.get('call_source', 'n/a')}")
-            self.stdout.write(f"Put source: {meta.get('put_source', 'n/a')}")
 
+        self.stdout.write("Actual strikes selected by delta target + credit gate:")
         plan = engine.plan_entry(signal, spot_price=spot)
         if plan and plan.is_condor:
             self._print_plan_summary(plan)
