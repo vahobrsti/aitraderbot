@@ -41,3 +41,4 @@ typing_extensions==4.15.0
 tzdata==2025.2
 urllib3==2.5.0
 pybit>=5.8.0
+ib_async>=1.0.3
