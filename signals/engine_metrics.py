@@ -30,7 +30,7 @@ _NORMALIZED_SOURCES = {
 
 # Bullish orientation of each normalized metric's z (+1: high z bullish).
 DIRECTION_SIGNS = {
-    "mvrv_60d": +1,        # recent-buyer valuation rising vs norm = bullish
+    "mvrv_60d": -1,        # mean-reversion: recent buyers deep in profit = bearish
     "exchange_flow": -1,   # inflow to exchanges = sell pressure = bearish
     "sentiment": -1,       # contrarian: greed = bearish, fear = bullish
     "mvrv_composite": -1,  # mean-reversion: overvalued = bearish
