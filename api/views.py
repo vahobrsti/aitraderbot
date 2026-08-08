@@ -10,8 +10,12 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from signals.models import DailySignal
-from .serializers import DailySignalSerializer, DailySignalSummarySerializer
+from signals.models import DailySignal, IbitWheelSetup
+from .serializers import (
+    DailySignalSerializer,
+    DailySignalSummarySerializer,
+    IbitWheelSetupSerializer,
+)
 
 
 class DailySignalListView(generics.ListAPIView):
@@ -294,6 +298,61 @@ class TradeSetupLatestView(APIView):
             )
         
         return Response(setup.to_dict())
+
+
+class IbitWheelLatestView(APIView):
+    """
+    GET /api/v1/ibit-wheel/latest/
+
+    Return the IBIT wheel setup(s) for the most recent date that has any,
+    as a list (a date may carry both a put and a call setup).
+    """
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        latest = IbitWheelSetup.objects.order_by('-signal_date').first()
+        if latest is None:
+            return Response(
+                {"error": "No IBIT wheel setups found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        qs = IbitWheelSetup.objects.filter(signal_date=latest.signal_date).order_by('trade_decision')
+        return Response(IbitWheelSetupSerializer(qs, many=True).data)
+
+
+class IbitWheelDetailView(APIView):
+    """
+    GET /api/v1/ibit-wheel/<date>/
+    GET /api/v1/ibit-wheel/<date>/?type=BULL_PUT_SPREAD
+
+    Return the IBIT wheel setup(s) for a specific date. Date format: YYYY-MM-DD.
+    Optional ?type= filters to a single trade decision.
+    """
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, date):
+        try:
+            signal_date = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            return Response(
+                {"error": "Invalid date format. Use YYYY-MM-DD"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        qs = IbitWheelSetup.objects.filter(signal_date=signal_date)
+        signal_type = request.query_params.get('type')
+        if signal_type:
+            qs = qs.filter(trade_decision=signal_type.upper())
+        qs = qs.order_by('trade_decision')
+
+        if not qs.exists():
+            return Response(
+                {"error": f"No IBIT wheel setup found for {date}"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(IbitWheelSetupSerializer(qs, many=True).data)
 
 
 class HealthCheckView(APIView):

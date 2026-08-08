@@ -281,12 +281,13 @@ ExchangeAccount.objects.create(
 
 ---
 
-## 🪙 IBIT Wheel via IBKR (Phase 1: data + Telegram, no execution)
+## 🪙 IBIT Wheel via IBKR (Phase 1: data + API, no execution)
 
 Runs the income-gate signals as IBIT wheel positions (cash-secured put for
-`BULL_PUT_SPREAD`, covered call for `BEAR_CALL_SPREAD`) and publishes them to
-Telegram alongside the BTC setup. **This phase places no orders** — it collects
-the IBIT option chain and publishes a signal.
+`BULL_PUT_SPREAD`, covered call for `BEAR_CALL_SPREAD`), **persists the selection
+to the database, and exposes it via the API** — it is not sent to Telegram (the
+BTC signal still goes to Telegram via `generate_signal --notify`). **This phase
+places no orders.**
 
 Unlike Bybit/Deribit (REST + API key), IBKR requires a running, logged-in
 **IB Gateway**; Django talks to it over a local socket. There is no API key.
@@ -344,7 +345,10 @@ sudo journalctl -u ibkr-gateway -f
 ```bash
 cd /var/www/app && source venv/bin/activate
 python manage.py collect_options --exchange ibkr --dry-run   # should list IBIT contracts
-python manage.py publish_ibit_wheel --latest --dry-run       # should print selected legs
+python manage.py compute_ibit_wheel --latest --dry-run       # should print selected legs
+python manage.py compute_ibit_wheel --latest                 # persist the setup
+curl -H "Authorization: Token YOUR_TOKEN" \
+  https://options.somimobile.com/api/v1/ibit-wheel/latest/   # retrieve it
 ```
 
 Off-hours IBKR returns frozen data (no live IV/greeks), so run these while the
@@ -356,8 +360,8 @@ US market is open.
 # Collect IBIT option chain — US market hours only (14:00–20:00 UTC, Mon–Fri)
 45 14-20 * * 1-5 cd /var/www/app && /var/www/app/venv/bin/python manage.py collect_options --exchange ibkr >> /var/www/app/logs/cron.log 2>&1
 
-# Publish IBIT wheel + BTC setup to Telegram (after :16 signal generation)
-20 15-20 * * 1-5 cd /var/www/app && /var/www/app/venv/bin/python manage.py publish_ibit_wheel --latest >> /var/www/app/logs/cron.log 2>&1
+# Compute + persist IBIT wheel setup (after :16 signal generation); retrieve via API
+20 14-20 * * 1-5 cd /var/www/app && /var/www/app/venv/bin/python manage.py compute_ibit_wheel --latest >> /var/www/app/logs/cron.log 2>&1
 ```
 
 ### IBIT commands
@@ -365,8 +369,15 @@ US market is open.
 | Command | Purpose | When |
 |---------|---------|------|
 | `collect_options --exchange ibkr` | Snapshot IBIT chain to `OptionSnapshot` | Hourly, market hours |
-| `publish_ibit_wheel --latest` | Publish IBIT wheel + BTC setup to Telegram | After signal gen, market hours |
-| `publish_ibit_wheel --latest --dry-run` | Print selection without sending | Manual (test) |
+| `compute_ibit_wheel --latest` | Compute + persist IBIT wheel setup (retrieve via API) | After signal gen, market hours |
+| `compute_ibit_wheel --latest --dry-run` | Print selection without saving | Manual (test) |
+
+### Retrieve the IBIT wheel via API
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `/api/v1/ibit-wheel/latest/` | Yes | Wheel setup(s) for the most recent date |
+| `/api/v1/ibit-wheel/<date>/` | Yes | Wheel setup(s) for a date (`?type=BULL_PUT_SPREAD` to filter) |
 
 ### Troubleshooting
 

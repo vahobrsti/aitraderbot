@@ -295,3 +295,54 @@ class DailySignal(models.Model):
 
     def __str__(self):
         return f"{self.date} | {self.fusion_state} | {self.trade_decision}"
+
+
+class IbitWheelSetup(models.Model):
+    """
+    Persisted IBIT wheel selection for an income signal.
+
+    The income-gate signals (BULL_PUT_SPREAD / BEAR_CALL_SPREAD) are run against
+    the IBIT option chain to pick single short-leg wheel positions (cash-secured
+    put / covered call). Rather than pushing these to Telegram, we store the
+    selection here and expose it via the API for on-demand retrieval.
+
+    One row per (signal_date, trade_decision); recomputed intraday and updated in
+    place. ``selection_hash`` lets the compute job skip a write when nothing
+    changed, so ``updated_at`` reflects the last time the selection actually moved.
+    """
+    signal_date = models.DateField(db_index=True)
+    trade_decision = models.CharField(
+        max_length=30, help_text="BULL_PUT_SPREAD or BEAR_CALL_SPREAD"
+    )
+    side = models.CharField(max_length=4, help_text="put or call")
+    position = models.CharField(
+        max_length=20, help_text="cash_secured_put or covered_call"
+    )
+    spot_price = models.FloatField(help_text="IBIT spot used for selection")
+    dte_mode = models.CharField(max_length=10, default="income")
+
+    # List of selected legs (one per risk tier). Each leg dict carries
+    # risk_tier, strike, delta, credit, premium_usd, otm_pct, dte, expiry,
+    # symbol, bid, ask, spread_pct, cash_reserve_usd.
+    legs = models.JSONField(default=list)
+
+    # sha256 of the selected legs — used to detect intraday changes.
+    selection_hash = models.CharField(max_length=64)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "ibit_wheel_setup"
+        ordering = ["-signal_date", "trade_decision"]
+        verbose_name = "IBIT Wheel Setup"
+        verbose_name_plural = "IBIT Wheel Setups"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["signal_date", "trade_decision"],
+                name="unique_ibit_wheel_per_signal",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.signal_date} | {self.trade_decision} | {len(self.legs)} legs"
