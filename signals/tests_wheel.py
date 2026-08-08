@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 import pandas as pd
 from django.test import TestCase
 
-from signals.wheel import select_wheel_legs, wheel_side_for_decision, IBIT_MULTIPLIER
+from signals.wheel import (
+    IBIT_MULTIPLIER,
+    select_wheel_legs,
+    selection_hash,
+    wheel_side_for_decision,
+)
 
 SPOT = 36.68
 _TS = datetime(2026, 8, 7, 16, 0, tzinfo=timezone.utc)
@@ -125,6 +130,23 @@ class SelectWheelLegsEdgeTests(TestCase):
         df = _chain()
         df["dte"] = 5.0
         self.assertEqual(select_wheel_legs(df, "put", SPOT, dte_mode="income"), [])
+
+
+class SelectionHashTests(TestCase):
+    def test_hash_is_stable_and_order_independent(self):
+        legs = select_wheel_legs(_chain(), "put", SPOT, dte_mode="income")
+        h1 = selection_hash(legs)
+        h2 = selection_hash(list(reversed(legs)))
+        self.assertEqual(h1, h2)
+        self.assertEqual(len(h1), 64)
+
+    def test_hash_changes_when_selection_changes(self):
+        full = select_wheel_legs(_chain(), "put", SPOT, dte_mode="income")
+        fewer = full[:-1]  # drop a tier -> different selection
+        self.assertNotEqual(selection_hash(full), selection_hash(fewer))
+
+    def test_empty_selection_has_hash(self):
+        self.assertEqual(len(selection_hash([])), 64)
 
 
 class WheelTelegramFormatTests(TestCase):

@@ -20,9 +20,10 @@ import pandas as pd
 from django.core.management.base import BaseCommand, CommandError
 
 from datafeed.models import OptionSnapshot
+from notifications.models import WheelPublication
 from signals.income_gate import IncomeGateConfig, dedupe_chain_to_latest
 from signals.models import DailySignal
-from signals.wheel import select_wheel_legs, wheel_side_for_decision
+from signals.wheel import select_wheel_legs, selection_hash, wheel_side_for_decision
 
 INCOME_DECISIONS = ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD")
 
@@ -42,6 +43,10 @@ class Command(BaseCommand):
             help="Max age of IBIT snapshots to use (default: 24)",
         )
         parser.add_argument("--dry-run", action="store_true", help="Print instead of sending")
+        parser.add_argument(
+            "--force", action="store_true",
+            help="Re-publish even if an identical selection was already sent",
+        )
 
     def handle(self, *args, **options):
         target = self._resolve_date(options)
@@ -104,6 +109,21 @@ class Command(BaseCommand):
                 sent_any = True
                 continue
 
+            # Dedup: skip if the identical selection was already published for
+            # this (date, decision). The hourly market-hours cron would otherwise
+            # resend the same alert every run. A changed selection (different
+            # strike/expiry/tier) produces a new hash and is re-published.
+            new_hash = selection_hash(legs)
+            if not options["force"]:
+                prior = WheelPublication.objects.filter(
+                    signal_date=target, trade_decision=signal.trade_decision
+                ).first()
+                if prior and prior.selection_hash == new_hash:
+                    self.stdout.write(
+                        f"  ↳ Already published (unchanged) — skipping {signal.trade_decision}"
+                    )
+                    continue
+
             ok = notifier.send_ibit_wheel(
                 signal_date=str(target),
                 side=side,
@@ -115,6 +135,12 @@ class Command(BaseCommand):
             )
             sent_any = sent_any or ok
             if ok:
+                # Record only on success so a failed send retries next run.
+                WheelPublication.objects.update_or_create(
+                    signal_date=target,
+                    trade_decision=signal.trade_decision,
+                    defaults={"selection_hash": new_hash},
+                )
                 self.stdout.write(self.style.SUCCESS(f"  ✓ Sent {signal.trade_decision}"))
             else:
                 self.stderr.write(self.style.ERROR(f"  Failed to send {signal.trade_decision}"))

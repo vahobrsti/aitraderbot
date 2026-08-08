@@ -139,6 +139,24 @@ def select_wheel_legs(
     return legs
 
 
+def selection_hash(legs: list) -> str:
+    """
+    Stable sha256 over the selected legs, used to dedupe Telegram publications.
+
+    Keyed on what a human would consider "the same alert": risk tier, side, and
+    the exact contract (strike + expiry). Ordering-independent so an unchanged
+    selection always hashes the same; changes intraday (different strike/expiry)
+    produce a new hash and are re-published.
+    """
+    import hashlib
+
+    parts = sorted(
+        f"{leg.risk_tier}:{leg.side}:{leg.strike:g}:{leg.expiry or ''}:{leg.dte}"
+        for leg in legs
+    )
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
 def wheel_side_for_decision(trade_decision: str) -> Optional[str]:
     """Map an income-gate decision to the wheel short-leg side."""
     d = (trade_decision or "").upper()
