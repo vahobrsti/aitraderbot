@@ -41,7 +41,9 @@ PROJECT_USER="${PROJECT_USER:-deploy}"
 USER_HOME="$(getent passwd "${PROJECT_USER}" | cut -d: -f6)"
 IBC_VERSION="${IBC_VERSION:-3.20.0}"          # verify at github.com/IbcAlpha/IBC/releases
 IBC_PATH="/opt/ibc"
-TWS_PATH="${USER_HOME}/Jts"                    # IB Gateway install dir
+IB_INSTALL_DIR="${USER_HOME}/Jts"              # installer drops files here (flat layout)
+GW_BASE="${USER_HOME}/ibgw"                    # clean base holding IBC's canonical ibgateway/<ver>
+TWS_PATH="${GW_BASE}"                          # IBC tws-path: expects ${TWS_PATH}/ibgateway/<ver>
 IBC_INI="${USER_HOME}/ibc/config.ini"
 LOG_PATH="${USER_HOME}/ibc/logs"
 ENV_FILE="/etc/ibkr-gateway.env"
@@ -70,9 +72,12 @@ if [[ "${IBKR_TRADING_MODE}" == "live" ]]; then
     log_warn "is subject to daily 2FA. A paper login is strongly recommended here."
 fi
 
-log_info "Installing dependencies (xvfb, JRE, unzip)..."
+log_info "Installing dependencies (xvfb, xterm, JRE, unzip)..."
 apt-get update -qq
-apt-get install -y xvfb default-jre unzip curl >/dev/null
+# xterm is required: IBC's gatewaystart.sh launches the Gateway inside an xterm
+# (it runs fine under the Xvfb virtual display). Without it the service
+# crash-loops with "xterm: command not found".
+apt-get install -y xvfb xterm default-jre unzip curl >/dev/null
 
 # ------------------------------------------------------------
 # 1. Install IB Gateway (unattended)
@@ -82,21 +87,32 @@ tmp_installer="/tmp/ibgateway-standalone.sh"
 curl -fsSL "${GATEWAY_INSTALLER_URL}" -o "${tmp_installer}"
 chmod +x "${tmp_installer}"
 
-log_info "Installing IB Gateway to ${TWS_PATH} (quiet mode)..."
+log_info "Installing IB Gateway to ${IB_INSTALL_DIR} (quiet mode)..."
 # install4j: -q unattended, -dir target. Runs as the project user.
-sudo -u "${PROJECT_USER}" bash -c "yes '' | '${tmp_installer}' -q -dir '${TWS_PATH}'" || {
-    log_warn "Quiet install returned non-zero; verify ${TWS_PATH}/ibgateway exists."
+sudo -u "${PROJECT_USER}" bash -c "yes '' | '${tmp_installer}' -q -dir '${IB_INSTALL_DIR}'" || {
+    log_warn "Quiet install returned non-zero; verify ${IB_INSTALL_DIR} was populated."
 }
 rm -f "${tmp_installer}"
 
-# Detect installed major version (folder name, e.g. '10.30').
-if [[ -d "${TWS_PATH}/ibgateway" ]]; then
-    TWS_MAJOR_VRSN="$(ls -1 "${TWS_PATH}/ibgateway" | sort -V | tail -1)"
-else
-    log_warn "Could not find ${TWS_PATH}/ibgateway; defaulting TWS_MAJOR_VRSN=10.30 (verify)."
-    TWS_MAJOR_VRSN="10.30"
+# Detect version from the desktop shortcut name (e.g. 'IB Gateway 10.45.desktop'
+# -> 10.45). The offline installer lays files out FLAT in IB_INSTALL_DIR (no
+# versioned subfolder), so there is no dir name to read.
+TWS_MAJOR_VRSN="$(ls "${IB_INSTALL_DIR}"/*.desktop 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+if [[ -z "${TWS_MAJOR_VRSN}" ]]; then
+    log_error "Could not detect IB Gateway version in ${IB_INSTALL_DIR} (no *.desktop). Install likely failed."
+    exit 1
 fi
 log_info "Detected IB Gateway version: ${TWS_MAJOR_VRSN}"
+
+# IBC requires the canonical layout ${TWS_PATH}/ibgateway/<version>/{jars,ibgateway.vmoptions}.
+# The flat install can't provide it directly (a *file* named 'ibgateway' sits in
+# IB_INSTALL_DIR), so expose it via a symlink from a clean base dir. Without the
+# ibgateway/<ver> slot, IBC falls back to the TWS slot and looks for
+# 'tws.vmoptions' (which doesn't exist) -> "vmoptions could not be found".
+mkdir -p "${GW_BASE}/ibgateway"
+ln -sfn "${IB_INSTALL_DIR}" "${GW_BASE}/ibgateway/${TWS_MAJOR_VRSN}"
+chown -R "${PROJECT_USER}:${PROJECT_USER}" "${GW_BASE}"
+chown -h "${PROJECT_USER}:${PROJECT_USER}" "${GW_BASE}/ibgateway/${TWS_MAJOR_VRSN}"
 
 # ------------------------------------------------------------
 # 2. Install IBC
@@ -152,7 +168,7 @@ TWS_MAJOR_VRSN=${TWS_MAJOR_VRSN}
 IBC_INI=${IBC_INI}
 IBC_PATH=${IBC_PATH}
 TWS_PATH=${TWS_PATH}
-TWS_SETTINGS_PATH=${TWS_PATH}
+TWS_SETTINGS_PATH=${IB_INSTALL_DIR}
 LOG_PATH=${LOG_PATH}
 EOF
 chown root:"${PROJECT_USER}" "${ENV_FILE}"
@@ -175,7 +191,10 @@ Group=${PROJECT_USER}
 EnvironmentFile=${ENV_FILE}
 Environment=DISPLAY=:${DISPLAY_NUM}
 # Xvfb provides a virtual display so the Gateway GUI can run with no monitor.
-ExecStart=/usr/bin/xvfb-run -a -n ${DISPLAY_NUM} -s "-screen 0 1024x768x24" ${IBC_PATH}/gatewaystart.sh
+# Call ibcstart.sh directly (foreground, blocks, writes logs) rather than
+# gatewaystart.sh, which backgrounds via xterm. \${TWSUSERID}/\${TWSPASSWORD}
+# stay literal here so systemd expands them from the EnvironmentFile at runtime.
+ExecStart=/usr/bin/xvfb-run -a -n ${DISPLAY_NUM} -s "-screen 0 1024x768x24" ${IBC_PATH}/scripts/ibcstart.sh ${TWS_MAJOR_VRSN} -g --mode=${IBKR_TRADING_MODE} --user=\${TWSUSERID} --pw=\${TWSPASSWORD} --tws-path=${TWS_PATH} --ibc-path=${IBC_PATH} --ibc-ini=${IBC_INI} --tws-settings-path=${IB_INSTALL_DIR}
 Restart=always
 RestartSec=30
 

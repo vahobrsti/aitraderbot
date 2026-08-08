@@ -4,7 +4,27 @@ Centralizes all API serialization logic.
 """
 from rest_framework import serializers
 
-from signals.models import DailySignal
+from signals.models import DailySignal, IbitWheelSetup
+
+
+class IbitWheelSetupSerializer(serializers.ModelSerializer):
+    """Serializer for a persisted IBIT wheel setup (one per signal/decision)."""
+
+    class Meta:
+        model = IbitWheelSetup
+        fields = [
+            'signal_date',
+            'trade_decision',
+            'side',
+            'position',
+            'spot_price',
+            'dte_mode',
+            'legs',
+            'selection_hash',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
 
 
 class DailySignalSerializer(serializers.ModelSerializer):

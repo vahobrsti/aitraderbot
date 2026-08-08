@@ -77,7 +77,7 @@ apt install -y \
     supervisor \
     iptables iptables-persistent \
     debian-keyring debian-archive-keyring apt-transport-https \
-    xvfb default-jre  # xvfb + JRE: headless IB Gateway for IBIT options (see setup-ibkr-gateway.sh)
+    xvfb xterm default-jre  # headless IB Gateway for IBIT options (see setup-ibkr-gateway.sh); xterm required by IBC gatewaystart.sh
 
 # ============================================================
 # STEP 2: Create Deploy User

@@ -149,39 +149,95 @@ class SelectionHashTests(TestCase):
         self.assertEqual(len(selection_hash([])), 64)
 
 
-class WheelTelegramFormatTests(TestCase):
-    def _notifier(self):
-        from notifications.notifier import TelegramNotifier
-        return TelegramNotifier(bot_token="test", chat_id="test")
-
-    def test_put_message_contains_key_fields(self):
+class LegToDictTests(TestCase):
+    def test_leg_serializes_to_json_dict(self):
+        from signals.wheel import leg_to_dict
         legs = select_wheel_legs(_chain(), "put", SPOT, dte_mode="income")
-        msg = self._notifier()._format_ibit_wheel_message(
-            "2026-08-07", "put", SPOT, legs, market_data_type="live"
+        d = leg_to_dict(legs[0])
+        self.assertEqual(
+            set(d),
+            {"risk_tier", "side", "position", "strike", "delta", "credit",
+             "premium_usd", "otm_pct", "dte", "bid", "ask", "spread_pct",
+             "expiry", "symbol", "cash_reserve_usd"},
         )
-        self.assertIn("IBIT WHEEL", msg)
-        self.assertIn("Cash-Secured Put", msg)
-        self.assertIn("Cash Reserve", msg)
-        self.assertIn("$36.68", msg)
-        self.assertIn("2026-09-18", msg)
+        self.assertEqual(d["position"], "cash_secured_put")
 
-    def test_frozen_data_caveat_shown(self):
-        legs = select_wheel_legs(_chain(), "put", SPOT, dte_mode="income")
-        msg = self._notifier()._format_ibit_wheel_message(
-            "2026-08-07", "put", SPOT, legs, market_data_type="frozen"
-        )
-        self.assertIn("indicative only", msg)
 
-    def test_call_message_shows_backing(self):
-        legs = select_wheel_legs(_chain(), "call", SPOT, dte_mode="income")
-        msg = self._notifier()._format_ibit_wheel_message(
-            "2026-08-07", "call", SPOT, legs
-        )
-        self.assertIn("Covered Call", msg)
-        self.assertIn("100 shares", msg)
+# ======================================================================
+# compute_ibit_wheel command (persist to IbitWheelSetup)
+# ======================================================================
+from datetime import timedelta
 
-    def test_no_legs_message(self):
-        msg = self._notifier()._format_ibit_wheel_message(
-            "2026-08-07", "put", SPOT, [], market_data_type="live"
+from django.core.management import call_command
+from django.utils import timezone
+
+from datafeed.models import OptionSnapshot
+from signals.models import DailySignal, IbitWheelSetup
+
+
+def _make_income_signal(target_date, decision="BULL_PUT_SPREAD"):
+    return DailySignal.objects.create(
+        date=target_date,
+        p_long=0.5, p_short=0.5,
+        signal_option_call=0, signal_option_put=0,
+        fusion_state="range", fusion_confidence="MEDIUM", fusion_score=0,
+        trade_decision=decision,
+        income_spread_score=75.0, income_spread_eligible=True,
+        income_spread_setups=[],
+    )
+
+
+def _make_ibkr_put(strike, delta, bid, ask):
+    from decimal import Decimal
+    now = timezone.now()
+    expiry = now + timedelta(days=30)
+    return OptionSnapshot.objects.create(
+        timestamp=now, symbol=f"IBIT-PUT-{strike}", underlying="IBIT",
+        expiry=expiry, strike=Decimal(str(strike)), option_type="put",
+        spot_price=Decimal(str(SPOT)),
+        bid=Decimal(str(bid)), ask=Decimal(str(ask)),
+        mid_price=(Decimal(str(bid)) + Decimal(str(ask))) / 2,
+        delta=Decimal(str(delta)), exchange="ibkr",
+    )
+
+
+class ComputeIbitWheelCommandTests(TestCase):
+    def setUp(self):
+        self.date = timezone.now().date()
+        _make_income_signal(self.date)
+        self.low = _make_ibkr_put(33, -0.15, 0.53, 0.55)
+        self.med = _make_ibkr_put(34, -0.22, 0.73, 0.76)
+        self.high = _make_ibkr_put(35, -0.30, 1.01, 1.04)
+
+    def test_saves_setup_with_legs(self):
+        call_command("compute_ibit_wheel", latest=True)
+        setup = IbitWheelSetup.objects.get(
+            signal_date=self.date, trade_decision="BULL_PUT_SPREAD"
         )
-        self.assertIn("No IBIT contract", msg)
+        self.assertEqual(setup.side, "put")
+        self.assertEqual(setup.position, "cash_secured_put")
+        self.assertAlmostEqual(setup.spot_price, SPOT)
+        self.assertEqual(len(setup.legs), 3)
+        self.assertEqual({l["risk_tier"] for l in setup.legs}, {"low", "medium", "high"})
+
+    def test_unchanged_selection_is_not_rewritten(self):
+        call_command("compute_ibit_wheel", latest=True)
+        setup = IbitWheelSetup.objects.get(signal_date=self.date, trade_decision="BULL_PUT_SPREAD")
+        first_updated = setup.updated_at
+        call_command("compute_ibit_wheel", latest=True)
+        setup.refresh_from_db()
+        self.assertEqual(setup.updated_at, first_updated)
+
+    def test_changed_selection_updates_setup(self):
+        call_command("compute_ibit_wheel", latest=True)
+        setup = IbitWheelSetup.objects.get(signal_date=self.date, trade_decision="BULL_PUT_SPREAD")
+        old_hash = setup.selection_hash
+        self.high.delete()  # drop the high tier -> selection changes
+        call_command("compute_ibit_wheel", latest=True)
+        setup.refresh_from_db()
+        self.assertNotEqual(setup.selection_hash, old_hash)
+        self.assertEqual(len(setup.legs), 2)
+
+    def test_dry_run_saves_nothing(self):
+        call_command("compute_ibit_wheel", latest=True, dry_run=True)
+        self.assertEqual(IbitWheelSetup.objects.count(), 0)

@@ -19,6 +19,10 @@ urlpatterns = [
     path('v1/signals/<str:date>/', views.DailySignalDetailView.as_view(), name='signal-detail'),
     path('v1/signals/<str:date>/setup/', views.TradeSetupView.as_view(), name='signal-setup'),
     
+    # IBIT wheel setup endpoints (auth required)
+    path('v1/ibit-wheel/latest/', views.IbitWheelLatestView.as_view(), name='ibit-wheel-latest'),
+    path('v1/ibit-wheel/<str:date>/', views.IbitWheelDetailView.as_view(), name='ibit-wheel-detail'),
+
     # Option pricing endpoints (auth required)
     path('v1/options/predict/', views.OptionPricePredict.as_view(), name='option-predict'),
     

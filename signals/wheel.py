@@ -139,6 +139,27 @@ def select_wheel_legs(
     return legs
 
 
+def leg_to_dict(leg: "WheelLeg") -> dict:
+    """Serialize a WheelLeg to a plain dict for JSON persistence / API output."""
+    return {
+        "risk_tier": leg.risk_tier,
+        "side": leg.side,
+        "position": leg.position,
+        "strike": leg.strike,
+        "delta": leg.delta,
+        "credit": leg.credit,
+        "premium_usd": leg.premium_usd,
+        "otm_pct": leg.otm_pct,
+        "dte": leg.dte,
+        "bid": leg.bid,
+        "ask": leg.ask,
+        "spread_pct": leg.spread_pct,
+        "expiry": leg.expiry,
+        "symbol": leg.symbol,
+        "cash_reserve_usd": leg.cash_reserve_usd,
+    }
+
+
 def selection_hash(legs: list) -> str:
     """
     Stable sha256 over the selected legs, used to dedupe Telegram publications.

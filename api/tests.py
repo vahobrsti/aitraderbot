@@ -129,3 +129,55 @@ class FusionExplainTests(APITestCase):
         response = self.client.get(url, {'date': '2025-01-01'})
         
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+from datetime import date
+
+from signals.models import IbitWheelSetup
+
+
+class IbitWheelApiTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='wheeluser', password='pw')
+        self.token = Token.objects.create(user=self.user)
+        self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.token.key)
+
+        self.legs = [{
+            "risk_tier": "medium", "side": "put", "position": "cash_secured_put",
+            "strike": 34.0, "delta": -0.22, "credit": 0.73, "premium_usd": 73.0,
+            "otm_pct": 0.073, "dte": 30, "bid": 0.73, "ask": 0.76,
+            "spread_pct": 0.04, "expiry": "2026-09-18", "symbol": "IBIT-PUT-34",
+            "cash_reserve_usd": 3327.0,
+        }]
+        IbitWheelSetup.objects.create(
+            signal_date=date(2026, 8, 8), trade_decision="BULL_PUT_SPREAD",
+            side="put", position="cash_secured_put", spot_price=36.68,
+            dte_mode="income", legs=self.legs, selection_hash="abc123",
+        )
+
+    def test_latest_returns_setup(self):
+        resp = self.client.get(reverse('api:ibit-wheel-latest'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(resp.data[0]['trade_decision'], "BULL_PUT_SPREAD")
+        self.assertEqual(resp.data[0]['legs'][0]['strike'], 34.0)
+
+    def test_detail_by_date(self):
+        resp = self.client.get(reverse('api:ibit-wheel-detail', args=['2026-08-08']))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data[0]['side'], "put")
+
+    def test_detail_type_filter(self):
+        resp = self.client.get(
+            reverse('api:ibit-wheel-detail', args=['2026-08-08']), {'type': 'BEAR_CALL_SPREAD'}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_missing_date_404(self):
+        resp = self.client.get(reverse('api:ibit-wheel-detail', args=['2020-01-01']))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_requires_auth(self):
+        self.client.credentials()  # clear auth
+        resp = self.client.get(reverse('api:ibit-wheel-latest'))
+        self.assertIn(resp.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
