@@ -55,6 +55,16 @@ GSPREAD_CREDS_JSON="${GSPREAD_CREDS_JSON:-}"
 API_TOKEN="${API_TOKEN:-$(openssl rand -hex 32)}"
 
 # ============================================================
+# IBKR CONFIGURATION (IBIT options data via IB Gateway)
+# ============================================================
+# These point Django at the local IB Gateway socket. They are NOT secrets.
+# The actual IBKR login lives in IBC's config (see deploy/setup-ibkr-gateway.sh),
+# not here. Port 4002 = Gateway paper, 4001 = Gateway live.
+IBKR_HOST="${IBKR_HOST:-127.0.0.1}"
+IBKR_PORT="${IBKR_PORT:-4002}"
+IBKR_CLIENT_ID="${IBKR_CLIENT_ID:-7}"
+
+# ============================================================
 # STEP 1: System Update & Base Packages
 # ============================================================
 log_info "Step 1: Updating system and installing base packages..."
@@ -62,11 +72,12 @@ log_info "Step 1: Updating system and installing base packages..."
 apt update && apt upgrade -y
 apt install -y \
     python3 python3-pip python3-venv python3-dev \
-    git curl wget \
+    git curl wget unzip \
     build-essential libpq-dev \
     supervisor \
     iptables iptables-persistent \
-    debian-keyring debian-archive-keyring apt-transport-https
+    debian-keyring debian-archive-keyring apt-transport-https \
+    xvfb default-jre  # xvfb + JRE: headless IB Gateway for IBIT options (see setup-ibkr-gateway.sh)
 
 # ============================================================
 # STEP 2: Create Deploy User
@@ -227,6 +238,14 @@ GSPREAD_CREDS_JSON=${GSPREAD_CREDS_JSON}
 # API Authentication
 # ===========================================
 API_TOKEN=${API_TOKEN}
+
+# ===========================================
+# IBKR — IBIT options data (IB Gateway socket)
+# ===========================================
+# Host/port/client id are how Django reaches the local IB Gateway. Not secrets.
+IBKR_HOST=${IBKR_HOST}
+IBKR_PORT=${IBKR_PORT}
+IBKR_CLIENT_ID=${IBKR_CLIENT_ID}
 EOF
 
 chown ${PROJECT_USER}:${PROJECT_USER} ${PROJECT_DIR}/.env.production
@@ -410,6 +429,11 @@ echo "  4. Run: python manage.py migrate"
 echo "  5. Run: python manage.py collectstatic"
 echo "  6. Run: sudo systemctl start gunicorn.socket"
 echo "  7. Point your DNS A record to this server's IP"
+echo ""
+echo "  Optional (IBIT options via IBKR — read-only data):"
+echo "     - Set IBKR_USERNAME / IBKR_PASSWORD / IBKR_TRADING_MODE in the environment"
+echo "     - Run: sudo -E bash ${PROJECT_DIR}/deploy/setup-ibkr-gateway.sh"
+echo "     - Then: python manage.py collect_options --exchange ibkr --dry-run  (US market hours)"
 echo ""
 echo "============================================================"
 echo "USEFUL COMMANDS"

@@ -281,6 +281,104 @@ ExchangeAccount.objects.create(
 
 ---
 
+## 🪙 IBIT Wheel via IBKR (Phase 1: data + Telegram, no execution)
+
+Runs the income-gate signals as IBIT wheel positions (cash-secured put for
+`BULL_PUT_SPREAD`, covered call for `BEAR_CALL_SPREAD`) and publishes them to
+Telegram alongside the BTC setup. **This phase places no orders** — it collects
+the IBIT option chain and publishes a signal.
+
+Unlike Bybit/Deribit (REST + API key), IBKR requires a running, logged-in
+**IB Gateway**; Django talks to it over a local socket. There is no API key.
+
+### Prerequisites (one-time, in IBKR Client Portal)
+
+1. **Account**: an Individual account is fine. Use a **paper login** for the
+   headless server (avoids daily 2FA). Enable it under
+   Settings → Account Configuration → *Paper Trading Account*.
+2. **Market data**: Settings → User Settings → *Market Data Subscriptions* must
+   include **OPRA (US Options Exchanges)** and **US Real-Time Streaming Quotes**.
+   Live greeks require BOTH the option (OPRA) and the underlying (US quotes).
+3. **API**: Settings → *Read-Only Access* should be **Enabled** (we only read).
+   The Gateway's API socket is configured by the setup script (localhost only).
+
+### Environment variables (`.env.production`)
+
+`setup-vps.sh` writes these (host/port/client id — **not** secrets):
+
+```bash
+IBKR_HOST=127.0.0.1
+IBKR_PORT=4002        # 4002 = Gateway paper, 4001 = Gateway live
+IBKR_CLIENT_ID=7
+```
+
+IBKR **login credentials** are NOT stored in `.env.production`. They go only into
+`/etc/ibkr-gateway.env` (mode 640), written by the gateway setup script below.
+
+### Install the headless Gateway
+
+```bash
+# As root, with credentials passed via the environment (paper login recommended)
+sudo -E IBKR_USERNAME='your_user' IBKR_PASSWORD='your_pass' \
+        IBKR_TRADING_MODE=paper IBKR_PORT=4002 \
+        bash /var/www/app/deploy/setup-ibkr-gateway.sh
+```
+
+This installs IB Gateway + IBC + Xvfb and runs them as the
+`ibkr-gateway.service` systemd unit. IBC auto-logs-in and auto-restarts daily
+(so IBKR's forced daily reset doesn't kill the session). The API is
+**read-only**, so this cannot place orders.
+
+```bash
+# Manage the gateway
+sudo systemctl status ibkr-gateway
+sudo journalctl -u ibkr-gateway -f
+```
+
+> Security: the IBKR API socket is unauthenticated and binds to localhost.
+> Never add an iptables rule for its port — the default INPUT DROP keeps it
+> sealed. For remote debugging, tunnel over SSH instead of opening the port.
+
+### Verify (during US market hours, ~14:00–20:00 UTC weekdays)
+
+```bash
+cd /var/www/app && source venv/bin/activate
+python manage.py collect_options --exchange ibkr --dry-run   # should list IBIT contracts
+python manage.py publish_ibit_wheel --latest --dry-run       # should print selected legs
+```
+
+Off-hours IBKR returns frozen data (no live IV/greeks), so run these while the
+US market is open.
+
+### Cron (add to the deploy user's crontab)
+
+```cron
+# Collect IBIT option chain — US market hours only (14:00–20:00 UTC, Mon–Fri)
+45 14-20 * * 1-5 cd /var/www/app && /var/www/app/venv/bin/python manage.py collect_options --exchange ibkr >> /var/www/app/logs/cron.log 2>&1
+
+# Publish IBIT wheel + BTC setup to Telegram (after :16 signal generation)
+20 15-20 * * 1-5 cd /var/www/app && /var/www/app/venv/bin/python manage.py publish_ibit_wheel --latest >> /var/www/app/logs/cron.log 2>&1
+```
+
+### IBIT commands
+
+| Command | Purpose | When |
+|---------|---------|------|
+| `collect_options --exchange ibkr` | Snapshot IBIT chain to `OptionSnapshot` | Hourly, market hours |
+| `publish_ibit_wheel --latest` | Publish IBIT wheel + BTC setup to Telegram | After signal gen, market hours |
+| `publish_ibit_wheel --latest --dry-run` | Print selection without sending | Manual (test) |
+
+### Troubleshooting
+
+- **No IBIT snapshots / empty chain**: gateway not logged in, market closed, or
+  missing OPRA/US-quote subscriptions. Check `journalctl -u ibkr-gateway`.
+- **`ImportError: ib_async`**: run `pip install -r requirements.txt`.
+- **Frozen/`isValid:false` IV**: market is closed — expected off-hours.
+- **Wrong port**: `IBKR_PORT` in `.env.production` must match the port the
+  gateway listens on (4002 paper / 4001 live).
+
+---
+
 ## 🚀 Deploying New Changes (develop → main)
 
 ### Migration Notes (v2026-05-23)

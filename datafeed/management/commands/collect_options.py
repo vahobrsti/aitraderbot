@@ -70,6 +70,11 @@ def get_fetcher(exchange: str, testnet: bool = False):
             client_secret=client_secret,
             testnet=testnet,
         )
+    elif exchange == 'ibkr':
+        # IBKR reads connection config (IBKR_HOST/IBKR_PORT/IBKR_CLIENT_ID) from
+        # env inside the fetcher; it connects to a running IB Gateway/TWS.
+        from datafeed.ingestion.ibkr_options import IBKROptionsFetcher
+        return IBKROptionsFetcher()
     else:
         raise ValueError(f"Unknown exchange: {exchange}")
 
@@ -81,13 +86,13 @@ class Command(BaseCommand):
         parser.add_argument(
             '--exchange',
             default='bybit',
-            choices=['bybit', 'deribit', 'all'],
-            help='Exchange to collect from (default: bybit)',
+            choices=['bybit', 'deribit', 'ibkr', 'all'],
+            help='Exchange to collect from (default: bybit). ibkr collects IBIT options.',
         )
         parser.add_argument(
             '--underlying',
             default='BTC',
-            help='Underlying asset (default: BTC)',
+            help='Underlying asset (default: BTC; use IBIT for --exchange ibkr)',
         )
         parser.add_argument(
             '--dte-min',
@@ -156,6 +161,9 @@ class Command(BaseCommand):
     
     def _fetch_chain(self, fetcher, options):
         underlying = options['underlying']
+        # IBKR collects IBIT; default the underlying so cron needn't pass it.
+        if fetcher.exchange_name == 'ibkr' and underlying == 'BTC':
+            underlying = 'IBIT'
         dte_min = options['dte_min']
         dte_max = options['dte_max']
         moneyness = options['moneyness']
