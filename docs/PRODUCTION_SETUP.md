@@ -190,8 +190,8 @@ sudo systemctl restart gunicorn
 # ============================================
 
 # Execute today's signal (ALWAYS dry-run first!)
-python manage.py execute_signal --latest --account bybit-prod --dry-run
-python manage.py execute_signal --latest --account bybit-prod
+python manage.py execute_deribit --latest --account deribit-main --dry-run
+python manage.py execute_deribit --latest --account deribit-main
 
 # Check position status
 python manage.py sync_positions --all
@@ -249,11 +249,7 @@ python manage.py reconcile --all
 Add to `.env.production`:
 
 ```bash
-# Bybit (options are USDC-settled)
-BYBIT_API_KEY=your_api_key
-BYBIT_API_SECRET=your_api_secret
-
-# Deribit (optional)
+# Deribit
 DERIBIT_API_KEY=your_client_id
 DERIBIT_API_SECRET=your_client_secret
 ```
@@ -268,10 +264,10 @@ python manage.py shell
 from execution.models import ExchangeAccount
 
 ExchangeAccount.objects.create(
-    name='bybit-prod',
-    exchange='bybit',
-    api_key_env='BYBIT_API_KEY',
-    api_secret_env='BYBIT_API_SECRET',
+    name='deribit-main',
+    exchange='deribit',
+    api_key_env='DERIBIT_API_KEY',
+    api_secret_env='DERIBIT_API_SECRET',
     is_testnet=False,
     max_position_usd=5000,
     max_daily_loss_usd=500,
@@ -289,7 +285,7 @@ to the database, and exposes it via the API** — it is not sent to Telegram (th
 BTC signal still goes to Telegram via `generate_signal --notify`). **This phase
 places no orders.**
 
-Unlike Bybit/Deribit (REST + API key), IBKR requires a running, logged-in
+Unlike Deribit (REST + API key), IBKR requires a running, logged-in
 **IB Gateway**; Django talks to it over a local socket. There is no API key.
 
 ### Prerequisites (one-time, in IBKR Client Portal)

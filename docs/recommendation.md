@@ -24,7 +24,7 @@ See [docs/options_data_leverage_plan.md](options_data_leverage_plan.md) for the 
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Exchange adapters (Bybit/Deribit) | ✅ Built | Deribit tested with real option data |
+| Exchange adapter (Deribit) | ✅ Built | Deribit tested with real option data |
 | Risk checks | ✅ Built | Limits, duplicates, conflicts |
 | Position sync | ✅ Built | Needs testnet validation |
 | Exit management | ✅ Built | Polling-based (no native SL/TP) |
@@ -276,8 +276,8 @@ python manage.py diagnose_notrade --year 2025
 
 ```bash
 # Execute signal (always dry-run first!)
-python manage.py execute_signal --latest --account bybit-prod --dry-run
-python manage.py execute_signal --latest --account bybit-prod
+python manage.py execute_deribit --latest --account deribit-main --dry-run
+python manage.py execute_deribit --latest --account deribit-main
 
 # Monitor positions
 python manage.py sync_positions --all

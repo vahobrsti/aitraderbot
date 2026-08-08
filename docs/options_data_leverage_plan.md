@@ -20,10 +20,9 @@ Replace fixed leverage assumptions with observed option response profiles:
 
 ## Phase 1: Data Collection ✅
 
-Use the collection commands to gather Bybit and Deribit option snapshots:
+Use the collection commands to gather Deribit option snapshots:
 
 ```bash
-python manage.py collect_options --exchange bybit --dte-min 7 --dte-max 21 --moneyness 0.15
 python manage.py collect_options --exchange deribit --dte-min 7 --dte-max 21 --moneyness 0.15
 ```
 

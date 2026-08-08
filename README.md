@@ -20,7 +20,7 @@ Think of it as: **MDIA = ignition, Whales = fuel, MVRV-LS = terrain**
 ┌─────────────────────────────────────────────────────────────────┐
 │                         DATA LAYER                               │
 │  datafeed/ → Raw on-chain data ingestion (Google Sheets/APIs)   │
-│  datafeed/ingestion/ → Options data from Deribit/Bybit          │
+│  datafeed/ingestion/ → Options data from Deribit                │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
@@ -969,10 +969,6 @@ TELEGRAM_CHAT_ID=your_chat_id
 # Deribit (primary exchange)
 DERIBIT_API_KEY=your_client_id
 DERIBIT_API_SECRET=your_client_secret
-
-# Bybit (optional)
-BYBIT_API_KEY=your_api_key
-BYBIT_API_SECRET=your_api_secret
 ```
 
 ---
