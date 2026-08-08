@@ -70,9 +70,12 @@ if [[ "${IBKR_TRADING_MODE}" == "live" ]]; then
     log_warn "is subject to daily 2FA. A paper login is strongly recommended here."
 fi
 
-log_info "Installing dependencies (xvfb, JRE, unzip)..."
+log_info "Installing dependencies (xvfb, xterm, JRE, unzip)..."
 apt-get update -qq
-apt-get install -y xvfb default-jre unzip curl >/dev/null
+# xterm is required: IBC's gatewaystart.sh launches the Gateway inside an xterm
+# (it runs fine under the Xvfb virtual display). Without it the service
+# crash-loops with "xterm: command not found".
+apt-get install -y xvfb xterm default-jre unzip curl >/dev/null
 
 # ------------------------------------------------------------
 # 1. Install IB Gateway (unattended)

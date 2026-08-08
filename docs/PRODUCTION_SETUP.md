@@ -370,6 +370,9 @@ US market is open.
 
 ### Troubleshooting
 
+- **`ibkr-gateway` crash-loops with `xterm: command not found`**: IBC launches
+  the Gateway inside an xterm. Install it: `sudo apt-get install -y xterm` then
+  `sudo systemctl restart ibkr-gateway`. (Newer setup scripts install it.)
 - **No IBIT snapshots / empty chain**: gateway not logged in, market closed, or
   missing OPRA/US-quote subscriptions. Check `journalctl -u ibkr-gateway`.
 - **`ImportError: ib_async`**: run `pip install -r requirements.txt`.
