@@ -738,7 +738,7 @@ Monetizes NO_TRADE / TRANSITION_CHOP days by selling iron condors when BTC is li
 
 **Performance:** 63.1% hit rate (84 trades). 80.6% since 2023.
 
-**Strategy:** 10% OTM wings, 7–14d DTE, 50% take-profit, 6.8% stop-loss.
+**Strategy:** 10% OTM wings, 9–13d DTE, 50% take-profit, 6.8% stop-loss.
 
 ### Strike Selection: MVRV Drift-Based
 

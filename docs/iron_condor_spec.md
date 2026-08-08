@@ -8,28 +8,33 @@
 - **Outcome classes:** RANGE_7D, BREAKOUT_UP, BREAKOUT_DOWN, BREAKOUT_BOTH
 - **Base rate:** 58% of historical days (2017–2026) are RANGE_7D
 
-## Strategy Parameters (Frozen)
+## Strategy Parameters
+
+Execution values come from `POLICY_V1` in `execution/services/policy.py` (the
+`IRON_CONDOR` `DTEConfig` and `ExitConfig`), which is what the Deribit entry and
+exit engines actually use.
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
 | Wings | 10% OTM each side | Matches label band |
-| DTE | 7–14 days | 7d aligns with label horizon; up to 14d for liquidity |
+| DTE | 9–13 days (optimal 9) | 7d label horizon + 2d buffer; up to 13d for liquidity |
 | Take profit | 50% of max credit | Standard short-vol exit |
-| Stop loss | 6% underlying move | See "Stop vs Label Band" below |
-| Scale down | Day 5, reduce to 25% | Time-based risk reduction |
-| Hard cut | Day 7 | Aligns with label horizon |
-| Position size | 50% of base | Conservative for premium selling |
+| Stop loss | 6.8% underlying move | See "Stop vs Label Band" below |
+| Stop tighten | Day 7, factor 0.5 | Tighten stop as expiry approaches |
+| Scale down | Day 8, reduce to 25% | Time-based risk reduction |
+| Hard cut | Day 9 | Max hold (DTE ceiling) |
+| Position size | 50% of base (tier 2) | Conservative for premium selling |
 
 ### Stop vs Label Band
 
-The stop (6%) is tighter than the label band (10%) by design. The label asks "did price stay inside ±10% over 7 days?" but the stop protects against intraday/intra-period adverse moves that could widen beyond recovery.
+The stop (6.8%) is tighter than the label band (10%) by design. The label asks "did price stay inside ±10% over 7 days?" but the stop protects against intraday/intra-period adverse moves that could widen beyond recovery.
 
-A 6% move against the position means:
+A 6.8% move against the position means:
 - The short strike is being tested
 - Delta exposure is accelerating
 - Gamma risk is increasing rapidly
 
-Waiting for a full 10% move before stopping would mean the short strike is deep ITM and the position is likely at max loss. The 6% stop exits while the position still has recovery value.
+Waiting for a full 10% move before stopping would mean the short strike is deep ITM and the position is likely at max loss. The 6.8% stop exits while the position still has recovery value.
 
 ## Score & Gate
 
@@ -180,7 +185,7 @@ The statistical edge (range-staying rate) is necessary but not sufficient for pr
 
 - [ ] **IV floor filter** — Define minimum IV rank (or IV percentile) at entry to ensure collected premium justifies tail risk. Requires `OptionSnapshot` pipeline data. Without sufficient premium, even a 78% win rate can be net negative.
 - [ ] **Liquidity gate** — Validate bid-ask spread on all 4 legs is within acceptable bounds (e.g., spread < X% of credit). Thin OTM BTC options can erode the theoretical edge entirely. Requires real-time option book data.
-- [ ] **Stop-loss execution realism** — Backtest actual slippage on 4-leg close during fast moves. The 6% stop assumes clean fills; the -25.9% worst-case flat-z period shows price can gap through stops. Quantify expected slippage under stress.
+- [ ] **Stop-loss execution realism** — Backtest actual slippage on 4-leg close during fast moves. The 6.8% stop assumes clean fills; the -25.9% worst-case flat-z period shows price can gap through stops. Quantify expected slippage under stress.
 - [ ] **Combined filter backtest** — Re-run `condor_walkforward` with the new `mvrv_60d_flat_underval` score component active. Verify precision improvement holds out-of-sample and doesn't just overfit to the 27 qualifying periods.
 - [ ] **Conditional lift validation** — Measure the incremental lift of `mvrv_60d_flat_underval` conditional on existing score components (chop state, MVRV neutral, sentiment neutral, etc.), not standalone. A strong standalone feature can add zero incremental edge once trend/vol filters are already active. If conditional lift < 2pp, remove the component.
 - [ ] **Score weight calibration** — Current +5 is provisional. Run `condor_walkforward` with +5, +7, +10 variants and compare precision/pass-rate tradeoff. Promote weight only if out-of-sample precision improves without inflating pass rate into bad regimes.
