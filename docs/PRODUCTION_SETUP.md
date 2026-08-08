@@ -373,6 +373,18 @@ US market is open.
 - **`ibkr-gateway` crash-loops with `xterm: command not found`**: IBC launches
   the Gateway inside an xterm. Install it: `sudo apt-get install -y xterm` then
   `sudo systemctl restart ibkr-gateway`. (Newer setup scripts install it.)
+- **`can't find jars folder` / `vmoptions could not be found`**: the offline
+  installer lays files out flat in `~/Jts`, but IBC needs the canonical
+  `${TWS_PATH}/ibgateway/<version>/` layout. The setup script now detects the
+  version from the `.desktop` name and symlinks `~/ibgw/ibgateway/<version> → ~/Jts`.
+  If fixing by hand, create that symlink and set `TWS_PATH=~/ibgw`,
+  `TWS_SETTINGS_PATH=~/Jts`, `TWS_MAJOR_VRSN=<version>` in `/etc/ibkr-gateway.env`.
+- **`InaccessibleObjectException` / `module java.desktop does not "opens javax.swing"`**:
+  benign Java 17 look-and-feel warning from the Gateway; login still completes.
+  Ignore it.
+- **Service exits immediately / restart loop**: ensure `ExecStart` runs
+  `scripts/ibcstart.sh` (foreground) — not `gatewaystart.sh`, which backgrounds
+  via xterm and makes systemd think the service ended.
 - **No IBIT snapshots / empty chain**: gateway not logged in, market closed, or
   missing OPRA/US-quote subscriptions. Check `journalctl -u ibkr-gateway`.
 - **`ImportError: ib_async`**: run `pip install -r requirements.txt`.
