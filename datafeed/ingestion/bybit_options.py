@@ -37,6 +37,10 @@ class BybitOptionsFetcher:
         self._session = None
     
     @property
+    def exchange_name(self) -> str:
+        return 'bybit'
+    
+    @property
     def session(self):
         """Lazy-load pybit session."""
         if self._session is None:
