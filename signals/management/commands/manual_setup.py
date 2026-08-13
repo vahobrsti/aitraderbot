@@ -32,7 +32,7 @@ from django.core.management.base import BaseCommand
 from django.db.models import Max
 
 from execution.services.policy import get_policy
-from execution.services.trade_setup import TradeSetupBuilder
+from execution.services.trade_setup import TradeSetupBuilder, select_condor_structure
 from datafeed.models import RawDailyData, OptionSnapshot
 from signals.options import (
     STRATEGY_MAP, DECISION_STRATEGY_MAP, compute_condor_strikes,
@@ -702,66 +702,52 @@ class Command(BaseCommand):
         if not call_options or not put_options:
             return None
         
-        # Find short call (closest to condor_strikes.short_call, OTM)
-        target_short_call = condor_strikes.short_call if condor_strikes else snapshot_spot * 1.10
-        short_call = min(
-            [o for o in call_options if float(o.strike) >= snapshot_spot],
-            key=lambda x: abs(float(x.strike) - target_short_call),
-            default=None
+        # MVRV drift strikes act as a ranking preference (not a hard selector).
+        target_short_call = condor_strikes.short_call if condor_strikes else None
+        target_short_put = condor_strikes.short_put if condor_strikes else None
+
+        # Delegate strike selection to the authoritative routine used by the live
+        # entry path (execution/services/deribit_entry.py). It enforces the
+        # sellable delta band and the min_credit_pct gate, ranks by delta target
+        # with MVRV strikes as a tiebreak preference. OptionSnapshot bid/ask are
+        # USD-quoted at ingestion, so price_to_usd=1.0.
+        condor_cfg = policy.condor
+        delta_target = abs(policy.get_signal_delta(signal_type))
+        candidate = select_condor_structure(
+            call_options, put_options, snapshot_spot, condor_cfg, delta_target,
+            mvrv_short_call=target_short_call,
+            mvrv_short_put=target_short_put,
+            price_to_usd=1.0,
         )
-        if not short_call:
-            return None
-        
-        # Find short put (closest to condor_strikes.short_put, SAME EXPIRY as short call)
-        target_short_put = condor_strikes.short_put if condor_strikes else snapshot_spot * 0.90
-        same_expiry_puts = [o for o in put_options if o.expiry == short_call.expiry]
-        if not same_expiry_puts:
-            return None  # Cannot build valid condor without same-expiry puts
-        short_put = min(
-            [o for o in same_expiry_puts if float(o.strike) <= snapshot_spot],
-            key=lambda x: abs(float(x.strike) - target_short_put),
-            default=None
-        )
-        if not short_put:
-            return None
-        
-        # Find long call wing (same expiry, higher strike than short call)
-        condor_policy = policy.condor
-        wing_offset = condor_policy.wing_offset_usd if hasattr(condor_policy, 'wing_offset_usd') else 5000
-        long_call_target = float(short_call.strike) + wing_offset
-        long_call_candidates = [o for o in call_options 
-                                if o.expiry == short_call.expiry and float(o.strike) > float(short_call.strike)]
-        long_call = min(long_call_candidates, key=lambda x: abs(float(x.strike) - long_call_target)) if long_call_candidates else None
-        
-        # Find long put wing (same expiry, lower strike than short put)
-        long_put_target = float(short_put.strike) - wing_offset
-        long_put_candidates = [o for o in put_options 
-                               if o.expiry == short_call.expiry and float(o.strike) < float(short_put.strike)]
-        long_put = min(long_put_candidates, key=lambda x: abs(float(x.strike) - long_put_target)) if long_put_candidates else None
-        
-        # Require all 4 legs for a valid condor — fail closed if wings unavailable
-        if not long_call or not long_put:
-            return None  # Cannot build valid iron condor without wing protection
-        
-        # Calculate real metrics
-        net_credit = (
-            float(short_call.bid or 0) + float(short_put.bid or 0) -
-            float(long_call.ask or 0) - float(long_put.ask or 0)
-        )
-        
-        # Fail closed if not a valid credit structure
-        if net_credit <= 0:
-            return None  # Not a viable income condor — zero or negative credit
-        
-        call_wing_width = float(long_call.strike) - float(short_call.strike)
-        put_wing_width = float(short_put.strike) - float(long_put.strike)
-        wing_width = max(call_wing_width, put_wing_width)
+        if candidate is None:
+            return None  # No constructible 4-leg structure
+
+        short_call = candidate.short_call
+        long_call = candidate.long_call
+        short_put = candidate.short_put
+        long_put = candidate.long_put
+
+        net_credit = candidate.net_credit
+        wing_width = candidate.wing_width
+        credit_pct = candidate.credit_pct
+        credit_qualified = candidate.credit_qualified
+
+        # Surface sub-minimum credit for diagnostics. Unlike the live path (which
+        # hard-rejects), the manual setup still returns the structure so the
+        # blocking condition is visible, mirroring select_condor_structure's
+        # "return highest-credit candidate" contract.
+        if not credit_qualified:
+            self.stderr.write(self.style.WARNING(
+                f"⚠️  Condor credit {credit_pct*100:.1f}% below minimum "
+                f"{condor_cfg.min_credit_pct*100:.1f}% — setup would be rejected live."
+            ))
+
         max_profit = net_credit
         max_loss = wing_width - net_credit
-        
+
         if max_loss <= 0 or max_profit <= 0:
             return None  # Invalid risk/reward structure
-        
+
         real_rr = max_profit / max_loss
         upper_breakeven = float(short_call.strike) + net_credit
         lower_breakeven = float(short_put.strike) - net_credit
@@ -859,6 +845,9 @@ class Command(BaseCommand):
                 "wing_width": wing_width,
                 "upper_breakeven": upper_breakeven,
                 "lower_breakeven": lower_breakeven,
+                "credit_pct": credit_pct,
+                "credit_qualified": credit_qualified,
+                "min_credit_pct": condor_cfg.min_credit_pct,
             },
             
             "exit_rules": {
