@@ -498,9 +498,12 @@ DECISION_STRATEGY_MAP["BEAR_CALL_SPREAD"] = {
 #   - Automatically adjusts to regime without parameter tuning
 
 CONDOR_DRIFT_MULTIPLIER = 1.5    # project drift forward by this factor
-CONDOR_SPOT_CALL_BAND = 0.10     # spot +10% fallback (minimum call distance)
-CONDOR_SPOT_PUT_BAND = 0.10      # spot -10% fallback (minimum put distance)
-CONDOR_TRAILING_DAYS = 7         # lookback window for MVRV drift
+CONDOR_SPOT_CALL_BAND = 0.10     # spot +10% — "spot_driven" (low-risk) call distance
+CONDOR_SPOT_PUT_BAND = 0.10      # spot -10% — "spot_driven" (low-risk) put distance
+CONDOR_TRAILING_DAYS = 14        # lookback window for MVRV drift (was 7)
+# Veto the mvrv_drift_driven variant when thin drift pushes a short strike this
+# close to spot (near-ATM shorts carry unacceptable breach risk for a condor).
+CONDOR_MVRV_MIN_DISTANCE_PCT = 0.05
 
 
 @dataclass
@@ -515,9 +518,49 @@ class CondorStrikeResult:
     put_source: str         # 'mvrv_drift' or 'spot' — which set the put level
     call_distance_pct: float  # short call distance from spot (%)
     put_distance_pct: float   # short put distance from spot (%)
-    mvrv_drift: float       # trailing 7d MVRV range used
+    mvrv_drift: float       # trailing MVRV range used (window = CONDOR_TRAILING_DAYS)
     mvrv_ceiling: float     # projected MVRV ceiling (mvrv + 1.5*drift)
     mvrv_floor: float       # projected MVRV floor (mvrv - 1.5*drift)
+
+    # --- Labeled strike variants (decision layer) ---
+    # Both variants are kept side-by-side (not collapsed to "the wider"):
+    #   spot_driven       = spot ±10% (low-risk, wide band, thinner premium)
+    #   mvrv_drift_driven = mvrv ± 1.5*drift projection (richer premium, tighter)
+    # The mvrv_drift variant is vetoed (None) when its short strikes fall within
+    # CONDOR_MVRV_MIN_DISTANCE_PCT of spot.
+    spot_driven_call: float = 0.0
+    spot_driven_put: float = 0.0
+    spot_driven_call_dist_pct: float = 0.0
+    spot_driven_put_dist_pct: float = 0.0
+    mvrv_drift_call: Optional[float] = None
+    mvrv_drift_put: Optional[float] = None
+    mvrv_drift_call_dist_pct: Optional[float] = None
+    mvrv_drift_put_dist_pct: Optional[float] = None
+    mvrv_drift_vetoed: bool = False
+    mvrv_drift_veto_reason: Optional[str] = None
+    drift_window_days: int = CONDOR_TRAILING_DAYS
+
+    def variants_meta(self) -> dict:
+        """Serialize the two labeled strike variants for condor_strike_meta."""
+        return {
+            'strike_variants': {
+                'spot_driven': {
+                    'short_call': self.spot_driven_call,
+                    'short_put': self.spot_driven_put,
+                    'call_distance_pct': self.spot_driven_call_dist_pct,
+                    'put_distance_pct': self.spot_driven_put_dist_pct,
+                },
+                'mvrv_drift_driven': {
+                    'short_call': self.mvrv_drift_call,
+                    'short_put': self.mvrv_drift_put,
+                    'call_distance_pct': self.mvrv_drift_call_dist_pct,
+                    'put_distance_pct': self.mvrv_drift_put_dist_pct,
+                    'vetoed': self.mvrv_drift_vetoed,
+                    'veto_reason': self.mvrv_drift_veto_reason,
+                },
+                'drift_window_days': self.drift_window_days,
+            }
+        }
 
 
 def compute_condor_strikes(
@@ -585,6 +628,32 @@ def compute_condor_strikes(
     call_dist = (short_call - spot) / spot * 100
     put_dist = (spot - short_put) / spot * 100
 
+    # --- Labeled strike variants (both kept; see CondorStrikeResult) ---
+    # spot_driven = fixed spot ±10% band.
+    spot_driven_call_dist = (spot_call - spot) / spot * 100
+    spot_driven_put_dist = (spot - spot_put) / spot * 100
+
+    # mvrv_drift_driven = the MVRV projection. Short strikes are always OTM by
+    # 1.5*drift/mvrv on each side. Veto when that distance is too thin.
+    mvrv_call_dist = (call_mvrv - spot) / spot * 100
+    mvrv_put_dist = (spot - put_mvrv) / spot * 100
+    min_dist_pct = CONDOR_MVRV_MIN_DISTANCE_PCT * 100
+    if mvrv_call_dist < min_dist_pct or mvrv_put_dist < min_dist_pct:
+        mvrv_drift_vetoed = True
+        mvrv_drift_veto_reason = (
+            f"thin drift: mvrv strikes within {CONDOR_MVRV_MIN_DISTANCE_PCT:.0%} of spot "
+            f"(call +{mvrv_call_dist:.1f}%, put -{mvrv_put_dist:.1f}%)"
+        )
+        mvrv_drift_call = mvrv_drift_put = None
+        mvrv_drift_call_dist = mvrv_drift_put_dist = None
+    else:
+        mvrv_drift_vetoed = False
+        mvrv_drift_veto_reason = None
+        mvrv_drift_call = round(call_mvrv, 2)
+        mvrv_drift_put = round(put_mvrv, 2)
+        mvrv_drift_call_dist = round(mvrv_call_dist, 2)
+        mvrv_drift_put_dist = round(mvrv_put_dist, 2)
+
     return CondorStrikeResult(
         short_call=round(short_call, 2),
         short_put=round(short_put, 2),
@@ -598,6 +667,17 @@ def compute_condor_strikes(
         mvrv_drift=round(drift, 4),
         mvrv_ceiling=round(mvrv_ceiling, 4),
         mvrv_floor=round(mvrv_floor, 4),
+        spot_driven_call=round(spot_call, 2),
+        spot_driven_put=round(spot_put, 2),
+        spot_driven_call_dist_pct=round(spot_driven_call_dist, 2),
+        spot_driven_put_dist_pct=round(spot_driven_put_dist, 2),
+        mvrv_drift_call=mvrv_drift_call,
+        mvrv_drift_put=mvrv_drift_put,
+        mvrv_drift_call_dist_pct=mvrv_drift_call_dist,
+        mvrv_drift_put_dist_pct=mvrv_drift_put_dist,
+        mvrv_drift_vetoed=mvrv_drift_vetoed,
+        mvrv_drift_veto_reason=mvrv_drift_veto_reason,
+        drift_window_days=CONDOR_TRAILING_DAYS,
     )
 
 

@@ -808,6 +808,7 @@ class Command(BaseCommand):
                 "cost_basis": condor_strikes.cost_basis if condor_strikes else None,
                 "mvrv_60d": condor_strikes.mvrv_60d if condor_strikes else None,
                 "mvrv_drift": condor_strikes.mvrv_drift if condor_strikes else None,
+                "strike_variants": condor_strikes.variants_meta()["strike_variants"] if condor_strikes else None,
             } if condor_strikes else None,
             
             "risk_reward": {
@@ -1236,8 +1237,10 @@ class Command(BaseCommand):
         if not mvrv_60d:
             return None
         
-        # Get trailing MVRV for drift calculation
+        # Get trailing MVRV for drift calculation (as-of the signal date, to
+        # match the live decision path in signals/services.py — no lookahead).
         trailing_qs = RawDailyData.objects.filter(
+            date__lte=signal_date,
             mvrv_usd_60d__isnull=False,
         ).order_by('-date')[:CONDOR_TRAILING_DAYS]
         trailing_mvrv = [r.mvrv_usd_60d for r in trailing_qs]

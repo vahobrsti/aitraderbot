@@ -423,6 +423,7 @@ class SignalService:
                 'mvrv_ceiling': condor_strikes.mvrv_ceiling,
                 'mvrv_floor': condor_strikes.mvrv_floor,
                 'spot': condor_strikes.spot,
+                **condor_strikes.variants_meta(),
             } if condor_strikes else {},
         )
 
@@ -1007,6 +1008,7 @@ class SignalService:
                     'mvrv_ceiling': condor_strikes.mvrv_ceiling,
                     'mvrv_floor': condor_strikes.mvrv_floor,
                     'spot': condor_strikes.spot,
+                    **condor_strikes.variants_meta(),
                 } if condor_strikes and trade_decision == "IRON_CONDOR" else {},
             )
 
