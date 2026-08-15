@@ -171,6 +171,23 @@ Data-driven policy calibrated from path analysis (`analyze_path_stats`):
 - **Spread Width** = MFE p75 × 0.65-0.70
 - **Stop Loss** = MAE(winners) p75 + buffer
 
+### Iron Condor Variants
+
+When the range gate fires, the condor is offered as **up to three credit-gated
+variants** so the trader picks which to place (min 0, max 3 per day):
+
+| Variant | Short strikes | Credit floor |
+|---------|---------------|--------------|
+| 🔵 `delta_target` | Δ≈0.20, delta-ranked (`select_condor_structure`) | 15% of wing |
+| 🟢 `spot_driven` | spot ±10% | 10% of wing |
+| 🟡 `mvrv_drift_driven` | `mvrv ± 1.5 × drift` (14d lookback) | 10% of wing |
+
+Any variant below its credit floor is vetoed; `mvrv_drift_driven` is also dropped
+when thin drift puts a short strike within 5% of spot. Each surviving variant is
+shown with short-leg delta + R:R, persisted in one `TradeSetupSnapshot`, and sent
+to Telegram. Auto paper-trade/execution is disabled for condors — the trader
+chooses. See [Iron Condor Spec](docs/iron_condor_spec.md).
+
 ### Path-Aware Entry Strategy
 
 Signals with high shakeout rates (≥40%) use DCA entry:

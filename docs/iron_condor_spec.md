@@ -103,13 +103,48 @@ Instead of fixed ±10% wings from spot, the system uses **trailing MVRV-60d drif
 
 ```
 cost_basis = spot / mvrv_60d
-drift = max(mvrv_60d over trailing 7d) - min(mvrv_60d over trailing 7d)
+drift = max(mvrv_60d over trailing 14d) - min(mvrv_60d over trailing 14d)
 
 short_call = max(spot × 1.10, cost_basis × (mvrv_60d + 1.5 × drift))
 short_put  = min(spot × 0.90, cost_basis × (mvrv_60d - 1.5 × drift))
 ```
 
-On each side, the wider of spot-based and MVRV-drift-based levels is used.
+`short_call` / `short_put` above are the legacy "take the wider" values, still
+stored on the signal (`condor_short_call/put`) as the execution ranking hint.
+The drift lookback window is **14 days** (widened from 7).
+
+### Strike Variants (decision layer)
+
+Rather than collapse to a single "wider" pick, `compute_condor_strikes()` now
+also emits two **labeled strike variants** so a low-drift day no longer discards
+the tighter, richer-premium MVRV strikes:
+
+| Variant | Short strikes | Character |
+|---------|---------------|-----------|
+| `spot_driven` | spot ±10% | wide band, lower risk, thinner premium |
+| `mvrv_drift_driven` | `mvrv ± 1.5 × drift` | tighter, richer premium |
+
+The `mvrv_drift_driven` variant is **vetoed** (nulled) when thin drift pushes a
+short strike within `CONDOR_MVRV_MIN_DISTANCE_PCT` (5%) of spot — near-ATM shorts
+carry unacceptable breach risk. Both variants are persisted in
+`condor_strike_meta.strike_variants`.
+
+### Offered Setups (three-way, credit-gated)
+
+At setup/notification time `TradeSetupBuilder.build_condor_variants()` constructs
+up to **three** condors against the real chain so the trader picks one:
+
+| Variant | Strike source | Credit floor |
+|---------|---------------|--------------|
+| 🔵 `delta_target` | `select_condor_structure` (Δ≈0.20 ranked) | **15%** (`min_credit_pct`) |
+| 🟢 `spot_driven` | anchored to spot ±10% targets | **10%** (`variant_min_credit_pct`) |
+| 🟡 `mvrv_drift_driven` | anchored to MVRV-drift targets | **10%** |
+
+Any variant whose credit falls below its floor is vetoed (not offered/persisted).
+So a day yields **0–3** condors. `delta_target` remains the credit-gated (15%)
+selection used by live execution; `spot_driven`/`mvrv_drift_driven` are anchored
+to their targets and shown with short-leg delta + R:R for manual selection.
+Auto paper-trade/execution is disabled for condors — the trader chooses.
 
 ### Why It Works
 
@@ -147,15 +182,21 @@ Computed on every signal (not just IRON_CONDOR) for diagnostics:
 | `condor_short_call` | float | Short call level = max(spot×1.10, CB×(mvrv+1.5×drift)) |
 | `condor_short_put` | float | Short put level = min(spot×0.90, CB×(mvrv-1.5×drift)) |
 | `condor_cost_basis` | float | MVRV-60d implied cost basis (spot / mvrv_60d) |
-| `condor_strike_meta` | JSON | Sources, distances, drift, ceiling/floor projections |
+| `condor_strike_meta` | JSON | Sources, distances, drift, ceiling/floor + `strike_variants` (spot_driven / mvrv_drift_driven targets, veto flags) |
+
+Constructed condor variants are persisted in a single `TradeSetupSnapshot`
+(`setup_data.condor_variants`, same pattern as income-spread setups).
 
 ### Files
 
 | File | Role |
 |------|------|
-| `signals/options.py` | `compute_condor_strikes()` — drift logic + `CondorStrikeResult` dataclass |
-| `signals/services.py` | Passes trailing MVRV data, stores strikes in `SignalResult` |
+| `signals/options.py` | `compute_condor_strikes()` — drift logic, `CondorStrikeResult` + labeled variants (`variants_meta()`) |
+| `signals/services.py` | Passes trailing MVRV data, stores strikes + variants in `SignalResult` |
 | `signals/models.py` | `condor_short_call`, `condor_short_put`, `condor_cost_basis`, `condor_strike_meta` |
+| `execution/services/trade_setup.py` | `select_condor_structure()` (delta/credit-gated), `select_condor_at_targets()` (anchored), `build_condor_variants()` / `save_condor_variants()` |
+| `execution/services/policy.py` | `CondorConfig.min_credit_pct` (15%), `variant_min_credit_pct` (10%), delta band, wing offset |
+| `notifications/notifier.py` | `_format_condor_variants_message()` — renders the offered variants |
 | `signals/migrations/0009_add_condor_strike_fields.py` | DB migration |
 
 ## Execution Realism
