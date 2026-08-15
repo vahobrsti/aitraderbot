@@ -334,6 +334,51 @@ class TelegramNotifier:
         message = self._format_income_spread_message(signal_date, signal_type, score, setups)
         return asyncio.run(self._send_async(message))
 
+    def _format_condor_variants_message(self, signal_date: str, variants: list) -> str:
+        """Format the iron condor decision variants (delta / spot / mvrv) with
+        short-leg delta and R:R so the trader can choose which to place."""
+        lines = [
+            "🟡 `IRON_CONDOR` Signal",
+            f"📅 {signal_date}",
+            f"*Variants offered:* {len(variants)}",
+            "",
+        ]
+        tier_emojis = {"delta": "🔵", "low": "🟢", "medium": "🟡", "high": "🔴"}
+        label_names = {
+            "delta_target": "DELTA-TARGET",
+            "spot_driven": "SPOT-DRIVEN (±10%)",
+            "mvrv_drift_driven": "MVRV-DRIFT",
+        }
+
+        def _delta_str(leg):
+            d = leg.get("delta")
+            return f"Δ{d:.2f}" if d is not None else "Δn/a"
+
+        for v in variants:
+            emoji = tier_emojis.get(v.get("risk_tier", ""), "❓")
+            name = label_names.get(v.get("label"), str(v.get("label", "")).upper())
+            gate = "" if v.get("credit_qualified", True) else " ⚠ below credit gate"
+            sc, sp = v["short_call"], v["short_put"]
+            lines.append(f"{emoji} *{name}*{gate}")
+            lines.append(
+                f"  Short Call: `${sc['strike']:,.0f}` "
+                f"({_delta_str(sc)}, {sc['otm_pct']*100:.1f}% OTM)"
+            )
+            lines.append(
+                f"  Short Put: `${sp['strike']:,.0f}` "
+                f"({_delta_str(sp)}, {sp['otm_pct']*100:.1f}% OTM)"
+            )
+            lines.append(
+                f"  Wings: `${v['long_call']['strike']:,.0f}` / `${v['long_put']['strike']:,.0f}`"
+            )
+            lines.append(
+                f"  Credit: `${v['net_credit']:,.2f}` "
+                f"({v['credit_pct']*100:.1f}% of wing) | R:R 1:{v['risk_reward']:.2f}"
+            )
+            lines.append(f"  DTE: {v['dte']}d")
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
     def send_from_model(self, daily_signal, include_setup: bool = True) -> bool:
         """
         Send notification from DailySignal model instance.
@@ -418,6 +463,17 @@ class TelegramNotifier:
                             signal_type=daily_signal.trade_decision,
                             score=daily_signal.income_spread_score,
                             setups=setups,
+                        ))
+                elif daily_signal.trade_decision == "IRON_CONDOR":
+                    # Iron condor: present all decision variants (delta / spot /
+                    # mvrv), each credit-labeled, so the trader picks which to place.
+                    from execution.services.trade_setup import TradeSetupBuilder
+                    builder = TradeSetupBuilder()
+                    variants = builder.build_condor_variants(daily_signal.date)
+                    if variants:
+                        builder.save_condor_variants(daily_signal, variants)
+                        parts.append(self._format_condor_variants_message(
+                            str(daily_signal.date), variants,
                         ))
                 else:
                     from execution.services.trade_setup import TradeSetupBuilder

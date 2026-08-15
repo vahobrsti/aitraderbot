@@ -182,6 +182,27 @@ class Command(BaseCommand):
                     "  ⚠ Income gate produced no tradable spreads for this date.\n"
                     "    (regime may be eligible, but no chain setup passed the filters)"
                 ))
+        elif target_result.trade_decision == "IRON_CONDOR":
+            # Iron condor: build all decision variants (delta / spot / mvrv) so
+            # the trader picks one. No single setup is auto-selected.
+            from execution.services.trade_setup import TradeSetupBuilder
+            builder = TradeSetupBuilder()
+            condor_variants = builder.build_condor_variants(target_date)
+            if condor_variants:
+                setup_available = True
+                self._print_condor_variants(condor_variants)
+                if not dry_run and signal:
+                    try:
+                        builder.save_condor_variants(signal, condor_variants)
+                        self.stdout.write(self.style.SUCCESS(
+                            f"  ✓ {len(condor_variants)} condor variant(s) saved"
+                        ))
+                    except Exception as e:
+                        self.stdout.write(self.style.WARNING(f"  ⚠ Variant save failed: {e}"))
+            else:
+                self.stdout.write(self.style.WARNING(
+                    "  ⚠ No condor variant cleared the credit floor (or no option chain)."
+                ))
         else:
             setup = self._build_setup(target_date, target_result.trade_decision, verbose)
             if setup:
@@ -230,6 +251,10 @@ class Command(BaseCommand):
         elif target_result.trade_decision in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"):
             self.stdout.write(self.style.WARNING(
                 "  ⚠ Paper trade not supported for income spreads via this command."
+            ))
+        elif target_result.trade_decision == "IRON_CONDOR":
+            self.stdout.write(self.style.WARNING(
+                "  ⚠ Auto paper-trade disabled for condors — pick a variant to trade manually."
             ))
         elif not setup_available:
             self.stdout.write(self.style.WARNING(
@@ -423,6 +448,37 @@ class Command(BaseCommand):
             self.stdout.write(f"    Credit:     ${s['credit']:,.2f} ({s['credit_width_pct']*100:.1f}% of width)")
             self.stdout.write(f"    Max Loss:   ${s['max_loss']:,.2f}")
             self.stdout.write(f"    DTE:        {s['dte']}d | R:R: 1:{s['risk_reward']:.2f}")
+
+    def _print_condor_variants(self, variants: list):
+        """Print the iron condor decision variants with delta + R:R."""
+        tier_labels = {
+            "delta": "🔵 DELTA-TARGET",
+            "low": "🟢 LOW RISK (spot-driven ±10%)",
+            "medium": "🟡 MEDIUM RISK (mvrv-drift)",
+        }
+        self.stdout.write(f"  Variants offered: {len(variants)}")
+        for v in variants:
+            tier = tier_labels.get(v.get("risk_tier"), str(v.get("label", "")).upper())
+            gate = "" if v.get("credit_qualified", True) else "  ⚠ below credit gate"
+            sc, sp = v["short_call"], v["short_put"]
+            scd = f"{sc['delta']:.2f}" if sc.get("delta") is not None else "n/a"
+            spd = f"{sp['delta']:.2f}" if sp.get("delta") is not None else "n/a"
+            self.stdout.write(f"\n  {tier}{gate}")
+            self.stdout.write(
+                f"    Short Call: ${sc['strike']:,.0f} (Δ{scd}, {sc['otm_pct']*100:.1f}% OTM)"
+            )
+            self.stdout.write(
+                f"    Short Put:  ${sp['strike']:,.0f} (Δ{spd}, {sp['otm_pct']*100:.1f}% OTM)"
+            )
+            self.stdout.write(
+                f"    Wings:      ${v['long_call']['strike']:,.0f} / ${v['long_put']['strike']:,.0f}"
+            )
+            self.stdout.write(
+                f"    Credit:     ${v['net_credit']:,.2f} ({v['credit_pct']*100:.1f}% of wing)"
+            )
+            self.stdout.write(
+                f"    R:R:        1:{v['risk_reward']:.2f} | DTE: {v['dte']}d"
+            )
 
     def _send_notification(self, signal, setup_available: bool):
         """Send Telegram notification."""
