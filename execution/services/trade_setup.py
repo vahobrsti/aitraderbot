@@ -655,6 +655,93 @@ def select_condor_structure(
     return candidates[0]
 
 
+def select_condor_at_targets(
+    call_options,
+    put_options,
+    spot_price,
+    condor_cfg,
+    target_short_call,
+    target_short_put,
+    price_to_usd=1.0,
+):
+    """
+    Build an iron condor by anchoring the short strikes to explicit target prices.
+
+    Used for the ``spot_driven`` and ``mvrv_drift_driven`` decision variants,
+    where the strike location is dictated by the target (not the delta band).
+    Unlike ``select_condor_structure`` (delta-ranked + credit-gated), this picks
+    the OTM short strikes nearest to the targets, attaches protective wings at
+    ``wing_offset_usd``, and returns the structure regardless of credit — the
+    caller applies any credit floor. All four legs share one expiry.
+
+    Returns the best ``CondorCandidate`` (closest to the targets, then higher
+    credit, with a stable tiebreak), or None when no four-leg structure exists.
+    """
+    wing_offset = condor_cfg.wing_offset_usd
+
+    expiries = {}
+    for o in call_options:
+        expiries.setdefault(o.expiry, ([], []))[0].append(o)
+    for o in put_options:
+        expiries.setdefault(o.expiry, ([], []))[1].append(o)
+
+    candidates = []
+    for expiry, (calls, puts) in expiries.items():
+        sc_pool = [c for c in calls if float(c.strike) >= spot_price and c.bid is not None]
+        sp_pool = [p for p in puts if float(p.strike) <= spot_price and p.bid is not None]
+        if not sc_pool or not sp_pool:
+            continue
+
+        sc = min(sc_pool, key=lambda c: abs(float(c.strike) - target_short_call))
+        sp = min(sp_pool, key=lambda p: abs(float(p.strike) - target_short_put))
+
+        lc = min(
+            [c for c in calls if float(c.strike) > float(sc.strike) and c.ask is not None],
+            key=lambda x: abs(float(x.strike) - (float(sc.strike) + wing_offset)),
+            default=None,
+        )
+        lp = min(
+            [p for p in puts if float(p.strike) < float(sp.strike) and p.ask is not None],
+            key=lambda x: abs(float(x.strike) - (float(sp.strike) - wing_offset)),
+            default=None,
+        )
+        if lc is None or lp is None:
+            continue
+
+        net_credit = (
+            float(sc.bid) + float(sp.bid) - float(lc.ask) - float(lp.ask)
+        ) * price_to_usd
+        call_wing_width = float(lc.strike) - float(sc.strike)
+        put_wing_width = float(sp.strike) - float(lp.strike)
+        wing_width = max(call_wing_width, put_wing_width)
+        if wing_width <= 0 or net_credit <= 0:
+            continue
+
+        target_dist = (
+            abs(float(sc.strike) - target_short_call)
+            + abs(float(sp.strike) - target_short_put)
+        )
+        candidates.append((
+            round(target_dist, 6),
+            CondorCandidate(
+                short_call=sc, long_call=lc, short_put=sp, long_put=lp,
+                net_credit=net_credit, wing_width=wing_width,
+                credit_pct=net_credit / wing_width,
+                credit_qualified=(net_credit / wing_width) >= condor_cfg.min_credit_pct,
+            ),
+        ))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda t: (
+        t[0],
+        -t[1].credit_pct,
+        (str(t[1].short_call.expiry), float(t[1].short_call.strike), float(t[1].short_put.strike)),
+    ))
+    return candidates[0][1]
+
+
 class TradeSetupBuilder:
     """
     Builds complete trade setups from signals and option data.
@@ -666,10 +753,176 @@ class TradeSetupBuilder:
     - Validation (risk checks, liquidity stress)
     """
     
+    # Decision-variant → display risk tier.
+    CONDOR_VARIANT_TIERS = {
+        "delta_target": "delta",
+        "spot_driven": "low",
+        "mvrv_drift_driven": "medium",
+    }
+
     def __init__(self, policy: Optional[PolicyVersion] = None):
         self.policy = policy or get_policy()
         self.validator = TradeValidator(policy=self.policy)
-    
+
+    def _condor_variant_dict(self, cand, label, spot_price, exit_cfg, risk_budget, credit_floor):
+        """Package a CondorCandidate into a display/persistence variant dict."""
+        net_credit = cand.net_credit
+        wing_width = cand.wing_width
+        max_profit = net_credit
+        max_loss = wing_width - net_credit
+        if max_loss <= 0 or max_profit <= 0:
+            return None
+        rr = max_profit / max_loss
+        contracts = int(risk_budget / max_loss) if max_loss > 0 else 1
+        if contracts < 1:
+            contracts = 1
+        sc, sp, lc, lp = cand.short_call, cand.short_put, cand.long_call, cand.long_put
+        return {
+            "label": label,
+            "risk_tier": self.CONDOR_VARIANT_TIERS.get(label, label),
+            "spot_price": spot_price,
+            "dte": int(sc.dte) if sc.dte else None,
+            "expiry": sc.expiry.strftime("%Y-%m-%d") if sc.expiry else None,
+            "short_call": {
+                "symbol": sc.symbol, "strike": float(sc.strike),
+                "delta": float(sc.delta) if sc.delta is not None else None,
+                "otm_pct": (float(sc.strike) - spot_price) / spot_price,
+            },
+            "short_put": {
+                "symbol": sp.symbol, "strike": float(sp.strike),
+                "delta": float(sp.delta) if sp.delta is not None else None,
+                "otm_pct": (spot_price - float(sp.strike)) / spot_price,
+            },
+            "long_call": {"symbol": lc.symbol, "strike": float(lc.strike)},
+            "long_put": {"symbol": lp.symbol, "strike": float(lp.strike)},
+            "wing_width": wing_width,
+            "net_credit": net_credit,
+            "credit_pct": cand.credit_pct,
+            "credit_qualified": cand.credit_pct >= credit_floor,
+            "credit_floor": credit_floor,
+            "max_profit": max_profit,
+            "max_loss": max_loss,
+            "risk_reward": rr,
+            "contracts": contracts,
+        }
+
+    def build_condor_variants(self, signal_date: date) -> list[dict]:
+        """
+        Build the decision-layer condor variants for a signal date so the trader
+        can pick which to place:
+
+          - delta_target      : select_condor_structure (unchanged; 15% credit gate)
+          - spot_driven        : anchored to spot ±10% targets
+          - mvrv_drift_driven  : anchored to MVRV-drift targets
+
+        spot_driven / mvrv_drift_driven are vetoed (omitted) when their credit is
+        below condor_cfg.variant_min_credit_pct (10%). mvrv_drift_driven is also
+        skipped when the decision-layer thin-drift veto nulled its targets.
+
+        Returns a list of variant dicts (strikes, short-leg deltas, credit, R:R).
+        Empty when there is no signal / no option chain.
+        """
+        dte_cfg = self.policy.get_dte_target("IRON_CONDOR")
+        condor_cfg = self.policy.condor
+        exit_cfg = self.policy.get_exit_params("IRON_CONDOR")
+        tier = self.policy.get_tier("IRON_CONDOR")
+        risk_budget = tier.risk_usd * tier.spread_pct
+
+        signal = DailySignal.active().filter(
+            date=signal_date, trade_decision="IRON_CONDOR"
+        ).first()
+        if signal is None:
+            signal = DailySignal.active().filter(date=signal_date).first()
+        meta = (signal.condor_strike_meta or {}) if signal else {}
+        variants_meta = meta.get("strike_variants", {})
+
+        dte_band = self._resolve_dte_band(signal_date, dte_cfg, option_type=None)
+        if dte_band is None:
+            return []
+        dte_lo, dte_hi = dte_band
+        latest_ts = OptionSnapshot.objects.filter(
+            timestamp__date=signal_date, dte__gte=dte_lo, dte__lte=dte_hi,
+        ).aggregate(Max("timestamp"))["timestamp__max"]
+        if not latest_ts:
+            return []
+        call_options = list(OptionSnapshot.objects.filter(
+            timestamp=latest_ts, option_type="call", dte__gte=dte_lo, dte__lte=dte_hi,
+        ))
+        put_options = list(OptionSnapshot.objects.filter(
+            timestamp=latest_ts, option_type="put", dte__gte=dte_lo, dte__lte=dte_hi,
+        ))
+        if not call_options or not put_options:
+            return []
+        first = OptionSnapshot.objects.filter(timestamp=latest_ts).first()
+        spot_price = float(first.spot_price)
+
+        variants = []
+
+        # 1) delta_target — unchanged selector + 15% gate (kept as-is).
+        delta_target = abs(self.policy.get_signal_delta("IRON_CONDOR"))
+        cand = select_condor_structure(
+            call_options, put_options, spot_price, condor_cfg, delta_target,
+            mvrv_short_call=(signal.condor_short_call if signal else None),
+            mvrv_short_put=(signal.condor_short_put if signal else None),
+        )
+        if cand is not None:
+            v = self._condor_variant_dict(
+                cand, "delta_target", spot_price, exit_cfg, risk_budget,
+                credit_floor=condor_cfg.min_credit_pct,
+            )
+            if v:
+                variants.append(v)
+
+        # 2) spot_driven / 3) mvrv_drift_driven — anchored to targets, vetoed
+        #    when credit is below the variant floor.
+        for label in ("spot_driven", "mvrv_drift_driven"):
+            vm = variants_meta.get(label) or {}
+            if label == "mvrv_drift_driven" and vm.get("vetoed"):
+                continue
+            tc, tp = vm.get("short_call"), vm.get("short_put")
+            if not tc or not tp:
+                continue
+            c = select_condor_at_targets(
+                call_options, put_options, spot_price, condor_cfg, tc, tp,
+            )
+            if c is None or c.credit_pct < condor_cfg.variant_min_credit_pct:
+                continue
+            v = self._condor_variant_dict(
+                c, label, spot_price, exit_cfg, risk_budget,
+                credit_floor=condor_cfg.variant_min_credit_pct,
+            )
+            if v:
+                variants.append(v)
+
+        return variants
+
+    def save_condor_variants(self, signal, variants: list[dict]):
+        """Persist all condor variants in a single TradeSetupSnapshot."""
+        from execution.models import TradeSetupSnapshot
+        if not variants:
+            return None
+        primary = variants[0]
+        snap, _ = TradeSetupSnapshot.objects.update_or_create(
+            signal=signal,
+            defaults={
+                "setup_data": {
+                    "signal_type": "IRON_CONDOR",
+                    "direction": "NEUTRAL",
+                    "condor_variants": variants,
+                },
+                "signal_date": signal.date,
+                "signal_type": "IRON_CONDOR",
+                "direction": "NEUTRAL",
+                "spot_price": primary.get("spot_price", 0),
+                "net_debit": -primary.get("net_credit", 0),
+                "max_profit": primary.get("max_profit", 0),
+                "max_loss": primary.get("max_loss", 0),
+                "contracts": primary.get("contracts", 1),
+                "validation_passed": True,
+            },
+        )
+        return snap
+
     def build_setup(
         self,
         signal_date: date,

@@ -109,7 +109,10 @@ class ExecutionCostConfig:
 class CondorConfig:
     """Iron condor specific configuration."""
     wing_offset_usd: float = 2000
-    min_credit_pct: float = 0.15  # Min credit as % of wing width
+    min_credit_pct: float = 0.15  # Min credit as % of wing width (delta-target gate)
+    # Floor for the spot_driven / mvrv_drift_driven decision variants: below this
+    # the premium isn't worth chasing, so the variant is vetoed (not shown).
+    variant_min_credit_pct: float = 0.10
     max_concurrent: int = 1
     drift_multiplier: float = 1.5
     spot_call_band: float = 0.10  # fallback only — no longer the primary selector
