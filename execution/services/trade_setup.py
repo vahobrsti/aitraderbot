@@ -865,7 +865,10 @@ class TradeSetupBuilder:
             mvrv_short_call=(signal.condor_short_call if signal else None),
             mvrv_short_put=(signal.condor_short_put if signal else None),
         )
-        if cand is not None:
+        # select_condor_structure returns the best *unqualified* candidate for
+        # diagnostics when nothing clears the gate — so honor the 15% credit
+        # gate here and veto a sub-minimum delta_target variant.
+        if cand is not None and cand.credit_qualified:
             v = self._condor_variant_dict(
                 cand, "delta_target", spot_price, exit_cfg, risk_budget,
                 credit_floor=condor_cfg.min_credit_pct,
