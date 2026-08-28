@@ -52,6 +52,24 @@ _MVRV_LS_COLS = [
 NEUTRAL_BAND = 0.5       # |oriented z| below this = 0 vote (matches "normal" label)
 DIRECTION_THRESHOLD = 2  # |score| below this (on the -7..+7 scale) = neutral
 
+# ── Per-factor weights for the weighted confluence score. ─────────────────────
+# Derived empirically via a joint OLS of the 7 per-factor votes on forward 14-day
+# BTC return (2016-2026); reproduce with the ``analyze_factor_weights`` command.
+# Rescaled so mean(|w|) = 1.0: the equal-weight baseline is 1.0 per factor, and
+# the weighted score keeps the same +/- sum(|w|) bounds (~ -7..+7) as the plain
+# vote-sum score. Sign carries meaning: a negative weight means the factor's
+# bullish orientation is empirically inverted at the 14d horizon (momentum beats
+# mean-reversion), so its "bullish" vote is treated as mildly bearish for price.
+FACTOR_WEIGHTS = {
+    "mvrv_60d": 0.407,
+    "sentiment": -0.269,
+    "exchange_flow": 1.397,
+    "mvrv_composite": -0.865,
+    "mdia": 1.493,
+    "whale": 2.551,
+    "mvrv_ls": 0.017,
+}
+
 
 def classify_z_position(z) -> str:
     """Map a z-score to a plain-language position vs its 90-day baseline."""
@@ -178,6 +196,16 @@ def compute_engine_score(normalized: dict, fusion_components: dict) -> dict:
     value = sum(votes.values())
     active = sum(1 for v in votes.values() if v != 0)
 
+    # Weighted confluence score: same votes, but each scaled by FACTOR_WEIGHTS.
+    # Bounds are +/- sum(|w|) (~ -7..+7), hit when every factor votes in the
+    # direction of its weight's sign.
+    contributions = {
+        name: round(FACTOR_WEIGHTS.get(name, 1.0) * v, 4)
+        for name, v in votes.items()
+    }
+    weighted_value = sum(contributions.values())
+    weighted_max = sum(abs(w) for w in FACTOR_WEIGHTS.values())
+
     if value >= DIRECTION_THRESHOLD:
         direction = "bullish"
     elif value <= -DIRECTION_THRESHOLD:
@@ -190,6 +218,11 @@ def compute_engine_score(normalized: dict, fusion_components: dict) -> dict:
         "direction": direction,
         "active": active,
         "votes": votes,
+        "weighted_value": round(weighted_value, 2),
+        "weighted_min": round(-weighted_max, 2),
+        "weighted_max": round(weighted_max, 2),
+        "weights": dict(FACTOR_WEIGHTS),
+        "contributions": contributions,
     }
 
 
