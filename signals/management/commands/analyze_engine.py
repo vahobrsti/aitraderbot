@@ -15,6 +15,7 @@ from django.core.management.base import BaseCommand
 from signals.engine_metrics import (
     collect_essential_metrics,
     ensure_normalized_columns,
+    FACTOR_WEIGHTS,
 )
 
 
@@ -100,3 +101,15 @@ class Command(BaseCommand):
         )
         self.stdout.write("  metrics:  " + "  ".join(f"{k}={v[k]:+d}" for k in norm))
         self.stdout.write("  fusion:   " + "  ".join(f"{k}={v[k]:+d}" for k in fus))
+
+        c = s["contributions"]
+        self.stdout.write(
+            f"\nweighted engine score: {s['weighted_value']:+.2f}  "
+            f"(range {s['weighted_min']:+.2f}..{s['weighted_max']:+.2f})"
+        )
+        self.stdout.write(
+            "  weights:  " + "  ".join(f"{k}={FACTOR_WEIGHTS[k]:+.2f}" for k in norm + fus)
+        )
+        self.stdout.write(
+            "  contrib:  " + "  ".join(f"{k}={c[k]:+.2f}" for k in norm + fus)
+        )
